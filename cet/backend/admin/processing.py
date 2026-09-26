@@ -341,7 +341,7 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
                       (family,program_name)).fetchone()
     if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
     pid=prog["program_id"]
-    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,base,int(bool(ladies)),
+    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,base,bool(ladies),
           section,stage,None,rank_number,suffix,pct,str(raw.get("category","")).strip(),
           program_name,source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
     cur=conn.execute("""INSERT INTO cutoffs
@@ -373,7 +373,7 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     gender=str(raw.get("gender","")).strip()
     is_ladies={"G":False,"L":True}.get(gender) if gender else None
     vals=(int(job["year"]),job["course_family"],inst,str(raw.get("choice_code","")).strip(),
-          lane,base,int(total),is_ladies,int(raw["seats"]),cat,lane_raw,gender,
+          lane,base,total,is_ladies,int(raw["seats"]),cat,lane_raw,gender,
           source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
     cur=conn.execute("""INSERT INTO seats
         (capture_year,program_family,institution_code,choice_code,allocation_lane,base_category,
