@@ -1,6 +1,6 @@
 import os,uuid,json,time,re,secrets,logging,html
 from pathlib import Path
-from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form
+from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
 from .admin.db import connect,init_admin_schema,event
@@ -379,8 +379,37 @@ def upload(request: Request, file: UploadFile = File(...)):
         raise
 
 
+def _process_import_background(job_id: int):
+    """Run import processing outside the request so Live Processing can poll it."""
+    with connect() as connection:
+        job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            return
+        try:
+            result = process_import(
+                connection,
+                job_id,
+                BASE / job['stored_path'],
+                data_type=job['data_type'],
+                family=job['course_family'],
+                year=int(job['year']),
+                round_name=job['round'],
+                claimed=True,
+            )
+            if not result.get('ok'):
+                log.error('Background import processing failed: job_id=%s error=%s', job_id, result.get('error'))
+        except Exception:
+            log.exception('Unexpected background import processing failure: job_id=%s', job_id)
+            connection.rollback()
+            connection.execute(
+                "UPDATE import_jobs SET status='FAILED',error_message='Processing failed; see server logs',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            connection.commit()
+
+
 @app.post('/admin/api/imports/{job_id}/process')
-def process_job(request: Request, job_id: int):
+def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
         job = connection.execute(
@@ -409,28 +438,11 @@ def process_job(request: Request, job_id: int):
             raise HTTPException(409, 'Import is already being processed')
         connection.commit()
 
-        try:
-            result = process_import(
-                connection,
-                job_id,
-                path,
-                data_type=job['data_type'],
-                family=job['course_family'],
-                year=int(job['year']),
-                round_name=job['round'],
-                claimed=True,
-            )
-        except Exception:
-            connection.execute(
-                "UPDATE import_jobs SET status='FAILED',error_message='Processing failed',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (job_id,),
-            )
-            connection.commit()
-            raise HTTPException(500, 'Import processing failed; see the job timeline for details')
-
-        if not result['ok']:
-            raise HTTPException(500, 'Import processing failed; see the job timeline for details')
-        return result
+        background_tasks.add_task(_process_import_background, job_id)
+        return JSONResponse(
+            status_code=202,
+            content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
+        )
 
 
 @app.get('/admin/api/imports')
