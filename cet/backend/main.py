@@ -534,6 +534,15 @@ def live(request: Request, job_id: int):
     require(request)
     return live_processing(job_id)
 
+@app.get('/admin/processing', response_class=HTMLResponse)
+def processing_page(request: Request):
+    require(request)
+    with connect() as c:
+        row = c.execute("SELECT id FROM import_jobs WHERE status IN ('RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING') ORDER BY id DESC LIMIT 1").fetchone()
+    if row:
+        return live_processing(int(row['id']))
+    return RedirectResponse('/admin/imports', status_code=303)
+
 @app.get('/admin/review', response_class=HTMLResponse)
 def review_center_page(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
