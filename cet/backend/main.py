@@ -435,7 +435,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         ).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
-        if job['status'] != JobStatus.REVIEW_REQUIRED.value:
+        if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value}:
             raise HTTPException(409, f'Import is not ready for processing: {job["status"]}')
         if not job['data_type'] or not job['course_family'] or not job['year'] or not job['round']:
             raise HTTPException(
@@ -448,7 +448,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             raise HTTPException(404, 'Stored source PDF is missing')
 
         claimed = connection.execute(
-            "UPDATE import_jobs SET status='EXTRACTING',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='REVIEW_REQUIRED'",
+            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('REVIEW_REQUIRED','FAILED')",
             (job_id,),
         ).rowcount
         if not claimed:
