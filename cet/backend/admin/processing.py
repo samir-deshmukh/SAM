@@ -43,11 +43,21 @@ def _page_from(row: dict):
     return int(v) if v.isdigit() else None
 
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
-               valid: bool, validation_message: str) -> int:
+               valid: bool, validation_message: str, required_fields=()) -> tuple[int, int]:
     rows = 0
+    quarantined = 0
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             raw = dict(row)
+            missing = [field for field in required_fields if not str(row.get(field, "")).strip()]
+            row_valid = valid and not missing
+            if not row_valid:
+                quarantined += 1
+            message = None
+            if not valid:
+                message = validation_message[-4000:]
+            elif missing:
+                message = "Missing required field(s): " + ", ".join(missing)
             conn.execute(
                 """INSERT INTO import_staging_records
                    (job_id,result_type,source_file,source_page,raw_json,
@@ -56,11 +66,11 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                 (job_id, result_type, path.name, _page_from(row),
                  json.dumps(raw, ensure_ascii=False),
                  json.dumps(raw, ensure_ascii=False),
-                 "VALID" if valid else "REVIEW",
-                 None if valid else validation_message[-4000:])
+                 "VALID" if row_valid else "REVIEW",
+                 message)
             )
             rows += 1
-    return rows
+    return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
                    valid, extracted, staged, quarantined, summary):
@@ -210,12 +220,14 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             # normalized/cleaned CSV. Save its exact output as an audit artifact.
             (work / "validation.txt").write_text(validation, encoding="utf-8")
             quarantine = sum(1 for _ in rejects.glob("*.csv")) if rejects.exists() else 0
-            rows = _stage_csv(conn, job_id, "CUTOFFS", canonical, valid, validation)
+            rows, row_quarantine = _stage_csv(conn, job_id, "CUTOFFS", canonical, valid, validation,
+                                                ("institution_code", "program_name", "category", "section", "stage", "percentage"))
+            valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
             shutil.copy2(work / "validation.txt", staging / "validation.txt")
             _insert_result(conn, job_id, "CUTOFFS", extracted_path, canonical,
-                           valid, int(summary.get("merged_records", rows)), rows,
-                           quarantine, {"extractor": summary, "validation": validation[-12000:]})
+                           valid, int(summary.get("merged_records", rows)), rows - row_quarantine,
+                           quarantine + row_quarantine, {"extractor": summary, "validation": validation[-12000:]})
         else:
             mod = _load_module(SCRIPTS / "seat_matrix_extractor.py", "cet_seat_extractor")
             summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
@@ -233,11 +245,13 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             event(conn, job_id, "VALIDATE", "Running existing validate_seats.py gate", 78)
             valid, validation = _run_validator(SCRIPTS / "validate_seats.py", normalized)
             (work / "validation.txt").write_text(validation, encoding="utf-8")
-            rows = _stage_csv(conn, job_id, "SEATS", canonical, valid, validation)
+            rows, row_quarantine = _stage_csv(conn, job_id, "SEATS", canonical, valid, validation,
+                                                ("institution_code", "choice_code", "allocation_type", "category", "seats"))
+            valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
             shutil.copy2(work / "validation.txt", staging / "validation.txt")
             _insert_result(conn, job_id, "SEATS", extracted_path, canonical,
-                           valid, int(summary.get("seat_rows_extracted", rows)), rows, 0,
+                           valid, int(summary.get("seat_rows_extracted", rows)), rows - row_quarantine, row_quarantine,
                            {"extractor": summary, "validation": validation[-12000:]})
 
         update_status(conn, job_id, JobStatus.COMPARING.value, "Comparing staged rows with existing production data")
