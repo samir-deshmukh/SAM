@@ -105,11 +105,9 @@ class Connection:
             table = table_match.group(1).lower() if table_match else ""
             if table != "college_website_resolver" and "RETURNING" not in sql.upper() and "ON CONFLICT DO NOTHING" not in sql.upper():
                 sql = sql.rstrip().rstrip(";") + " RETURNING id"
-        elif re.search(r"INSERT\s+INTO", sql, flags=re.I) and "RETURNING" not in sql.upper():
-            table_match = re.search(r"INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", sql, flags=re.I)
-            table = table_match.group(1).lower() if table_match else ""
-            if table != "college_website_resolver":
-                sql = sql.rstrip().rstrip(";") + " RETURNING id"
+        # INSERT ... ON CONFLICT statements can target tables whose primary
+        # key is not named "id" (for example programs.program_id), so do not
+        # inject RETURNING id into them.
 
         converted, values = _convert_positional(sql, params)
         result = self._conn.execute(text(converted), values)
