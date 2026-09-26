@@ -405,6 +405,16 @@ def _process_import_background(job_id: int):
             )
             if not result.get('ok'):
                 log.error('Background import processing failed: job_id=%s error=%s', job_id, result.get('error'))
+            elif result.get('status') == JobStatus.STAGED.value:
+                # A clean import must not wait in Review Center. Validation has
+                # already passed, so promote it automatically; publishing remains
+                # a separate explicit release action.
+                approve_import(
+                    connection,
+                    job_id,
+                    int(job['created_by']),
+                    'Automatic approval: extraction, normalization, validation and comparison passed',
+                )
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
