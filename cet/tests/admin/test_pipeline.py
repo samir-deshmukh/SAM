@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from backend.admin.pipeline import MAX_PDF_BYTES, identify, security_check
+from backend.admin.processing import _resolve_cutoff_dimensions
 
 
 def test_identify_cutoff_and_seat_filenames():
@@ -47,3 +48,34 @@ def test_security_check_rejects_oversized_pdf(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="PDF exceeds"):
         security_check(path)
+
+
+def test_cutoff_dimension_fallbacks_match_validator_semantics():
+    # These are real states present in the trusted BCA_26_C3 artifact:
+    # section can be blank because the category suffix determines H/O/S,
+    # and stage can be blank and is canonically represented as Unknown.
+    assert _resolve_cutoff_dimensions({
+        "category": "MI",
+        "section": "",
+        "stage": "",
+    }) == ("MI", False, "SL", "Unknown")
+
+    assert _resolve_cutoff_dimensions({
+        "category": "GOPENH",
+        "section": "",
+        "stage": "Stage-I",
+    }) == ("OPEN", False, "HU", "Stage-I")
+
+    with pytest.raises(ValueError, match="Unknown section"):
+        _resolve_cutoff_dimensions({
+            "category": "GOPENH",
+            "section": "Not A Section",
+            "stage": "Stage-I",
+        })
+
+    with pytest.raises(ValueError, match="Unknown stage"):
+        _resolve_cutoff_dimensions({
+            "category": "GOPENH",
+            "section": "Home University Seats Allotted to Home University Candidates",
+            "stage": "Stage-XX",
+        })

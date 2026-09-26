@@ -43,7 +43,7 @@ def test_program_code_with_letter_suffix_is_parsed():
     assert meta['program_name'] == 'BCA'
 
 
-def test_bare_roman_stage_prefix_is_normalized_before_rank():
+def test_bare_roman_rank_layout_is_not_promoted_to_stage():
     lines = merge_split_rank_lines([
         'GOPENH LOPENH',
         'I 2414',
@@ -52,5 +52,5 @@ def test_bare_roman_stage_prefix_is_normalized_before_rank():
         '(75.3093618)',
     ])
     assert lines[0] == 'GOPENH LOPENH'
-    assert lines[1] == 'Stage-I 2414 (55.0372530)'
+    assert lines[1] == 'I 2414 (55.0372530)'
     assert lines[2] == '1047 (75.3093618)'

@@ -161,18 +161,6 @@ def merge_split_rank_lines(lines: List[str]) -> List[str]:
     while i < n:
         line = lines[i]
         if i + 1 < n and PERCENT_ONLY_RE.match(lines[i + 1]):
-            # Some newer CAP PDFs put a bare Roman stage marker immediately
-            # before the first rank (e.g. "I 2414"), while the word
-            # "Stage" is emitted later by the PDF text layer. Normalize that
-            # layout to the same "Stage-I 2414 (pct)" form used elsewhere.
-            stage_rank = re.match(r"^\s*(?P<roman>[IVXLCDM]{1,4})\s+(?P<rank>\d{1,6})\s*$", line, re.IGNORECASE)
-            if stage_rank:
-                merged.append(
-                    f"Stage-{stage_rank.group('roman').upper()} "
-                    f"{stage_rank.group('rank')} {lines[i + 1]}"
-                )
-                i += 2
-                continue
             if RANK_ONLY_RE.match(line) or re.search(r"\d[A-Za-z]?$", line):
                 merged.append(f"{line} {lines[i + 1]}")
                 i += 2
@@ -305,18 +293,13 @@ def parse_structured_page(
     lines: List[str],
     source: str,
     metadata: Dict[str, str],
-    initial_section: Optional[str] = None,
-    initial_stage: str = "",
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
-    # A PDF page can be a continuation of the previous page. In that case
-    # section/stage context must survive the page break; otherwise valid rows
-    # on continuation pages become blank required fields.
-    current_section: Optional[str] = initial_section
+    current_section: Optional[str] = None
     pending_categories: List[str] = []
     cat_cursor = 0
     categories_consumed = False
-    current_stage = initial_stage
+    current_stage = ""
 
     for line in lines:
         sec = detect_section(line)
@@ -586,20 +569,6 @@ def process_single_pdf(
 
     all_records_raw: List[Dict[str, Any]] = []
     page_audits: List[Dict[str, Any]] = []
-    # Institution/program/status are document-level metadata in these CAP PDFs.
-    # Some pages (especially continuation pages) omit the metadata header, so
-    # carry the last explicitly observed value forward instead of turning valid
-    # continuation rows into incomplete staged records.
-    document_metadata = {
-        "institution_code": "",
-        "institution_name": "",
-        "program_code": "",
-        "program_name": "",
-        "status": "",
-        "home_university": "",
-    }
-    carry_section: Optional[str] = None
-    carry_stage = ""
     camelot_all_tables: List[Dict] = []
     source_label = "native_text" if technique == "native" else "ocr"
 
@@ -615,24 +584,8 @@ def process_single_pdf(
                 text = ""
 
         lines = merge_split_rank_lines(normalize_lines(text))
-        page_metadata = extract_metadata(lines)
-        continuation_page = not bool(page_metadata.get("institution_code"))
-        for key, value in page_metadata.items():
-            if value:
-                document_metadata[key] = value
-        if not continuation_page:
-            # A new institution/program block starts on this page, so do not
-            # leak section/stage context from the preceding institution.
-            carry_section = None
-            carry_stage = ""
-        records = parse_structured_page(
-            pnum, lines, source_label, document_metadata,
-            initial_section=carry_section if continuation_page else None,
-            initial_stage=carry_stage if continuation_page else "",
-        )
-        if records:
-            carry_section = records[-1].get("section") or carry_section
-            carry_stage = records[-1].get("stage") or carry_stage
+        metadata = extract_metadata(lines)
+        records = parse_structured_page(pnum, lines, source_label, metadata)
         for r in records:
             r["source_pdf"] = pdf_path.name
 
@@ -641,7 +594,7 @@ def process_single_pdf(
             tables = run_camelot_on_page(pdf_path, pnum)
             if tables:
                 camelot_all_tables.extend(tables)
-                records_camelot = camelot_to_records(tables, document_metadata, pnum)
+                records_camelot = camelot_to_records(tables, metadata, pnum)
                 for r in records_camelot:
                     r["source_pdf"] = pdf_path.name
 

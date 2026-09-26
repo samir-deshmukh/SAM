@@ -42,14 +42,66 @@ def _page_from(row: dict):
     v = str(row.get("page", "")).strip()
     return int(v) if v.isdigit() else None
 
+def _resolve_cutoff_dimensions(raw: dict):
+    """Resolve cutoff category/section/stage without inventing source context.
+
+    The trusted validator deliberately accepts a blank section (the category
+    suffix already encodes H/O/S) and maps a blank stage to the explicit
+    canonical value Unknown. The import path must use the same semantics;
+    otherwise a historically clean PDF can be quarantined merely because a
+    table's merged/visually inherited cell is blank in the CSV.
+    """
+    from scripts.validate_data import SECTION_MAP, STAGE_MAP, parse_category
+
+    category = str(raw.get("category", "")).strip()
+    base, ladies, derived_section = parse_category(category)
+    if base is None:
+        raise ValueError(f"Unknown category: {category!r}")
+
+    section_raw = str(raw.get("section", "")).strip()
+    if section_raw:
+        section = SECTION_MAP.get(section_raw)
+        if section is None:
+            raise ValueError(f"Unknown section: {section_raw!r}")
+    else:
+        section = derived_section
+    if section is None:
+        raise ValueError(f"Unable to resolve section for category: {category!r}")
+
+    stage_raw = str(raw.get("stage", "")).strip()
+    if stage_raw:
+        stage = STAGE_MAP.get(stage_raw)
+        if stage is None:
+            raise ValueError(f"Unknown stage: {stage_raw!r}")
+    else:
+        stage = STAGE_MAP[""]
+
+    return base, ladies, section, stage
+
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                valid: bool, validation_message: str, required_fields=()) -> tuple[int, int]:
     rows = 0
     quarantined = 0
+    # The trusted validator treats these columns as block-level merged cells:
+    # a blank value means "same as the preceding row". Apply the same
+    # normalization before staging so continuation pages do not become false
+    # missing-field errors, while preserving the original row in raw_json.
+    fill_columns = (
+        "institution_code", "institution_name", "program_code",
+        "program_name", "status", "section",
+    )
+    last_values = {field: "" for field in fill_columns}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             raw = dict(row)
-            missing = [field for field in required_fields if not str(row.get(field, "")).strip()]
+            normalized = dict(row)
+            for field in fill_columns:
+                value = str(normalized.get(field, "")).strip()
+                if value:
+                    last_values[field] = value
+                elif last_values[field]:
+                    normalized[field] = last_values[field]
+            missing = [field for field in required_fields if not str(normalized.get(field, "")).strip()]
             row_valid = valid and not missing
             if not row_valid:
                 quarantined += 1
@@ -63,9 +115,9 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                    (job_id,result_type,source_file,source_page,raw_json,
                     normalized_json,validation_status,validation_message)
                    VALUES (?,?,?,?,?,?,?,?)""",
-                (job_id, result_type, path.name, _page_from(row),
+                (job_id, result_type, path.name, _page_from(normalized),
                  json.dumps(raw, ensure_ascii=False),
-                 json.dumps(raw, ensure_ascii=False),
+                 json.dumps(normalized, ensure_ascii=False),
                  "VALID" if row_valid else "REVIEW",
                  message)
             )
@@ -114,9 +166,7 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
     changed_examples = []
     duplicate_in_stage = 0
     for _, row in df.iterrows():
-        base, ladies, _ = parse_category(row["category"].strip())
-        section = SECTION_MAP.get(row["section"].strip())
-        stage = STAGE_MAP.get(row["stage"].strip())
+        base, ladies, section, stage = _resolve_cutoff_dimensions(row)
         rs = row["rank_suffix"].strip() or None
         rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
         pct = float(row["percentage"]) if row["percentage"].strip() else None
@@ -220,8 +270,15 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             # normalized/cleaned CSV. Save its exact output as an audit artifact.
             (work / "validation.txt").write_text(validation, encoding="utf-8")
             quarantine = sum(1 for _ in rejects.glob("*.csv")) if rejects.exists() else 0
-            rows, row_quarantine = _stage_csv(conn, job_id, "CUTOFFS", canonical, valid, validation,
-                                                ("institution_code", "program_name", "category", "section", "stage", "percentage"))
+            # Section/stage blanks are valid source states: the shared
+            # validator maps blank stage -> Unknown and category suffixes
+            # deterministically supply section when the visual cell is blank.
+            # Only fields that cannot be reconstructed without guessing are
+            # required at row level.
+            rows, row_quarantine = _stage_csv(
+                conn, job_id, "CUTOFFS", canonical, valid, validation,
+                ("institution_code", "program_name", "category", "percentage")
+            )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
             shutil.copy2(work / "validation.txt", staging / "validation.txt")
@@ -323,20 +380,13 @@ def _require_clean_stage(conn, job_id: int, result_type: str):
 def _insert_cutoff_from_json(conn, raw, job, source_pdf):
     import sys
     sys.path.insert(0, str(SCRIPTS))
-    from validate_data import SECTION_MAP, STAGE_MAP, parse_category, parse_filename
-    from . import processing as _self
+    from validate_data import parse_filename
     family = job["course_family"]
     program_name = str(raw.get("program_name","")).strip()
     inst = str(raw.get("institution_code","")).strip()
     if not program_name or not inst:
         raise ValueError("Missing institution_code/program_name after normalization")
-    base, ladies, _ = parse_category(str(raw.get("category","")).strip())
-    if base is None:
-        raise ValueError(f"Unknown category: {raw.get('category')!r}")
-    section = SECTION_MAP.get(str(raw.get("section","")).strip())
-    stage = STAGE_MAP.get(str(raw.get("stage","")).strip())
-    if not section or not stage:
-        raise ValueError("Unknown section or stage")
+    base, ladies, section, stage = _resolve_cutoff_dimensions(raw)
     pct = float(raw["percentage"])
     rank = str(raw.get("rank_number","")).strip()
     rank_number = int(rank) if rank.isdigit() else None
