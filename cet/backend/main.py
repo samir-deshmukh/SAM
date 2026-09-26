@@ -273,7 +273,7 @@ def login_post(
 
     with connect() as connection:
         row = connection.execute(
-            'SELECT * FROM admin_users WHERE username=? AND is_active=1',
+            'SELECT * FROM admin_users WHERE username=? AND is_active=TRUE',
             (username,),
         ).fetchone()
         if not row or not verify_password(password, row['password_hash']):
