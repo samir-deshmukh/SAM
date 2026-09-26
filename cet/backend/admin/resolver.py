@@ -45,6 +45,381 @@ def seed_from_contacts(conn):
             conn.execute("UPDATE institutes SET city=COALESCE(?,city), website=COALESCE(?,website), city_source=CASE WHEN ? IS NOT NULL THEN 'reference_csv' ELSE city_source END, website_source=CASE WHEN ? IS NOT NULL THEN 'reference_csv' ELSE website_source END, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",(city,w,city,w,code)); n+=1
     return n
 
+def _reference_contacts():
+    """Load the maintained local contact file once for resolver seeding."""
+    contacts = {}
+    if not CONTACTS.exists():
+        return contacts
+    with CONTACTS.open(newline='', encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            code = str(r.get('college_code', '')).strip()
+            if not code:
+                continue
+            website = str(r.get('website', '')).strip()
+            if website.lower() in {'', 'unknown', 'nan', 'none'}:
+                website = None
+            contacts[code] = {
+                'city': str(r.get('city', '')).strip() or None,
+                'website': valid_url(website) if website else None,
+            }
+    return contacts
+
+
+def seed_from_import(conn, job_id):
+    """Create resolver rows from the colleges actually present in an import.
+
+    The PDF/import is the scope of work. Existing institute/reference data is
+    preferred for city and website; no broad external dataset is used to
+    invent unrelated resolver institutions.
+    """
+    refs = _reference_contacts()
+    source_rows = conn.execute(
+        "SELECT normalized_json FROM import_staging_records "
+        "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') "
+        "ORDER BY id",
+        (job_id,),
+    ).fetchall()
+    colleges = {}
+    for row in source_rows:
+        try:
+            data = json.loads(row['normalized_json'] or '{}')
+        except Exception:
+            continue
+        code = str(data.get('institution_code', '')).strip()
+        if not code:
+            continue
+        colleges.setdefault(code, {
+            'institution_name': str(data.get('institution_name', '')).strip() or code
+        })
+
+    seeded = 0
+    for code, incoming in colleges.items():
+        inst = conn.execute(
+            "SELECT institution_code,institution_name,city,website,address "
+            "FROM institutes WHERE institution_code=?",
+            (code,),
+        ).fetchone()
+        ref = refs.get(code, {})
+        name = (
+            (inst['institution_name'] if inst else None)
+            or incoming['institution_name']
+            or code
+        )
+        city = (
+            (inst['city'] if inst else None)
+            or ref.get('city')
+            or None
+        )
+        website = valid_url(inst['website']) if inst and inst['website'] else None
+        website_source = 'institutes' if website else None
+        if not website and ref.get('website'):
+            website = ref['website']
+            website_source = 'reference_csv'
+
+        existing = conn.execute(
+            "SELECT status,website,city FROM college_website_resolver "
+            "WHERE institution_code=?",
+            (code,),
+        ).fetchone()
+        if existing and existing['status'] == 'VERIFIED':
+            # Never downgrade an already verified resolver result.
+            conn.execute(
+                "UPDATE college_website_resolver SET institution_name=?,"
+                "city=COALESCE(city,?),updated_at=CURRENT_TIMESTAMP "
+                "WHERE institution_code=?",
+                (name, city, code),
+            )
+        else:
+            status = 'CANDIDATE' if website else 'PENDING'
+            conn.execute(
+                """INSERT INTO college_website_resolver
+                   (institution_code,institution_name,city,website,status,
+                    source,source_url,updated_at)
+                   VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(institution_code) DO UPDATE SET
+                     institution_name=excluded.institution_name,
+                     city=COALESCE(college_website_resolver.city,excluded.city),
+                     website=CASE
+                         WHEN college_website_resolver.website IS NULL
+                              OR college_website_resolver.website=''
+                         THEN excluded.website
+                         ELSE college_website_resolver.website
+                     END,
+                     status=CASE
+                         WHEN college_website_resolver.website IS NOT NULL
+                              AND college_website_resolver.website<>'' THEN college_website_resolver.status
+                         ELSE excluded.status
+                     END,
+                     source=CASE
+                         WHEN college_website_resolver.website IS NOT NULL
+                              AND college_website_resolver.website<>'' THEN college_website_resolver.source
+                         ELSE excluded.source
+                     END,
+                     source_url=CASE
+                         WHEN college_website_resolver.website IS NOT NULL
+                              AND college_website_resolver.website<>'' THEN college_website_resolver.source_url
+                         ELSE excluded.source_url
+                     END,
+                     updated_at=CURRENT_TIMESTAMP""",
+                (code, name, city, website, status, website_source, website,
+                 ),
+            )
+        seeded += 1
+    return seeded
+
+
+def _update_institute_resolution(conn, code, city=None, address=None, website=None, source=None):
+    """Mirror trusted resolver fields into the institute reference when present."""
+    if not (city or address or website):
+        return
+    conn.execute(
+        """UPDATE institutes
+           SET city=COALESCE(?,city),
+               address=COALESCE(?,address),
+               website=COALESCE(?,website),
+               city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END,
+               address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END,
+               website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END,
+               verified_at=CURRENT_TIMESTAMP
+           WHERE institution_code=?""",
+        (
+            city, address, website,
+            city, source, address, source, website, source, code,
+        ),
+    )
+
+
+def resolve_import_job(job_id):
+    """Resolve every college from an uploaded PDF without blocking PDF processing.
+
+    Order is deliberate:
+      1. existing resolver/institute/reference website
+      2. verify that URL and capture its redirect target
+      3. only then use Gemini + Google Search for unresolved colleges
+
+    City follows the same local-data-first rule. Network discovery is never
+    used to create extra institutions outside the uploaded PDF.
+    """
+    from .db import connect
+
+    with connect() as c:
+        seeded = seed_from_import(c, job_id)
+        c.commit()
+
+    if not seeded:
+        return {'ok': True, 'seeded': 0, 'resolved': 0, 'searched': 0}
+
+    with connect() as c:
+        source_rows = c.execute(
+            "SELECT normalized_json FROM import_staging_records "
+            "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        codes = set()
+        for item in source_rows:
+            try:
+                data = json.loads(item['normalized_json'] or '{}')
+            except Exception:
+                continue
+            code = str(data.get('institution_code', '')).strip()
+            if code:
+                codes.add(code)
+        all_rows = [
+            dict(r) for r in c.execute(
+                "SELECT institution_code,institution_name,city,website,status,source "
+                "FROM college_website_resolver ORDER BY institution_name"
+            )
+        ]
+        rows = [r for r in all_rows if r['institution_code'] in codes]
+
+    resolved = searched = failed = 0
+    refs = _reference_contacts()
+
+    for row in rows:
+        code = row['institution_code']
+        name = row['institution_name']
+        city = row.get('city')
+        candidate_urls = []
+        if row.get('website'):
+            candidate_urls.append((row['website'], row.get('source') or 'existing_data'))
+        ref_url = refs.get(code, {}).get('website')
+        if ref_url and all(ref_url != u for u, _ in candidate_urls):
+            candidate_urls.append((ref_url, 'reference_csv'))
+
+        verified = None
+        for url, source in candidate_urls:
+            result = verify_url(url, name)
+            if result.get('ok') and result.get('match_score', 0) >= 0.15:
+                verified = (result, source)
+                break
+
+        if verified:
+            result, source = verified
+            found_city = city
+            found_address = None
+            if not city:
+                # The website is already verified, but city is still missing.
+                # Use search only for the missing location field; never replace
+                # the already verified website with the search result.
+                try:
+                    location_ai, _ = gemini_find(name, None)
+                    found_city = str(location_ai.get('city')).strip() if location_ai.get('city') else None
+                    found_address = str(location_ai.get('address')).strip() if location_ai.get('address') else None
+                except Exception:
+                    pass
+            with connect() as c:
+                c.execute(
+                    """UPDATE college_website_resolver
+                       SET city=COALESCE(?,city),address=COALESCE(?,address),
+                           website=?,status='VERIFIED',source=?,
+                           source_url=?,verification_note=?,
+                           last_checked_at=CURRENT_TIMESTAMP,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE institution_code=?""",
+                    (
+                        found_city, found_address, result['url'], source,
+                        result['url'], result['note'], code,
+                    ),
+                )
+                _update_institute_resolution(
+                    c, code, city=found_city, address=found_address,
+                    website=result['url'], source=source
+                )
+                c.commit()
+            resolved += 1
+            continue
+
+        try:
+            searched += 1
+            ai, _ = gemini_find(name, city)
+            url = ai.get('official_url')
+            found_city = str(ai.get('city')).strip() if ai.get('city') else city
+            address = str(ai.get('address')).strip() if ai.get('address') else None
+            result = (
+                verify_url(url, name)
+                if url
+                else {'ok': False, 'url': None, 'note': 'Search returned no official URL'}
+            )
+            if result.get('ok') and result.get('match_score', 0) >= 0.15:
+                status = 'VERIFIED'
+            elif result.get('ok'):
+                status = 'NEEDS_REVIEW'
+            else:
+                status = 'FAILED'
+                failed += 1
+            final_url = result.get('url') or url
+            note = ((ai.get('note') or '').strip() + ' ' + result.get('note', '')).strip()
+            with connect() as c:
+                c.execute(
+                    """UPDATE college_website_resolver
+                       SET city=?,website=?,address=?,status=?,source=?,
+                           source_url=?,verification_note=?,
+                           last_checked_at=CURRENT_TIMESTAMP,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE institution_code=?""",
+                    (
+                        found_city, final_url, address, status,
+                        'gemini_google_search', final_url, note, code,
+                    ),
+                )
+                _update_institute_resolution(
+                    c, code, city=found_city, address=address,
+                    website=final_url if status == 'VERIFIED' else None,
+                    source='gemini_google_search',
+                )
+                c.commit()
+            if status == 'VERIFIED':
+                resolved += 1
+        except Exception as exc:
+            failed += 1
+            with connect() as c:
+                c.execute(
+                    """UPDATE college_website_resolver
+                       SET status='FAILED',verification_note=?,
+                           last_checked_at=CURRENT_TIMESTAMP,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE institution_code=?""",
+                    (str(exc)[:500], code),
+                )
+                c.commit()
+
+    return {
+        'ok': True,
+        'seeded': seeded,
+        'resolved': resolved,
+        'searched': searched,
+        'failed': failed,
+    }
+
+
+def sync_institutes_to_resolver(conn):
+    """Synchronize the resolver scope from the authoritative CAP institutes table."""
+    refs = _reference_contacts()
+    conn.execute("DELETE FROM college_website_resolver WHERE institution_code LIKE 'GH:%'")
+    rows = conn.execute(
+        "SELECT institution_code,institution_name,city,website,address "
+        "FROM institutes ORDER BY institution_code"
+    ).fetchall()
+    count = 0
+    for r in rows:
+        code = str(r['institution_code']).strip()
+        if not code:
+            continue
+        ref = refs.get(code, {})
+        city = r['city'] or ref.get('city')
+        website = valid_url(r['website']) if r['website'] else ref.get('website')
+        source = 'institutes' if r['website'] else ('reference_csv' if website else None)
+        existing = conn.execute(
+            "SELECT status,website FROM college_website_resolver WHERE institution_code=?",
+            (code,),
+        ).fetchone()
+        if existing and existing['status'] == 'VERIFIED':
+            conn.execute(
+                "UPDATE college_website_resolver SET institution_name=?,"
+                "city=COALESCE(city,?),updated_at=CURRENT_TIMESTAMP "
+                "WHERE institution_code=?",
+                (r['institution_name'], city, code),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO college_website_resolver
+                   (institution_code,institution_name,city,website,status,source,source_url)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(institution_code) DO UPDATE SET
+                     institution_name=excluded.institution_name,
+                     city=COALESCE(college_website_resolver.city,excluded.city),
+                     website=CASE
+                       WHEN college_website_resolver.website IS NULL
+                            OR college_website_resolver.website=''
+                       THEN excluded.website
+                       ELSE college_website_resolver.website
+                     END,
+                     status=CASE
+                       WHEN college_website_resolver.website IS NOT NULL
+                            AND college_website_resolver.website<>'' THEN college_website_resolver.status
+                       ELSE excluded.status
+                     END,
+                     source=CASE
+                       WHEN college_website_resolver.website IS NOT NULL
+                            AND college_website_resolver.website<>'' THEN college_website_resolver.source
+                       ELSE excluded.source
+                     END,
+                     source_url=CASE
+                       WHEN college_website_resolver.website IS NOT NULL
+                            AND college_website_resolver.website<>'' THEN college_website_resolver.source_url
+                       ELSE excluded.source_url
+                     END,
+                     updated_at=CURRENT_TIMESTAMP""",
+                (
+                    code, r['institution_name'], city, website,
+                    'CANDIDATE' if website else 'PENDING',
+                    source, website,
+                ),
+            )
+        count += 1
+    return count
+
+
 GITHUB_MAPPING_URL='https://raw.githubusercontent.com/github/india/main/Students/GCP-India.md'
 
 def sync_github_india(conn):

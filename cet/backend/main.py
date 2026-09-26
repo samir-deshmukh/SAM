@@ -11,7 +11,7 @@ from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, live_processing, feedback_page, resolver_page
-from .admin.resolver import seed_from_contacts, sync_github_india, verify_url, gemini_find
+from .admin.resolver import seed_from_contacts, sync_github_india, verify_url, gemini_find, sync_institutes_to_resolver, resolve_import_job
 from .api import router as public_api_router
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -377,6 +377,7 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
                 )
                 connection.commit()
                 background_tasks.add_task(_process_import_background, job_id)
+                background_tasks.add_task(_resolve_import_background, job_id)
         return RedirectResponse('/admin', 303)
     except Exception:
         if tmp.exists():
@@ -384,6 +385,19 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
         if stored is not None and stored.exists():
             stored.unlink()
         raise
+
+
+def _resolve_import_background(job_id: int):
+    """Resolve college websites/cities after PDF processing has produced staging rows."""
+    try:
+        result = resolve_import_job(job_id)
+        log.info(
+            'Website resolver completed: job_id=%s seeded=%s resolved=%s searched=%s failed=%s',
+            job_id, result.get('seeded'), result.get('resolved'),
+            result.get('searched'), result.get('failed'),
+        )
+    except Exception:
+        log.exception('Website resolver failed: job_id=%s', job_id)
 
 
 def _process_import_background(job_id: int):
@@ -456,6 +470,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         connection.commit()
 
         background_tasks.add_task(_process_import_background, job_id)
+        background_tasks.add_task(_resolve_import_background, job_id)
         return JSONResponse(
             status_code=202,
             content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
@@ -707,33 +722,36 @@ async def feedback_status(request: Request, feedback_id: int):
 @app.get('/admin/resolver', response_class=HTMLResponse)
 def resolver_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
-    with connect() as c: rows=[dict(r) for r in c.execute('SELECT * FROM college_website_resolver ORDER BY LOWER(institution_name) LIMIT 5000')]
+    with connect() as c:
+        sync_institutes_to_resolver(c)
+        c.commit()
+        rows=[dict(r) for r in c.execute(
+            'SELECT * FROM college_website_resolver ORDER BY LOWER(institution_name) LIMIT 5000'
+        )]
     return resolver_page(rows)
 
 @app.get('/admin/api/resolver')
 def resolver_api(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
-    with connect() as c: return [dict(r) for r in c.execute('SELECT * FROM college_website_resolver ORDER BY LOWER(institution_name) LIMIT 5000')]
+    with connect() as c:
+        sync_institutes_to_resolver(c)
+        c.commit()
+        return [dict(r) for r in c.execute(
+            'SELECT * FROM college_website_resolver ORDER BY LOWER(institution_name) LIMIT 5000'
+        )]
 
 @app.post('/admin/api/resolver/seed')
 def resolver_seed(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        count = seed_from_contacts(connection)
+        count = sync_institutes_to_resolver(connection)
         connection.commit()
-        return {'ok': True, 'count': count}
+        return {'ok': True, 'count': count, 'source': 'cap_institutes'}
 
 @app.post('/admin/api/resolver/github-seed')
 def resolver_github_seed(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
-    with connect() as c:
-        try:
-            count = sync_github_india(c)
-            c.commit()
-            return {'ok': True, 'count': count, 'source': 'github_india_2021'}
-        except Exception:
-            c.rollback()
-            raise HTTPException(502, 'GitHub seed source could not be synchronized')
+    raise HTTPException(410, 'GitHub seed is disabled; resolver scope is the CAP institutes table')
 
 @app.post('/admin/api/resolver/find')
 async def resolver_find(request: Request):
