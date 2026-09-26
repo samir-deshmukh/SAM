@@ -25,3 +25,9 @@ def test_inline_status_and_home_university_are_split():
     assert meta['institution_code'] == '01102'
     assert meta['status'] == 'Un-Aided Linguistic Minority - Hindi'
     assert meta['home_university'] == 'Sant Gadge Baba Amravati University'
+
+
+def test_extractor_uses_trusted_pdfium_backend():
+    from scripts import cutoff_extractor
+
+    assert cutoff_extractor.fitz.__name__.endswith("fitz_pdfium")

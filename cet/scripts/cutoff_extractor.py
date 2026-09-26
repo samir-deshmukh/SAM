@@ -62,7 +62,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import fitz
+try:
+    from scripts import fitz_pdfium as fitz
+except ImportError:  # direct execution
+    import fitz_pdfium as fitz
 
 try:
     import pytesseract
