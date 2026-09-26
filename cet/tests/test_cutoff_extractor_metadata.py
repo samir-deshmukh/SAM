@@ -31,3 +31,26 @@ def test_extractor_uses_trusted_pdfium_backend():
     from scripts import cutoff_extractor
 
     assert cutoff_extractor.fitz.__name__.endswith("fitz_pdfium")
+
+
+def test_program_code_with_letter_suffix_is_parsed():
+    lines = merge_split_rank_lines([
+        '01313 - Example College',
+        '0131310170U - BCA',
+    ])
+    meta = extract_metadata(lines)
+    assert meta['program_code'] == '0131310170U'
+    assert meta['program_name'] == 'BCA'
+
+
+def test_bare_roman_stage_prefix_is_normalized_before_rank():
+    lines = merge_split_rank_lines([
+        'GOPENH LOPENH',
+        'I 2414',
+        '(55.0372530)',
+        '1047',
+        '(75.3093618)',
+    ])
+    assert lines[0] == 'GOPENH LOPENH'
+    assert lines[1] == 'Stage-I 2414 (55.0372530)'
+    assert lines[2] == '1047 (75.3093618)'
