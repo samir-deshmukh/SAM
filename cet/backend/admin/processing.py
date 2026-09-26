@@ -335,6 +335,17 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
         df=pd.read_csv(alias_file,dtype=str,keep_default_na=False)
         level_map=dict(zip(df["raw_name"].str.strip(),df["level"].str.strip()))
     level=level_map.get(program_name)
+    # A PDF can legitimately contain an institute that is not yet present in
+    # the reference table. The PDF is the authoritative source for its code
+    # and name at import time; upsert that reference row before the fact row
+    # so PostgreSQL's FK remains enforced without requiring a manual seed run.
+    conn.execute("""INSERT INTO institutes(institution_code,institution_name)
+        VALUES(?,?) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name""",
+        (inst, str(raw.get("institution_name","")).strip() or inst))
+    conn.execute("INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING", (base,))
+    conn.execute("INSERT INTO sections(section_code,section_full) VALUES(?,?) ON CONFLICT(section_code) DO NOTHING",
+                 (section, section))
+    conn.execute("INSERT INTO stages(stage_code) VALUES(?) ON CONFLICT(stage_code) DO NOTHING", (stage,))
     conn.execute("INSERT INTO programs(program_family,program_name_raw,level) VALUES(?,?,?) ON CONFLICT(program_family,program_name_raw) DO NOTHING",
                  (family,program_name,level))
     prog=conn.execute("SELECT program_id FROM programs WHERE program_family=? AND program_name_raw=?",
@@ -348,9 +359,10 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
         (year,round,institution_code,program_id,base_category,is_ladies,section_code,
          stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,
          raw_program_name,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""", vals)
-    if cur.rowcount:
-        rid=cur.lastrowid
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+    inserted=cur.fetchone()
+    if inserted:
+        rid=inserted["id"]
         after=dict(zip(["year","round","institution_code","program_id","base_category","is_ladies",
                         "section_code","stage_code","home_university","rank_number","rank_suffix",
                         "percentile","raw_category","raw_program_name","source_pdf","source_page"], vals))
@@ -378,9 +390,10 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     cur=conn.execute("""INSERT INTO seats
         (capture_year,program_family,institution_code,choice_code,allocation_lane,base_category,
          is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""", vals)
-    if cur.rowcount:
-        rid=cur.lastrowid
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+    inserted=cur.fetchone()
+    if inserted:
+        rid=inserted["id"]
         cols=["capture_year","program_family","institution_code","choice_code","allocation_lane",
               "base_category","is_total","is_ladies","seats","raw_category","raw_allocation_type",
               "raw_gender","source_pdf","source_page"]
@@ -414,11 +427,14 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
             if rid is not None:
                 inserted.append((table,rid,after))
         release_key=f"REL-{job['job_key']}"
-        conn.execute("""INSERT INTO data_releases
+        release_result = conn.execute("""INSERT INTO data_releases
             (release_key,source_job_id,source_sha256,status,approved_by,notes)
-            VALUES (?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?) RETURNING id""",
             (release_key,job_id,job["sha256"],"COMMITTED",actor_user_id,notes))
-        release_id=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        release_row = release_result.fetchone()
+        if not release_row:
+            raise RuntimeError("Unable to resolve newly created release id")
+        release_id=release_row["id"]
         for table,rid,after in inserted:
             conn.execute("""INSERT INTO data_release_items
                 (release_id,table_name,row_id,operation,before_json,after_json)
