@@ -357,7 +357,16 @@ def upload(request: Request, file: UploadFile = File(...)):
                     current_user['uid'],
                 ),
             )
-            job_id = cursor.lastrowid
+            # PostgreSQL does not provide SQLite-style cursor.lastrowid.
+            # Resolve the generated SERIAL id from the unique job_key on the
+            # same transaction/connection before recording the event.
+            job_row = connection.execute(
+                'SELECT id FROM import_jobs WHERE job_key=?',
+                (job_key,),
+            ).fetchone()
+            if not job_row:
+                raise RuntimeError('Import job was inserted but its id could not be resolved')
+            job_id = int(job_row['id'])
             event(connection, job_id, 'RECEIVED', 'File received', 0)
             connection.commit()
             run_preflight(connection, job_id, stored, name)
