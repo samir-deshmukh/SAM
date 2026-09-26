@@ -321,7 +321,7 @@ def admin(request: Request):
 
 
 @app.post('/admin/api/imports')
-def upload(request: Request, file: UploadFile = File(...)):
+def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     name = Path(file.filename or '').name
     if not name.lower().endswith('.pdf'):
@@ -369,8 +369,15 @@ def upload(request: Request, file: UploadFile = File(...)):
             job_id = int(job_row['id'])
             event(connection, job_id, 'RECEIVED', 'File received', 0)
             connection.commit()
-            run_preflight(connection, job_id, stored, name)
-        return RedirectResponse(f'/admin/imports/{job_id}', 303)
+            ok = run_preflight(connection, job_id, stored, name)
+            if ok:
+                connection.execute(
+                    "UPDATE import_jobs SET status='EXTRACTING',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
+                    (job_id,),
+                )
+                connection.commit()
+                background_tasks.add_task(_process_import_background, job_id)
+        return RedirectResponse('/admin', 303)
     except Exception:
         if tmp.exists():
             tmp.unlink()
@@ -443,6 +450,48 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             status_code=202,
             content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
         )
+
+
+@app.delete('/admin/api/imports/{job_id}')
+def delete_import(request: Request, job_id: int):
+    u = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as c:
+        job = c.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        deletable = {
+            JobStatus.RECEIVED.value,
+            JobStatus.IDENTIFIED.value,
+            JobStatus.REVIEW_REQUIRED.value,
+            JobStatus.STAGED.value,
+            JobStatus.FAILED.value,
+            JobStatus.QUARANTINED.value,
+        }
+        if job['status'] not in deletable:
+            raise HTTPException(409, f"Import cannot be deleted while in {job['status']}")
+        c.execute('DELETE FROM import_events WHERE job_id=?', (job_id,))
+        c.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+        c.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+        c.execute('DELETE FROM import_jobs WHERE id=?', (job_id,))
+        c.execute(
+            "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (u['uid'], 'DELETE_IMPORT', 'IMPORT', str(job_id),
+             json.dumps({'job_key': job['job_key'], 'status': job['status']}),
+             None, 'Import deleted before production commit'),
+        )
+        c.commit()
+    stored = BASE / job['stored_path']
+    if stored.exists():
+        stored.unlink()
+    for directory in (
+        BASE / 'data' / 'work' / f"job_{job_id}",
+        BASE / 'data' / 'staging' / f"job_{job_id}",
+    ):
+        if directory.exists():
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+    return {'ok': True, 'job_id': job_id}
 
 
 @app.get('/admin/api/imports')

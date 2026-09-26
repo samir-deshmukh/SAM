@@ -109,15 +109,15 @@ def run_preflight(connection, job_id, path, original_filename=None):
         update_status(
             connection,
             job_id,
-            JobStatus.REVIEW_REQUIRED.value,
-            "Preflight complete; waiting for processing approval",
+            JobStatus.IDENTIFIED.value,
+            "Preflight complete; processing will start automatically",
         )
         event(
             connection,
             job_id,
-            "REVIEW",
-            "Safe boundary reached before extraction",
-            100,
+            "IDENTIFIED",
+            "Preflight passed; automatic processing queued",
+            40,
         )
         connection.commit()
         return True

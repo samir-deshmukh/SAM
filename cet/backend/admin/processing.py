@@ -255,10 +255,20 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
               88)
         update_status(conn, job_id, JobStatus.STAGED.value, "Extraction, normalization and validation artifacts staged")
         event(conn, job_id, "STAGED", "No production fact rows were modified", 100)
-        update_status(conn, job_id, JobStatus.REVIEW_REQUIRED.value, "Waiting for admin review and approval")
-        event(conn, job_id, "REVIEW", "Import is ready for Review Center", 100)
+        result_row = conn.execute(
+            "SELECT validation_status FROM import_results WHERE job_id=? ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if result_row and result_row["validation_status"] == "PASS":
+            update_status(conn, job_id, JobStatus.STAGED.value, "Validation passed; ready for production approval")
+            event(conn, job_id, "READY", "Validation passed; no review is required", 100)
+            final_status = JobStatus.STAGED.value
+        else:
+            update_status(conn, job_id, JobStatus.REVIEW_REQUIRED.value, "Validation findings require admin review")
+            event(conn, job_id, "REVIEW", "Validation findings require Review Center attention", 100)
+            final_status = JobStatus.REVIEW_REQUIRED.value
         conn.commit()
-        return {"ok": True, "job_id": job_id, "status": JobStatus.REVIEW_REQUIRED.value,
+        return {"ok": True, "job_id": job_id, "status": final_status,
                 "work_dir": str(work.relative_to(BASE))}
     except Exception as exc:
         conn.rollback()
@@ -382,7 +392,7 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
     """Atomically promote a clean staged import into production and create a release."""
     job=conn.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone()
     if not job: raise ValueError("Import not found")
-    if job["status"] != JobStatus.REVIEW_REQUIRED.value:
+    if job["status"] not in {JobStatus.STAGED.value, JobStatus.REVIEW_REQUIRED.value}:
         raise ValueError(f"Import is not awaiting approval: {job['status']}")
     dtype=job["data_type"]
     _require_clean_stage(conn,job_id,dtype)
