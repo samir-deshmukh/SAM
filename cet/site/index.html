@@ -2026,10 +2026,17 @@ async function loadRealCollegeData() {
     const data = await response.json();
 
     CONFIG.colleges = [];
+    const cities = [...new Set((data.cities || [])
+      .map(v => String(v).trim())
+      .filter(v => v && v.toLowerCase() !== "select city"))];
+    const courses = [...new Set((data.courses || [])
+      .map(v => String(v).trim())
+      .filter(v => v && v.toLowerCase() !== "select course"))];
+
     CONFIG.cityOptions = [{ value: CONFIG.unselected, label: "Select City" },
-      ...(data.cities || []).map(v => ({ value: v, label: v }))];
+      ...cities.map(v => ({ value: v, label: v }))];
     CONFIG.courseOptions = [{ value: CONFIG.unselected, label: "Select Course" },
-      ...(data.courses || []).map(v => ({ value: v, label: v }))];
+      ...courses.map(v => ({ value: v, label: v }))];
 
     populateSelects();
     renderResults();
