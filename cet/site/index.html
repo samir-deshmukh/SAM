@@ -1874,12 +1874,17 @@ function enhanceSelect(selectEl, opts = {}) {
       else if (text.includes(f)) matches.push({ item, rank: 3 });
     }
 
-    matches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
+    // Keep the placeholder at the top. It is a UI control, not a city,
+    // so it must never participate in alphabetical sorting.
+    const placeholder = matches.find(({ item }) => item.opt.value === CONFIG.unselected);
+    const cityMatches = matches.filter(({ item }) => item.opt.value !== CONFIG.unselected);
+    cityMatches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
+    const orderedMatches = placeholder ? [placeholder, ...cityMatches] : cityMatches;
 
     // Build the visible list in one DOM operation. There is one delegated
     // click handler below, rather than one handler per option.
     const frag = document.createDocumentFragment();
-    for (const { item } of matches) {
+    for (const { item } of orderedMatches) {
       const option = item.opt;
       const row = document.createElement("button");
       row.type = "button";
