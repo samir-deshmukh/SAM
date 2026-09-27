@@ -1068,6 +1068,31 @@ async def resolver_find(request: Request):
         c.commit()
     return {'ok':True,'results':results}
 
+@app.post('/admin/api/resolver/verify')
+async def resolver_manual_verify(request: Request):
+    u=require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    try:
+        body=await request.json()
+    except Exception:
+        body={}
+    code=str(body.get('institution_code','')).strip()
+    if not code:
+        raise HTTPException(400,'Institution code is required')
+    with connect() as c:
+        row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
+        if not row:
+            raise HTTPException(404,'College not found in resolver')
+        website=str(row['website'] or '').strip()
+        if not website:
+            raise HTTPException(409,'This college has no website URL to verify')
+        old_status=str(row['status'] or '')
+        note='Manually verified by admin after checking the website.'
+        c.execute("UPDATE college_website_resolver SET status='VERIFIED',source='manual_admin',source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?",(website,note,code))
+        c.execute("UPDATE institutes SET website=?,website_source='manual_admin',verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",(website,code))
+        c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",(u['uid'],'MANUAL_VERIFY_WEBSITE','INSTITUTE',code,json.dumps({'status':old_status,'website':website}),json.dumps({'status':'VERIFIED','website':website}),'Admin manually checked the website and marked it verified'))
+        c.commit()
+    return {'ok':True,'institution_code':code,'status':'VERIFIED','website':website}
+
 @app.get('/admin/audit', response_class=HTMLResponse)
 def audit_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})

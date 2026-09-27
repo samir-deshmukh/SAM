@@ -96,7 +96,7 @@ def public_options(request: Request):
     if not _db_available(engine):
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
     with engine.connect() as conn:
-        city_rows = conn.execute(text("SELECT DISTINCT city FROM institutes WHERE city IS NOT NULL AND btrim(city) <> '' ORDER BY city"))
+        city_rows = conn.execute(text("SELECT DISTINCT i.city FROM institutes i WHERE i.city IS NOT NULL AND btrim(i.city) <> '' AND (EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code = i.institution_code) OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code = i.institution_code)) ORDER BY i.city"))
         cities = [str(r[0]) for r in city_rows]
     return {"cities": cities, "courses": available_program_families(engine)}
 
