@@ -382,7 +382,8 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
             cmd,
             cwd=str(BASE),
             check=True,
-            capture_output=True,
+            stdout=None,
+            stderr=None,
             text=True,
             timeout=1800,
         )
