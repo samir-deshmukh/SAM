@@ -339,16 +339,19 @@ def login_post(
             )
             raise HTTPException(401, 'Invalid credentials')
 
+        # A successful login starts a fresh authentication session. Bumping
+        # auth_version invalidates every older browser session for this admin.
         connection.execute(
-            'UPDATE admin_users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?',
+            'UPDATE admin_users SET last_login_at=CURRENT_TIMESTAMP, auth_version=auth_version+1 WHERE id=?',
             (row['id'],),
         )
         connection.commit()
+        fresh_auth_version = int(row['auth_version']) + 1
 
     resp = RedirectResponse('/admin', 303)
     resp.set_cookie(
         _SESSION_COOKIE,
-        make_session(row['id'], row['role'], row['auth_version']),
+        make_session(row['id'], row['role'], fresh_auth_version),
         httponly=True,
         samesite='strict',
         secure=_COOKIE_SECURE,
