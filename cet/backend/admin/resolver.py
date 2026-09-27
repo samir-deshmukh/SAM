@@ -541,12 +541,8 @@ def sync_institutes_to_resolver(conn):
     # the derived institutes table to already exist; older rollback/import flows
     # can leave cutoffs/seats intact while institutes needs reconstruction.
     rows = conn.execute(
-        "SELECT x.institution_code, COALESCE(i.institution_name,'') AS institution_name, "
-        "i.city, i.website, i.address FROM ("
-        "SELECT DISTINCT institution_code FROM cutoffs "
-        "UNION SELECT DISTINCT institution_code FROM seats"
-        ") x LEFT JOIN institutes i ON i.institution_code=x.institution_code "
-        "ORDER BY x.institution_code"
+        "SELECT institution_code,institution_name,city,website,address "
+        "FROM institutes ORDER BY institution_code"
     ).fetchall()
     # Fallback to the exact production-backed institute scope used by the
     # public /api/options endpoint. This prevents the resolver from appearing

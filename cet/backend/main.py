@@ -936,8 +936,6 @@ def resolver_page_route(request: Request):
                FROM institutes i
                LEFT JOIN college_website_resolver r
                  ON r.institution_code=i.institution_code
-              WHERE EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code=i.institution_code)
-                 OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code=i.institution_code)
               ORDER BY LOWER(COALESCE(r.institution_name,i.institution_name))
               LIMIT 5000"""
         )]
@@ -962,8 +960,6 @@ def resolver_api(request: Request):
                FROM institutes i
                LEFT JOIN college_website_resolver r
                  ON r.institution_code=i.institution_code
-              WHERE EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code=i.institution_code)
-                 OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code=i.institution_code)
               ORDER BY LOWER(COALESCE(r.institution_name,i.institution_name))
               LIMIT 5000"""
         )]
