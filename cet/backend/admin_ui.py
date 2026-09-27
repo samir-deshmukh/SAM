@@ -162,7 +162,7 @@ async function deleteBuild(id,btn){
 }
 load();setInterval(load,3000);
 </script>'''
-    return _shell('Slide 2 Data Builder','derived',body,js)
+    return _shell('CET Data Calculator','derived',body,js)
 
 
 def health_page() -> str:
