@@ -629,6 +629,60 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         raise
 
 
+def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
+    """Permanently remove a rolled-back release and its source import artifacts."""
+    release=conn.execute("SELECT * FROM data_releases WHERE id=?",(release_id,)).fetchone()
+    if not release: raise ValueError("Release not found")
+    if release["status"] != "ROLLED_BACK":
+        raise ValueError("Only a rolled-back release can be permanently deleted")
+    job_id=release["source_job_id"]
+    job=conn.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone() if job_id else None
+    items=conn.execute("SELECT after_json FROM data_release_items WHERE release_id=?",(release_id,)).fetchall()
+    affected_institutes=set(); affected_program_ids=set()
+    for item in items:
+        try: after=json.loads(item["after_json"] or "{}")
+        except Exception: after={}
+        code=str(after.get("institution_code","")).strip()
+        if code: affected_institutes.add(code)
+        pid=after.get("program_id")
+        if pid is not None:
+            try: affected_program_ids.add(int(pid))
+            except (TypeError,ValueError): pass
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM data_release_items WHERE release_id=?",(release_id,))
+        conn.execute("DELETE FROM data_releases WHERE id=?",(release_id,))
+        if job_id:
+            conn.execute("DELETE FROM import_events WHERE job_id=?",(job_id,))
+            conn.execute("DELETE FROM import_staging_records WHERE job_id=?",(job_id,))
+            conn.execute("DELETE FROM import_results WHERE job_id=?",(job_id,))
+            conn.execute("DELETE FROM import_jobs WHERE id=?",(job_id,))
+        for code in affected_institutes:
+            used=conn.execute("SELECT EXISTS(SELECT 1 FROM cutoffs WHERE institution_code=?) OR EXISTS(SELECT 1 FROM seats WHERE institution_code=?) AS used",(code,code)).fetchone()["used"]
+            if not used:
+                conn.execute("DELETE FROM college_website_resolver WHERE institution_code=?",(code,))
+                conn.execute("DELETE FROM institutes WHERE institution_code=?",(code,))
+        for pid in affected_program_ids:
+            used=conn.execute("SELECT EXISTS(SELECT 1 FROM cutoffs WHERE program_id=?) AS used",(pid,)).fetchone()["used"]
+            if not used:
+                conn.execute("DELETE FROM programs WHERE id=?",(pid,))
+        conn.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",
+                     (actor_user_id,"PURGE_ROLLED_BACK_RELEASE","RELEASE",str(release_id),json.dumps({"release_key":release["release_key"],"source_job_id":job_id}),None,"Permanent deletion of rolled-back release and source import"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if job and job["stored_path"]:
+        stored=BASE/job["stored_path"]
+        if stored.exists(): stored.unlink()
+    if release["backup_path"]:
+        backup=BASE/release["backup_path"]
+        if backup.exists(): shutil.rmtree(backup,ignore_errors=True)
+    for directory in (BASE/'data'/'work'/f"job_{job_id}", BASE/'data'/'staging'/f"job_{job_id}"):
+        if directory.exists(): shutil.rmtree(directory,ignore_errors=True)
+    return {"ok":True,"release_id":release_id,"status":"DELETED","source_job_id":job_id}
+
+
 def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
     release=conn.execute("SELECT * FROM data_releases WHERE id=?",(release_id,)).fetchone()
     if not release: raise ValueError("Release not found")
@@ -653,12 +707,49 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
     try:
         items=conn.execute("SELECT * FROM data_release_items WHERE release_id=? ORDER BY id DESC",(release_id,)).fetchall()
         deleted=0
+        affected_institutes=set()
+        affected_program_ids=set()
         for item in items:
             table=item["table_name"]
             if table not in {"cutoffs","seats"}: raise ValueError("Unsupported release table")
+            try:
+                after=json.loads(item["after_json"] or "{}")
+            except Exception:
+                after={}
+            if table == "cutoffs":
+                code=str(after.get("institution_code","")).strip()
+                if code: affected_institutes.add(code)
+                pid=after.get("program_id")
+                if pid is not None:
+                    affected_program_ids.add(int(pid))
+            elif table == "seats":
+                code=str(after.get("institution_code","")).strip()
+                if code: affected_institutes.add(code)
             cur=conn.execute(f"DELETE FROM {table} WHERE id=?",(item["row_id"],))
             deleted += cur.rowcount
-        conn.execute("UPDATE data_releases SET status='ROLLED_BACK',notes=? WHERE id=?",
+
+        # Production reference rows are created as part of imports, but the
+        # release ledger historically tracked only cutoff/seat rows. Remove
+        # now-orphaned institute/program rows belonging to this release so a
+        # rollback really removes the dataset from public/resolver scope.
+        orphan_institutes=0
+        for code in affected_institutes:
+            still_used=conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM cutoffs WHERE institution_code=?) "
+                "OR EXISTS(SELECT 1 FROM seats WHERE institution_code=?) AS used",
+                (code,code),
+            ).fetchone()["used"]
+            if not still_used:
+                conn.execute("DELETE FROM college_website_resolver WHERE institution_code=?",(code,))
+                orphan_institutes += conn.execute("DELETE FROM institutes WHERE institution_code=?",(code,)).rowcount
+
+        orphan_programs=0
+        for pid in affected_program_ids:
+            used=conn.execute("SELECT EXISTS(SELECT 1 FROM cutoffs WHERE program_id=?) AS used",(pid,)).fetchone()["used"]
+            if not used:
+                orphan_programs += conn.execute("DELETE FROM programs WHERE id=?",(pid,)).rowcount
+
+        conn.execute("UPDATE data_releases SET status='ROLLED_BACK',notes=?,backup_path=NULL WHERE id=?",
                      (f"{release['notes'] or ''}\nRollback: {reason}",release_id))
         if release["source_job_id"]:
             update_status(conn,release["source_job_id"],JobStatus.ROLLED_BACK.value,"Release rolled back")

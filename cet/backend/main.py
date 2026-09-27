@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileRes
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES
-from .admin.processing import process_import,approve_import,rollback_release
+from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
@@ -798,6 +798,17 @@ async def rollback(request: Request, release_id: int):
     with connect() as c:
         try: return rollback_release(c,release_id,u['uid'],reason)
         except ValueError as e: raise HTTPException(409,str(e))
+
+
+
+@app.delete('/admin/api/releases/{release_id}')
+def delete_rolled_back_release(request: Request, release_id: int):
+    u=require(request, {'SUPER_ADMIN'}, csrf=True)
+    with connect() as c:
+        try:
+            return purge_rolled_back_release(c,release_id,u['uid'])
+        except ValueError as e:
+            raise HTTPException(409,str(e))
 
 
 @app.post('/admin/api/releases/{release_id}/publish')
