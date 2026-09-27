@@ -49,6 +49,10 @@ async def lifespan(_app):
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
 app.include_router(public_api_router)
 log=logging.getLogger('cet-cap-admin')
+# PDF extraction/normalization is memory-heavy on the free Render instance.
+# Keep a single import processor active at a time even if multiple upload
+# requests or background tasks arrive together.
+_IMPORT_PROCESS_LOCK = threading.Lock()
 _PRODUCTION=os.getenv('CET_ENV','production').lower() == 'production'
 _COOKIE_SECURE=os.getenv('CET_ADMIN_COOKIE_SECURE','1' if _PRODUCTION else '0') == '1'
 _CSRF_COOKIE='cet_admin_csrf'
@@ -485,7 +489,13 @@ def _resolve_one_import_background(job_id: int):
 
 
 def _process_import_background(job_id: int):
-    """Run import processing outside the request so Live Processing can poll it."""
+    """Run one memory-heavy import at a time on the web instance."""
+    with _IMPORT_PROCESS_LOCK:
+        _process_import_background_locked(job_id)
+
+
+def _process_import_background_locked(job_id: int):
+    """Process an import while the global PDF-processing lock is held."""
     with connect() as connection:
         job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
