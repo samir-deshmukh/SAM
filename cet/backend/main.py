@@ -290,7 +290,12 @@ def user(request):
 def require(request, roles=None, csrf=False, csrf_value=None):
     current_user = user(request)
     if not current_user:
-        raise HTTPException(401, 'Authentication required')
+        # Browser-facing admin pages should go back to the login screen instead
+        # of exposing FastAPI's raw JSON 401 document (which Brave displays as
+        # a "Pretty print" page). Keep API endpoints machine-readable.
+        if request.url.path.startswith('/admin/api'):
+            raise HTTPException(401, 'Authentication required')
+        raise HTTPException(303, 'Authentication required', headers={'Location': '/admin/login'})
     if roles and current_user['role'] not in roles:
         raise HTTPException(403, 'Insufficient role')
     if csrf:
@@ -301,8 +306,9 @@ def require(request, roles=None, csrf=False, csrf_value=None):
 @app.get('/admin/login', response_class=HTMLResponse)
 def login(request: Request):
     token = _csrf_value(request)
+    error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else ''
     resp = HTMLResponse(
-        f'<h1>CET CAP Admin</h1><form method="post">'
+        f'<h1>CET CAP Admin</h1>{error}<form method="post">'
         f'<input type="hidden" name="csrf_token" value="{token}">'
         '<input name="username" autocomplete="username">'
         '<input name="password" type="password" autocomplete="current-password">'
@@ -337,7 +343,7 @@ def login_post(
                 username[:64],
                 ip,
             )
-            raise HTTPException(401, 'Invalid credentials')
+            return RedirectResponse('/admin/login?error=1', 303)
 
         # A successful login starts a fresh authentication session. Bumping
         # auth_version invalidates every older browser session for this admin.

@@ -39,7 +39,11 @@ window.__cetAdminTabReady=false;
 (function(){
   const LOCK_KEY='cet-cap-admin-active-tab-v1';
   const TAB_KEY='cet-cap-admin-tab-id-v1';
-  const TTL=15000;
+  // Keep the single-tab claim through normal tab closing/navigation. The browser
+  // may retain the HttpOnly admin session cookie after a tab is closed, so
+  // releasing the claim in beforeunload would let a copied /admin URL reuse it.
+  // A short lease still recovers automatically from crashes or abandoned tabs.
+  const TTL=60000;
   const body=document.body;
   const gate=document.getElementById('adminTabLock');
   let tabId=sessionStorage.getItem(TAB_KEY);
@@ -80,9 +84,9 @@ window.__cetAdminTabReady=false;
   window.addEventListener('storage',function(e){
     if(e.key===LOCK_KEY&&!ownsLock()) showBlocked();
   });
-  window.addEventListener('beforeunload',function(){
-    if(ownsLock()) localStorage.removeItem(LOCK_KEY);
-  });
+  // Do not clear the claim on beforeunload: closing the original tab must not
+  // immediately make a copied authenticated /admin URL usable in another tab.
+  // The heartbeat lease above handles crashed/abandoned tabs automatically.
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):''},extra)};
