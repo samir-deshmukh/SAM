@@ -558,6 +558,20 @@ def sync_institutes_to_resolver(conn):
         city = r['city'] or ref.get('city')
         website = valid_url(r['website']) if r['website'] else ref.get('website')
         source = 'institutes' if r['website'] else ('reference_csv' if website else None)
+        # Keep the public institute metadata aligned with the same maintained
+        # reference source used by the resolver, without overwriting admin data.
+        if ref_name or city or website:
+            conn.execute(
+                "UPDATE institutes SET "
+                "institution_name=CASE WHEN (institution_name IS NULL OR institution_name=?) AND ? IS NOT NULL THEN ? ELSE institution_name END,"
+                "city=COALESCE(city,?),website=COALESCE(website,?),"
+                "city_source=CASE WHEN city IS NULL AND ? IS NOT NULL THEN 'reference_csv' ELSE city_source END,"
+                "website_source=CASE WHEN website IS NULL AND ? IS NOT NULL THEN 'reference_csv' ELSE website_source END,"
+                "verified_at=CASE WHEN (? IS NOT NULL OR ? IS NOT NULL) THEN COALESCE(verified_at,CURRENT_TIMESTAMP) ELSE verified_at END "
+                "WHERE institution_code=?",
+                (code, ref_name or None, ref_name or None, city, website,
+                 city, website, city, website, code),
+            )
         existing = conn.execute(
             "SELECT status,website FROM college_website_resolver WHERE institution_code=?",
             (code,),
