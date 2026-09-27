@@ -96,22 +96,37 @@ def seed_from_contacts(conn):
     return n
 
 def _reference_contacts():
-    """Load the maintained local contact file once for resolver seeding."""
+    """Load the maintained contact file, supporting both headered and legacy headerless CSVs."""
     contacts = {}
     if not CONTACTS.exists():
         return contacts
     with CONTACTS.open(newline='', encoding='utf-8-sig') as f:
-        for r in csv.DictReader(f):
-            code = str(r.get('college_code', '')).strip()
-            if not code:
-                continue
-            website = str(r.get('website', '')).strip()
-            if website.lower() in {'', 'unknown', 'nan', 'none'}:
-                website = None
-            contacts[code] = {
-                'city': str(r.get('city', '')).strip() or None,
-                'website': valid_url(website) if website else None,
-            }
+        rows = list(csv.reader(f))
+    if not rows:
+        return contacts
+    header = [str(x).strip().lower() for x in rows[0]]
+    if {'college_code', 'college_name', 'city', 'website'}.issubset(header):
+        data_rows = [dict(zip(header, r)) for r in rows[1:]]
+    else:
+        data_rows = [
+            {'college_code': r[0] if len(r) > 0 else '',
+             'college_name': r[1] if len(r) > 1 else '',
+             'city': r[2] if len(r) > 2 else '',
+             'website': r[3] if len(r) > 3 else ''}
+            for r in rows
+        ]
+    for r in data_rows:
+        code = str(r.get('college_code', '')).strip()
+        if not code:
+            continue
+        website = str(r.get('website', '')).strip()
+        if website.lower() in {'', 'unknown', 'nan', 'none'}:
+            website = None
+        contacts[code] = {
+            'institution_name': str(r.get('college_name', '')).strip() or None,
+            'city': str(r.get('city', '')).strip() or None,
+            'website': valid_url(website) if website else None,
+        }
     return contacts
 
 
@@ -511,22 +526,23 @@ def sync_institutes_to_resolver(conn):
     data has been deleted.
     """
     refs = _reference_contacts()
+    # Resolver is a derived view of production-backed institutes. Never delete
+    # rows from the authoritative institutes table while merely opening this page.
+    # Use EXISTS instead of NOT IN so NULLs in imported data cannot empty the scope.
     conn.execute(
-        "DELETE FROM college_website_resolver "
-        "WHERE institution_code NOT IN ("
-        "SELECT institution_code FROM cutoffs "
-        "UNION SELECT institution_code FROM seats)"
+        "DELETE FROM college_website_resolver r "
+        "WHERE r.institution_code LIKE 'GH:%' "
+        "OR NOT EXISTS ("
+        "SELECT 1 FROM cutoffs c WHERE c.institution_code=r.institution_code "
+        "UNION ALL "
+        "SELECT 1 FROM seats s WHERE s.institution_code=r.institution_code)"
     )
-    conn.execute(
-        "DELETE FROM institutes "
-        "WHERE institution_code NOT IN ("
-        "SELECT institution_code FROM cutoffs "
-        "UNION SELECT institution_code FROM seats)"
-    )
-    conn.execute("DELETE FROM college_website_resolver WHERE institution_code LIKE 'GH:%'")
     rows = conn.execute(
-        "SELECT institution_code,institution_name,city,website,address "
-        "FROM institutes ORDER BY institution_code"
+        "SELECT i.institution_code,i.institution_name,i.city,i.website,i.address "
+        "FROM institutes i "
+        "WHERE EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code=i.institution_code) "
+        "   OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code=i.institution_code) "
+        "ORDER BY i.institution_code"
     ).fetchall()
     count = 0
     for r in rows:
@@ -534,6 +550,11 @@ def sync_institutes_to_resolver(conn):
         if not code:
             continue
         ref = refs.get(code, {})
+        ref_name = str(ref.get('institution_name') or '').strip()
+        db_name = str(r['institution_name'] or '').strip()
+        # Imports can temporarily store only the CAP choice code as the name.
+        # Prefer the maintained reference name when it is available.
+        name = ref_name if ref_name and (not db_name or db_name == code) else db_name
         city = r['city'] or ref.get('city')
         website = valid_url(r['website']) if r['website'] else ref.get('website')
         source = 'institutes' if r['website'] else ('reference_csv' if website else None)
@@ -546,7 +567,7 @@ def sync_institutes_to_resolver(conn):
                 "UPDATE college_website_resolver SET institution_name=?,"
                 "city=COALESCE(city,?),updated_at=CURRENT_TIMESTAMP "
                 "WHERE institution_code=?",
-                (r['institution_name'], city, code),
+                (name, city, code),
             )
         else:
             conn.execute(
@@ -579,7 +600,7 @@ def sync_institutes_to_resolver(conn):
                      END,
                      updated_at=CURRENT_TIMESTAMP""",
                 (
-                    code, r['institution_name'], city, website,
+                    code, name, city, website,
                     'CANDIDATE' if website else 'PENDING',
                     source, website,
                 ),
