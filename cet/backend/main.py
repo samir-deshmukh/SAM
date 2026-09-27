@@ -37,6 +37,14 @@ async def lifespan(_app):
         # STAGED by an older worker crash. This is intentionally limited to clean
         # STAGED jobs; FAILED jobs must not be retried silently.
         _recover_staged_imports()
+        # Rebuild the derived website-resolver view after every deploy so an
+        # admin page visit is never required to make current CAP colleges appear.
+        try:
+            with connect() as c:
+                resolver_count = sync_institutes_to_resolver(c)
+            log.info('Startup resolver sync completed: colleges=%s', resolver_count)
+        except Exception:
+            log.exception('Startup resolver sync failed')
 
     def _recover_staged_imports():
         try:
