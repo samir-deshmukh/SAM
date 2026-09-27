@@ -666,7 +666,7 @@ def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
         for pid in affected_program_ids:
             used=conn.execute("SELECT EXISTS(SELECT 1 FROM cutoffs WHERE program_id=?) AS used",(pid,)).fetchone()["used"]
             if not used:
-                conn.execute("DELETE FROM programs WHERE id=?",(pid,))
+                conn.execute("DELETE FROM programs WHERE program_id=?",(pid,))
         conn.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",
                      (actor_user_id,"PURGE_ROLLED_BACK_RELEASE","RELEASE",str(release_id),json.dumps({"release_key":release["release_key"],"source_job_id":job_id}),None,"Permanent deletion of rolled-back release and source import"))
         conn.commit()
@@ -748,7 +748,7 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
         for pid in affected_program_ids:
             used=conn.execute("SELECT EXISTS(SELECT 1 FROM cutoffs WHERE program_id=?) AS used",(pid,)).fetchone()["used"]
             if not used:
-                orphan_programs += conn.execute("DELETE FROM programs WHERE id=?",(pid,)).rowcount
+                orphan_programs += conn.execute("DELETE FROM programs WHERE program_id=?",(pid,)).rowcount
 
         conn.execute("UPDATE data_releases SET status='ROLLED_BACK',notes=?,backup_path=NULL WHERE id=?",
                      (f"{release['notes'] or ''}\nRollback: {reason}",release_id))
