@@ -104,7 +104,7 @@ async function rollback(id){const reason=prompt('Revoke reason (required):');if(
 
 
 def derived_data() -> str:
-    body='''<div class="title"><div><h1>Slide 2 Data Builder</h1><p>Manually calculate and store the precomputed data used by the public college drawer.</p></div><div class="live"><span class="dot"></span>Admin controlled</div></div>
+    body='''<div class="title"><div><h1>CET Data Calculator</h1><p>Manually calculate and store the precomputed data used by the public college drawer.</p></div><div class="live"><span class="dot"></span>Admin controlled</div></div>
 <div class="pagegrid"><div class="card panel"><div class="toolbar"><h2>Build derived data</h2><span class="muted small">No automatic rebuilds</span></div>
 <div class="notice">The source-of-truth tables remain untouched. This job only rebuilds the small runtime tables used by <b>graph/trend points, college category/quota options, and seat matrix</b>.</div>
 <div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button></div>
