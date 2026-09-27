@@ -21,12 +21,23 @@ IMPORTS = BASE / 'data' / 'imports'
 IMPORTS.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(_app):
-    init_admin_schema()
-    ensure_part4_schema()
+    # Do database migrations/recovery in the background. During a rolling
+    # deploy an older instance can still hold a transaction, and PostgreSQL
+    # DDL can otherwise block Uvicorn startup long enough for Render's port
+    # scanner to declare the new instance unhealthy.
+    def _startup_database_maintenance():
+        try:
+            init_admin_schema()
+            ensure_part4_schema()
+        except Exception:
+            log.exception('Database startup maintenance failed')
+            return
 
-    # Recover imports that completed extraction/validation but were left in
-    # STAGED by an older worker crash. This is intentionally limited to clean
-    # STAGED jobs; FAILED jobs must not be retried silently.
+        # Recover imports that completed extraction/validation but were left in
+        # STAGED by an older worker crash. This is intentionally limited to clean
+        # STAGED jobs; FAILED jobs must not be retried silently.
+        _recover_staged_imports()
+
     def _recover_staged_imports():
         try:
             with connect() as c:
@@ -42,8 +53,8 @@ async def lifespan(_app):
         except Exception:
             log.exception('Unable to scan for STAGED import recovery')
 
-    threading.Thread(target=_recover_staged_imports, daemon=True,
-                     name='staged-import-recovery').start()
+    threading.Thread(target=_startup_database_maintenance, daemon=True,
+                     name='database-startup-maintenance').start()
     yield
 
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
