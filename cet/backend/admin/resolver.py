@@ -537,12 +537,20 @@ def sync_institutes_to_resolver(conn):
         "UNION ALL "
         "SELECT 1 FROM seats s WHERE s.institution_code=r.institution_code)"
     )
+    # Production records are the ultimate source of scope. Do not require
+    # the derived institutes table to already exist; older rollback/import flows
+    # can leave cutoffs/seats intact while institutes needs reconstruction.
     rows = conn.execute(
-        "SELECT i.institution_code,i.institution_name,i.city,i.website,i.address "
-        "FROM institutes i "
-        "WHERE EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code=i.institution_code) "
-        "   OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code=i.institution_code) "
-        "ORDER BY i.institution_code"
+        "SELECT x.institution_code, "
+        "       COALESCE(i.institution_name,'') AS institution_name, "
+        "       i.city, i.website, i.address "
+        "FROM ("
+        "  SELECT DISTINCT institution_code FROM cutoffs "
+        "  UNION "
+        "  SELECT DISTINCT institution_code FROM seats"
+        ") x "
+        "LEFT JOIN institutes i ON i.institution_code=x.institution_code "
+        "ORDER BY x.institution_code"
     ).fetchall()
     count = 0
     for r in rows:
@@ -554,7 +562,15 @@ def sync_institutes_to_resolver(conn):
         db_name = str(r['institution_name'] or '').strip()
         # Imports can temporarily store only the CAP choice code as the name.
         # Prefer the maintained reference name when it is available.
-        name = ref_name if ref_name and (not db_name or db_name == code) else db_name
+        name = ref_name if ref_name and (not db_name or db_name == code) else (db_name or ref_name or code)
+        # Repair a missing derived institute row from production-backed scope.
+        conn.execute(
+            "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
+            "ON CONFLICT(institution_code) DO UPDATE SET "
+            "institution_name=CASE WHEN institutes.institution_name IS NULL OR institutes.institution_name='' "
+            "THEN excluded.institution_name ELSE institutes.institution_name END",
+            (code, name),
+        )
         city = r['city'] or ref.get('city')
         website = valid_url(r['website']) if r['website'] else ref.get('website')
         source = 'institutes' if r['website'] else ('reference_csv' if website else None)
