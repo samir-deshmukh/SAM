@@ -1076,26 +1076,34 @@ async def resolver_manual_verify(request: Request):
     except Exception:
         body={}
     code=str(body.get('institution_code','')).strip()
-    if not code:
-        raise HTTPException(400,'Institution code is required')
+    posted_name=str(body.get('institution_name','')).strip()
+    posted_website=str(body.get('website','')).strip()
+    if not code and not posted_website and not posted_name:
+        raise HTTPException(400,'College identity is required')
     with connect() as c:
-        row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
-        if not row:
-            # The resolver list is a derived table. If a row was removed between
-            # page load and click, recover it from the authoritative institutes row.
-            institute=c.execute('SELECT institution_code,institution_name,city,website FROM institutes WHERE institution_code=?',(code,)).fetchone()
-            if not institute:
-                raise HTTPException(404,'College not found')
-            c.execute("INSERT INTO college_website_resolver (institution_code,institution_name,city,website,status,source,updated_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT (institution_code) DO NOTHING",(institute['institution_code'],institute['institution_name'],institute['city'],institute['website'],'PENDING','cap_institutes'))
+        row=None
+        if code:
             row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
-            if not row:
-                raise HTTPException(409,'College could not be prepared for verification')
+        # The browser row can outlive a resolver sync. Fall back to the exact
+        # website or college name that was rendered in that row.
+        if not row and posted_website:
+            row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE LOWER(TRIM(website))=LOWER(TRIM(?))',(posted_website,)).fetchone()
+        if not row and posted_name:
+            row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE LOWER(TRIM(institution_name))=LOWER(TRIM(?))',(posted_name,)).fetchone()
+        if not row and code:
+            institute=c.execute('SELECT institution_code,institution_name,city,website FROM institutes WHERE institution_code=?',(code,)).fetchone()
+            if institute:
+                row=dict(institute)
+                row['status']='PENDING'
+        if not row:
+            raise HTTPException(404,'College not found in current CAP data')
+        code=str(row['institution_code']).strip()
         website=str(row['website'] or '').strip()
         if not website:
             raise HTTPException(409,'This college has no website URL to verify')
         old_status=str(row['status'] or '')
         note='Manually verified by admin after checking the website.'
-        c.execute("UPDATE college_website_resolver SET status='VERIFIED',source='manual_admin',source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?",(website,note,code))
+        c.execute("INSERT INTO college_website_resolver (institution_code,institution_name,city,website,status,source,source_url,verification_note,last_checked_at,updated_at) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT (institution_code) DO UPDATE SET institution_name=excluded.institution_name,city=COALESCE(excluded.city,college_website_resolver.city),website=excluded.website,status='VERIFIED',source='manual_admin',source_url=excluded.source_url,verification_note=excluded.verification_note,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP",(code,row['institution_name'],row['city'],website,'VERIFIED','manual_admin',website,note))
         c.execute("UPDATE institutes SET website=?,website_source='manual_admin',verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",(website,code))
         c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",(u['uid'],'MANUAL_VERIFY_WEBSITE','INSTITUTE',code,json.dumps({'status':old_status,'website':website}),json.dumps({'status':'VERIFIED','website':website}),'Admin manually checked the website and marked it verified'))
         c.commit()
