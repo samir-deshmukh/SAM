@@ -662,11 +662,12 @@ def sync_github_india(conn):
         conn.execute("INSERT INTO college_website_resolver(institution_code,institution_name,website,status,source,source_url) VALUES (?,?,?,?,?,?) ON CONFLICT(institution_code) DO UPDATE SET website=excluded.website,source=excluded.source,source_url=excluded.source_url",(code,name,url,'CANDIDATE','github_india_2021',GITHUB_MAPPING_URL)); n+=1
     return n
 
-def gemini_find(college_name,city=None):
+def gemini_find(college_name,city=None,excluded_url=None):
     key=os.getenv('GEMINI_API_KEY','').strip()
     if not key:raise RuntimeError('GEMINI_API_KEY is not configured')
     location=f', {city}' if city else ''
-    prompt=f'''Find the official website of this Indian college/institution. College: {college_name}{location}. Use Google Search. Return ONLY valid JSON with keys official_url, city, address, confidence, note. The URL must be the institution's own official website, not a directory, social profile, ranking site, admissions portal, or aggregator. City must be the physical city/town of the institution, not a district or state. Address should be the official campus address when available. If uncertain, set the uncertain field to null and use a low confidence value.'''
+    exclusion=f' Do NOT return this previously rejected website: {excluded_url}.' if excluded_url else ''
+    prompt=f'''Find the official website of this Indian college/institution. College: {college_name}{location}. Use Google Search. Return ONLY valid JSON with keys official_url, city, address, confidence, note. The URL must be the institution's own official website, not a directory, social profile, ranking site, admissions portal, or aggregator. City must be the physical city/town of the institution, not a district or state. Address should be the official campus address when available. If uncertain, set the uncertain field to null and use a low confidence value.{exclusion}'''
     payload={'contents':[{'parts':[{'text':prompt}]}],'tools':[{'google_search':{}}]}
     req=urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe="")}:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':key},method='POST')
     try:

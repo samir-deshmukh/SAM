@@ -1017,6 +1017,8 @@ async def resolver_find(request: Request):
     try: body=await request.json()
     except Exception: body={}
     ids=[str(x).strip() for x in body.get('ids',[]) if str(x).strip()][:25]
+    force_research=bool(body.get('force_research'))
+    excluded_website=str(body.get('exclude_website') or '').strip()
     if not ids: raise HTTPException(400,'No colleges selected')
     results=[]
     with connect() as c:
@@ -1025,7 +1027,8 @@ async def resolver_find(request: Request):
             if not row: continue
             r = dict(row)
             candidate = r.get('website')
-            v = verify_url(candidate, r['institution_name']) if candidate else {'ok': False}
+            v = ({'ok': False, 'url': None, 'note': 'Forced AI re-research after website rejection'}
+                 if force_research else (verify_url(candidate, r['institution_name']) if candidate else {'ok': False}))
             if v.get('ok'):
                 try:
                     ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'))
@@ -1056,7 +1059,7 @@ async def resolver_find(request: Request):
                     })
                     continue
             try:
-                ai, _ = gemini_find(r['institution_name'], r.get('city'))
+                ai, _ = gemini_find(r['institution_name'], r.get('city'), excluded_website if force_research else None)
                 url = ai.get('official_url')
                 city = str(ai.get('city')).strip() if ai.get('city') else r.get('city')
                 address = str(ai.get('address')).strip() if ai.get('address') else None
