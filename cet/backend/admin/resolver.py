@@ -541,17 +541,27 @@ def sync_institutes_to_resolver(conn):
     # the derived institutes table to already exist; older rollback/import flows
     # can leave cutoffs/seats intact while institutes needs reconstruction.
     rows = conn.execute(
-        "SELECT x.institution_code, "
-        "       COALESCE(i.institution_name,'') AS institution_name, "
-        "       i.city, i.website, i.address "
-        "FROM ("
-        "  SELECT DISTINCT institution_code FROM cutoffs "
-        "  UNION "
-        "  SELECT DISTINCT institution_code FROM seats"
-        ") x "
-        "LEFT JOIN institutes i ON i.institution_code=x.institution_code "
+        "SELECT x.institution_code, COALESCE(i.institution_name,'') AS institution_name, "
+        "i.city, i.website, i.address FROM ("
+        "SELECT DISTINCT institution_code FROM cutoffs "
+        "UNION SELECT DISTINCT institution_code FROM seats"
+        ") x LEFT JOIN institutes i ON i.institution_code=x.institution_code "
         "ORDER BY x.institution_code"
     ).fetchall()
+    # Fallback to the exact production-backed institute scope used by the
+    # public /api/options endpoint. This prevents the resolver from appearing
+    # empty if the compound UNION scope behaves differently on a migrated DB.
+    if not rows:
+        rows = conn.execute(
+            "SELECT i.institution_code, COALESCE(i.institution_name,'') AS institution_name, "
+            "i.city, i.website, i.address FROM institutes i WHERE "
+            "EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code=i.institution_code) "
+            "OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code=i.institution_code) "
+            "ORDER BY i.institution_code"
+        ).fetchall()
+        log.warning('Resolver UNION scope returned 0; public-scope fallback returned %s rows', len(rows))
+    else:
+        log.info('Resolver scope returned %s production-backed rows', len(rows))
     count = 0
     for r in rows:
         code = str(r['institution_code']).strip()
