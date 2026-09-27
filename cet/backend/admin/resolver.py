@@ -456,8 +456,25 @@ def resolve_import_job(job_id=None, limit=None):
 
 
 def sync_institutes_to_resolver(conn):
-    """Synchronize the resolver scope from the authoritative CAP institutes table."""
+    """Synchronize resolver only from institutes still backed by production data.
+
+    Older rollback flows could leave orphan institute rows behind. Those rows
+    must never reappear in the resolver queue after the underlying production
+    data has been deleted.
+    """
     refs = _reference_contacts()
+    conn.execute(
+        "DELETE FROM college_website_resolver "
+        "WHERE institution_code NOT IN ("
+        "SELECT institution_code FROM cutoffs "
+        "UNION SELECT institution_code FROM seats)"
+    )
+    conn.execute(
+        "DELETE FROM institutes "
+        "WHERE institution_code NOT IN ("
+        "SELECT institution_code FROM cutoffs "
+        "UNION SELECT institution_code FROM seats)"
+    )
     conn.execute("DELETE FROM college_website_resolver WHERE institution_code LIKE 'GH:%'")
     rows = conn.execute(
         "SELECT institution_code,institution_name,city,website,address "
