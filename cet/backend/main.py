@@ -411,23 +411,52 @@ def _resolver_server_busy():
 
 
 def _resolve_one_import_background(job_id: int):
-    """Start the resolver automatically, but process only one college.
+    """Run exactly one resolver step in a short-lived child process.
 
-    PDF extraction has already finished before this function is called, so AI
-    network work cannot compete with pdfplumber/Pillow memory usage. The admin
-    resolver can continue the queue one college at a time afterward.
+    The web service is intentionally small (512 MB on the current Render
+    instance). Gemini's Google-search response handling is isolated from the
+    long-lived FastAPI process so temporary allocations are returned to the OS
+    when the resolver step exits. The worker itself takes a PostgreSQL advisory
+    lock, preventing concurrent resolver children from multiplying memory use.
     """
     try:
         busy, reason = _resolver_server_busy()
         if busy:
             log.info('Website resolver deferred after import %s: %s', job_id, reason)
             return
-        result = resolve_import_job(job_id, limit=1)
-        log.info(
-            'Automatic website resolver step: job_id=%s resolved=%s searched=%s failed=%s remaining=%s',
-            job_id, result.get('resolved'), result.get('searched'),
-            result.get('failed'), result.get('remaining'),
+        env = os.environ.copy()
+        env.setdefault('PYTHONIOENCODING', 'utf-8')
+        env.setdefault('PYTHONUTF8', '1')
+        env.setdefault('OMP_THREAD_LIMIT', '1')
+        env.setdefault('OPENBLAS_NUM_THREADS', '1')
+        env.setdefault('MKL_NUM_THREADS', '1')
+        cmd = [
+            sys.executable,
+            str(BASE / 'scripts' / 'resolver_worker.py'),
+            str(job_id),
+            '--limit', '1',
+        ]
+        completed = subprocess.run(
+            cmd,
+            cwd=str(BASE),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=150,
+            check=False,
         )
+        output = (completed.stdout or '').strip()
+        if completed.returncode != 0:
+            log.error(
+                'Automatic website resolver worker failed: job_id=%s exit=%s output=%s',
+                job_id, completed.returncode, output[-4000:],
+            )
+        else:
+            log.info('Automatic website resolver worker: job_id=%s output=%s',
+                     job_id, output[-4000:])
+    except subprocess.TimeoutExpired:
+        log.error('Automatic website resolver worker timed out: job_id=%s', job_id)
     except Exception:
         # Resolver failure must never turn a clean data import into a failed
         # import. The queue remains visible in the Resolver admin page.
