@@ -426,7 +426,7 @@ def start_derived_data_build(request: Request, background_tasks: BackgroundTasks
                 raise HTTPException(400, f'Unknown course family: {course}')
         row = connection.execute(
             "INSERT INTO derived_data_build_jobs(course_family,status,progress,message,created_by) VALUES (?,?,?,?,?) RETURNING id",
-            (course, 'QUEUED', 0, 'Queued by admin', current_user['id']),
+            (course, 'QUEUED', 0, 'Queued by admin', current_user['uid']),
         ).fetchone()
         job_id = int(row['id'])
         connection.commit()
