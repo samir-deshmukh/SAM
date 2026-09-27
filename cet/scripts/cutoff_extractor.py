@@ -62,10 +62,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import fitz
 try:
-    from scripts import fitz_pdfium as fitz
-except ImportError:  # direct execution
-    import fitz_pdfium as fitz
+    from scripts import fitz_pdfium as fitz_pdfium
+except ImportError:
+    import fitz_pdfium
 
 try:
     import pytesseract
@@ -562,38 +563,75 @@ def process_single_pdf(
 ) -> Dict[str, Any]:
     doc = fitz.open(pdf_path)
     print(f"  pages: {len(doc)}")
-
-    technique, scores = choose_extraction_technique(doc, dpi, lang)
-    print(f"  extraction technique (auto-detected): {technique}  "
-          f"(sample hits: native={scores['native']}, ocr={scores['ocr']})")
+    technique = "hybrid"
+    scores = {"native": 0, "pdfium": 0, "ocr": 0}
+    print("  extraction technique: PDFium + PyMuPDF per-page; OCR only as final fallback")
+    native_doc = doc
+    try:
+        pdfium_doc = fitz_pdfium.open(pdf_path)
+    except Exception as exc:
+        pdfium_doc = None
+        print(f"  PDFium open failed; using PyMuPDF: {exc}")
 
     all_records_raw: List[Dict[str, Any]] = []
     page_audits: List[Dict[str, Any]] = []
     camelot_all_tables: List[Dict] = []
-    source_label = "native_text" if technique == "native" else "ocr"
 
-    for pnum in range(1, len(doc) + 1):
-        page = doc[pnum - 1]
+    for pnum in range(1, len(native_doc) + 1):
+        native_page = native_doc[pnum - 1]
+        native_text = native_page.get_text("text") or ""
+        native_lines = merge_split_rank_lines(normalize_lines(native_text))
+        native_metadata = extract_metadata(native_lines)
+        native_records = parse_structured_page(pnum, native_lines, "native_text", native_metadata)
 
-        if technique == "native":
-            text = page.get_text("text") or ""
-        else:
+        pdfium_records: List[Dict[str, Any]] = []
+        pdfium_error = ""
+        if pdfium_doc is not None:
             try:
-                text = ocr_page(page, dpi, lang)
-            except Exception:
-                text = ""
+                pdfium_page = pdfium_doc[pnum - 1]
+                pdfium_text = pdfium_page.get_text("text") or ""
+                pdfium_lines = merge_split_rank_lines(normalize_lines(pdfium_text))
+                pdfium_metadata = extract_metadata(pdfium_lines)
+                pdfium_records = parse_structured_page(pnum, pdfium_lines, "pdfium_text", pdfium_metadata)
+            except Exception as exc:
+                pdfium_error = str(exc)
 
-        lines = merge_split_rank_lines(normalize_lines(text))
-        metadata = extract_metadata(lines)
-        records = parse_structured_page(pnum, lines, source_label, metadata)
+        if len(pdfium_records) >= len(native_records) and pdfium_records:
+            records = pdfium_records
+            source_used = "pdfium_text"
+        elif native_records:
+            records = native_records
+            source_used = "native_text"
+        else:
+            records = []
+            source_used = "none"
+
+        if not records and pytesseract is not None:
+            try:
+                ocr_text = ocr_page(native_page, dpi, lang)
+                ocr_lines = merge_split_rank_lines(normalize_lines(ocr_text))
+                ocr_metadata = extract_metadata(ocr_lines)
+                ocr_records = parse_structured_page(pnum, ocr_lines, "ocr", ocr_metadata)
+                if ocr_records:
+                    records = ocr_records
+                    source_used = "ocr"
+            except Exception as exc:
+                print(f"    p{pnum:>3}: OCR fallback failed: {exc}")
+
         for r in records:
             r["source_pdf"] = pdf_path.name
+
+        scores["native"] += len(native_records)
+        scores["pdfium"] += len(pdfium_records)
+        if source_used == "ocr":
+            scores["ocr"] += len(records)
 
         records_camelot: List[Dict[str, Any]] = []
         if use_camelot:
             tables = run_camelot_on_page(pdf_path, pnum)
             if tables:
                 camelot_all_tables.extend(tables)
+                metadata = extract_metadata(native_lines)
                 records_camelot = camelot_to_records(tables, metadata, pnum)
                 for r in records_camelot:
                     r["source_pdf"] = pdf_path.name
@@ -601,13 +639,22 @@ def process_single_pdf(
         all_records_raw.extend(records + records_camelot)
         page_audits.append({
             "page": pnum,
-            f"{source_label}_records": len(records),
+            "native_records": len(native_records),
+            "pdfium_records": len(pdfium_records),
+            "ocr_fallback_records": len(records) if source_used == "ocr" else 0,
             "camelot_records": len(records_camelot),
+            "source": source_used,
+            "pdfium_error": pdfium_error,
         })
-        print(f"    p{pnum:>3}: {source_label}={len(records):>3} "
-              f"camelot={len(records_camelot):>3}")
+        print(f"    p{pnum:>3}: source={source_used:<12} native={len(native_records):>3} pdfium={len(pdfium_records):>3} camelot={len(records_camelot):>3}")
 
     merged_records = deduplicate_and_merge(all_records_raw)
+    if not merged_records:
+        raise RuntimeError(
+            "Cutoff extractor found no rank/percentile records. "
+            "The PDF may be image-only, use an unsupported text encoding, "
+            "or have an unsupported table layout."
+        )
 
     suffixed = [r for r in merged_records if r.get("rank_suffix")]
     if suffixed:
@@ -634,6 +681,11 @@ def process_single_pdf(
     write_json(audit_path, page_audits)
 
     doc.close()
+    if pdfium_doc is not None:
+        try:
+            pdfium_doc.close()
+        except Exception:
+            pass
     print(f"    -> {len(merged_records)} unique rows -> {csv_path.name}")
     return {
         "pdf": str(pdf_path),

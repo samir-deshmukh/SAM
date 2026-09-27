@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 
-def _pdf_text_probe(path, max_pages=3):
+def _pdf_text_probe(path, max_pages=8):
     """Read a small native-text sample for content-based PDF classification."""
     try:
         import pdfplumber
@@ -58,13 +58,16 @@ def detect_data_type(path, filename):
     seat_markers = (
         "SEAT DISTRIBUTION", "SEAT MATRIX", "CHOICE CODE", "CAP SEATS",
         "COURSE NAME", "PROVISIONAL SEAT DISTRIBUTION", "FINAL SEAT DISTRIBUTION",
+        "NUMBER OF SEATS", "CATEGORY-WISE SEAT DISTRIBUTION",
     )
     cutoff_markers = ("PERCENTILE", "RANK", "GOPENH", "LOPENH", "STAGE-I")
     seat_score = sum(marker in text for marker in seat_markers)
     cutoff_score = sum(marker in text for marker in cutoff_markers)
     if seat_score >= 2 and seat_score > cutoff_score:
         return "SEATS"
-    return "SEATS" if ("_SM" in name or "SEAT" in name or "MATRIX" in name) else "CUTOFFS"
+    if re.search(r"(^|[ _.-])SM([ _.-]|$)", name) or "SEAT" in name or "MATRIX" in name:
+        return "SEATS"
+    return "CUTOFFS"
 
 from .db import event, update_status
 from .state import JobStatus
