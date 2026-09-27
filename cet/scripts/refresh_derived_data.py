@@ -84,7 +84,7 @@ def refresh(engine, course_family: str | None = None) -> None:
             WHERE {ZERO_FILTER} AND c.is_ladies = FALSE{course_where}
         """), params)
 
-        conn.execute(text("""
+        conn.execute(text(f"""
             INSERT INTO seat_matrix_runtime
             (program_family, institution_code, capture_year, choice_code,
              allocation_lane, base_category, gender_g, gender_l,
