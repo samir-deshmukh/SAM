@@ -11,7 +11,9 @@ from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, live_processing, feedback_page, resolver_page
-from .admin.resolver import seed_from_contacts, sync_github_india, verify_url, gemini_find, sync_institutes_to_resolver, resolve_import_job
+from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
+                              gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
+                              resolve_import_job)
 from .api import router as public_api_router
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -770,21 +772,35 @@ async def resolver_find(request: Request):
             r = dict(row)
             candidate = r.get('website')
             v = verify_url(candidate, r['institution_name']) if candidate else {'ok': False}
-            if v.get('ok') and v.get('match_score',0)>=0.15:
-                c.execute('UPDATE college_website_resolver SET website=?,status=?,source=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',(v['url'],'VERIFIED',r.get('source') or 'reference_csv',v['note'],code))
-                c.execute(
-                    "UPDATE institutes SET website=?, website_source=?, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",
-                    (v['url'], r.get('source') or 'reference_csv', code),
-                )
-                results.append({
-                    'institution_code': code,
-                    'institution_name': r['institution_name'],
-                    'city': r.get('city'),
-                    'website': v['url'],
-                    'status': 'VERIFIED',
-                    'note': v['note'],
-                })
-                continue
+            if v.get('ok'):
+                try:
+                    ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'))
+                    ai_conf = float(ai_check.get('confidence') or 0)
+                    ai_url = ai_check.get('official_url')
+                except Exception as exc:
+                    ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
+                                'note': f'AI verification failed: {exc}'}
+                    ai_conf = 0
+                    ai_url = None
+                if bool(ai_check.get('verified')) and ai_conf >= 0.70 and (not ai_url or _same_site(v['url'], ai_url)):
+                    note = (ai_check.get('note') or '') + ' ' + v.get('note', '')
+                    c.execute(
+                        'UPDATE college_website_resolver SET website=?,status=?,source=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',
+                        (v['url'], 'VERIFIED', r.get('source') or 'reference_csv', note, code),
+                    )
+                    c.execute(
+                        "UPDATE institutes SET website=?, website_source=?, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",
+                        (v['url'], r.get('source') or 'reference_csv', code),
+                    )
+                    results.append({
+                        'institution_code': code,
+                        'institution_name': r['institution_name'],
+                        'city': r.get('city'),
+                        'website': v['url'],
+                        'status': 'VERIFIED',
+                        'note': note,
+                    })
+                    continue
             try:
                 ai, _ = gemini_find(r['institution_name'], r.get('city'))
                 url = ai.get('official_url')
@@ -795,15 +811,27 @@ async def resolver_find(request: Request):
                     if url
                     else {'ok': False, 'url': None, 'note': 'Gemini returned no official URL'}
                 )
-                status = (
-                    'VERIFIED'
-                    if v.get('ok') and v.get('match_score', 0) >= 0.15
-                    else ('NEEDS_REVIEW' if v.get('ok') else 'FAILED')
+                ai_check = {}
+                if v.get('ok'):
+                    try:
+                        ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city)
+                    except Exception as exc:
+                        ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
+                                    'note': f'AI verification failed: {exc}'}
+                ai_conf = float(ai_check.get('confidence') or 0)
+                ai_url = ai_check.get('official_url')
+                verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
+                    not ai_url or _same_site(v.get('url'), ai_url)
                 )
-                note = (ai.get('note') or '') + ' ' + v.get('note', '')
+                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if v.get('ok') else 'FAILED')
+                note = ' '.join(x for x in (
+                    (ai.get('note') or ''),
+                    (ai_check.get('note') or ''),
+                    v.get('note', ''),
+                ) if x)
                 c.execute('UPDATE college_website_resolver SET city=?,website=?,address=?,status=?,source=?,source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,v.get('url') or url,address,status,'gemini_google_search',v.get('url') or url,note,code))
-                if city or address or v.get('url'):
-                    c.execute('UPDATE institutes SET city=COALESCE(?,city), address=COALESCE(?,address), website=COALESCE(?,website), city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END, address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END, website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,address,v.get('url') or url,city,'gemini_google_search',address,'gemini_google_search',v.get('url') or url,'gemini_google_search',code))
+                if city or address or (verified_by_ai and v.get('url')):
+                    c.execute('UPDATE institutes SET city=COALESCE(?,city), address=COALESCE(?,address), website=COALESCE(?,website), city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END, address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END, website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,address,v.get('url') if verified_by_ai else None,city,'gemini_google_search',address,'gemini_google_search',v.get('url') if verified_by_ai else None,'gemini_google_search',code))
                 results.append({'institution_code':code,'institution_name':r['institution_name'],'city':city,'address':address,'website':v.get('url') or url,'status':status,'note':note})
             except Exception as e:
                 c.execute(

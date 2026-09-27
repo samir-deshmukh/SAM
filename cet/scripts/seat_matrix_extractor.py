@@ -453,8 +453,11 @@ def process_single_pdf(
     pdf_path: Path, outdir: Path, dpi: int, lang: str, use_ocr: bool, force_ocr: bool
 ) -> Dict[str, Any]:
     all_courses: List[Dict[str, Any]] = []
-    all_long: List[Dict[str, Any]] = []
+    # Seat rows can be enormous on CAP seat-matrix PDFs. Stream them directly
+    # to disk instead of retaining the full long table (and a second JSON copy)
+    # in RAM for the entire document.
     page_audit: List[Dict[str, Any]] = []
+    seat_rows_extracted = 0
     errors = 0
     skipped_nondata = 0
     ocr_pages = 0
@@ -463,7 +466,23 @@ def process_single_pdf(
     institution_code = ""
     institution_name = ""
 
-    with pdfplumber.open(pdf_path) as pdf:
+    stem = pdf_path.stem
+    outdir.mkdir(parents=True, exist_ok=True)
+    courses_path = outdir / f"{stem}_courses.csv"
+    courses_json_path = outdir / f"{stem}_courses.json"
+    seats_path = outdir / f"{stem}_seats_long.csv"
+    seats_json_path = outdir / f"{stem}_seats_long.json"
+    audit_path = outdir / f"{stem}_page_audit.json"
+
+    # LONG_FIELDS is fixed, so its CSV can be streamed safely. JSON is also
+    # streamed as an array to preserve the existing artifact contract.
+    with seats_path.open("w", newline="", encoding="utf-8") as seats_f, \
+         seats_json_path.open("w", encoding="utf-8") as seats_json_f, \
+         pdfplumber.open(pdf_path) as pdf:
+        seats_writer = csv.DictWriter(seats_f, fieldnames=LONG_FIELDS)
+        seats_writer.writeheader()
+        seats_json_f.write("[\n")
+        first_seat_json = True
         n_pages = len(pdf.pages)
         print(f"  pages: {n_pages}")
         for pnum in range(1, n_pages + 1):
@@ -509,12 +528,14 @@ def process_single_pdf(
                 print(f"    p{pnum:>3}: SKIPPED - {e}")
                 page_audit.append({"page": pnum, "courses": 0, "seat_rows": 0,
                                     "error": str(e), "method": method})
+                page.close()
                 continue
 
             if not courses:
                 page_audit.append({"page": pnum, "courses": 0, "seat_rows": 0,
                                     "note": "non-data page", "method": method})
                 skipped_nondata += 1
+                page.close()
                 continue
 
             for c in courses:
@@ -522,9 +543,20 @@ def process_single_pdf(
             all_courses.extend(courses)
             for r in long_rows:
                 r["source_pdf"] = pdf_path.name
-            all_long.extend(long_rows)
+                seats_writer.writerow({k: r.get(k, "") for k in LONG_FIELDS})
+                if not first_seat_json:
+                    seats_json_f.write(",\n")
+                seats_json_f.write(json.dumps(r, ensure_ascii=False))
+                first_seat_json = False
+                seat_rows_extracted += 1
             page_audit.append({"page": pnum, "courses": len(courses),
                                 "seat_rows": len(long_rows), "method": method})
+            # pdfplumber caches layout objects on Page. Explicitly flush them
+            # after every page so a large document does not accumulate pages in
+            # the web-service process.
+            page.close()
+
+        seats_json_f.write("\n]\n")
 
     # Build the course CSV field order dynamically: base fields, then
     # whatever numeric field names actually showed up (union, in first-
@@ -537,28 +569,16 @@ def process_single_pdf(
                 seen_dynamic.append(k)
     course_fields = BASE_COURSE_FIELDS + seen_dynamic + TRAILING_COURSE_FIELDS
 
-    stem = pdf_path.stem
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    with open(outdir / f"{stem}_courses.csv", "w", newline="", encoding="utf-8") as f:
+    with open(courses_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=course_fields)
         w.writeheader()
         for c in all_courses:
             w.writerow({k: c.get(k, "") for k in course_fields})
-    (outdir / f"{stem}_courses.json").write_text(
+    courses_json_path.write_text(
         json.dumps(all_courses, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    with open(outdir / f"{stem}_seats_long.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=LONG_FIELDS)
-        w.writeheader()
-        for r in all_long:
-            w.writerow({k: r.get(k, "") for k in LONG_FIELDS})
-    (outdir / f"{stem}_seats_long.json").write_text(
-        json.dumps(all_long, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
-    (outdir / f"{stem}_page_audit.json").write_text(
+    audit_path.write_text(
         json.dumps(page_audit, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
@@ -566,7 +586,7 @@ def process_single_pdf(
         "pdf": pdf_path.name,
         "pages": n_pages,
         "courses_extracted": len(all_courses),
-        "seat_rows_extracted": len(all_long),
+        "seat_rows_extracted": seat_rows_extracted,
         "pages_with_errors": errors,
         "pages_non_data": skipped_nondata,
         "pages_used_ocr": ocr_pages,

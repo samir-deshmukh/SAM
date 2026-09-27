@@ -292,10 +292,32 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                            valid, int(summary.get("merged_records", rows)), rows - row_quarantine,
                            quarantine + row_quarantine, {"extractor": summary, "validation": validation[-12000:]})
         else:
-            mod = _load_module(SCRIPTS / "seat_matrix_extractor.py", "cet_seat_extractor")
-            summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
-                                             dpi=300, lang="eng", use_ocr=True,
-                                             force_ocr=False)
+            # Seat matrices can be hundreds of pages and are substantially more
+            # memory-intensive than cutoff PDFs. Run the extractor in a child
+            # process so pdfplumber/Pillow/Tesseract allocations are released by
+            # the OS when extraction finishes instead of accumulating in the
+            # FastAPI web process. The extractor writes the same artifacts as before.
+            env = os.environ.copy()
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
+            p = subprocess.run(
+                [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
+                 str(pdf_path), "--out", str(raw), "--dpi", "300"],
+                cwd=str(BASE), capture_output=True, text=True, timeout=1800, env=env,
+            )
+            extractor_output = (p.stdout or "") + (p.stderr or "")
+            if p.returncode != 0:
+                raise RuntimeError("Seat-matrix extractor failed: " + extractor_output[-6000:])
+            summary = {}
+            # CLI prints a final JSON summary. Parse the last JSON object rather
+            # than depending on incidental progress output.
+            for line in reversed([x.strip() for x in extractor_output.splitlines()]):
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        summary = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        pass
             extracted_path = raw / f"{pdf_path.stem}_seats_long.csv"
             if not extracted_path.exists():
                 raise RuntimeError("Seat extractor produced no long-seat CSV artifact")
