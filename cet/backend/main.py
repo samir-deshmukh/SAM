@@ -400,7 +400,7 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
                 )
                 connection.commit()
                 background_tasks.add_task(_process_import_background, job_id)
-        return RedirectResponse('/admin', 303)
+        return JSONResponse({'ok': True, 'id': job_id, 'job_key': job_key, 'status': 'EXTRACTING'})
     except Exception:
         if tmp.exists():
             tmp.unlink()
