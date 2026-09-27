@@ -44,6 +44,10 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 60
 _request_history: dict[str, list[float]] = defaultdict(list)
 
+# Current public release scope. Expand deliberately when the corresponding
+# datasets have been verified and the UI is ready for them.
+PUBLIC_COURSES = {"BBA"}
+
 
 def check_rate_limit(request: Request):
     """Enforce rate limits per client IP to prevent bulk data scraping."""
@@ -85,6 +89,11 @@ def _db_available(engine) -> bool:
         return False
 
 
+def _require_public_course(course: str) -> None:
+    if course not in PUBLIC_COURSES:
+        raise HTTPException(status_code=400, detail="Course is not available in the current public release.")
+
+
 @router.get("/options")
 def public_options(request: Request):
     """Return the bounded city/course lists needed to initialize the search UI."""
@@ -96,9 +105,22 @@ def public_options(request: Request):
     if not _db_available(engine):
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
     with engine.connect() as conn:
-        city_rows = conn.execute(text("SELECT DISTINCT i.city FROM institutes i WHERE i.city IS NOT NULL AND btrim(i.city) <> '' AND (EXISTS (SELECT 1 FROM cutoffs c WHERE c.institution_code = i.institution_code) OR EXISTS (SELECT 1 FROM seats s WHERE s.institution_code = i.institution_code)) ORDER BY i.city"))
+        city_rows = conn.execute(text("""
+            SELECT DISTINCT i.city
+            FROM institutes i
+            WHERE i.city IS NOT NULL
+              AND btrim(i.city) <> ''
+              AND EXISTS (
+                  SELECT 1
+                  FROM cutoffs c
+                  JOIN programs p ON p.program_id = c.program_id
+                  WHERE c.institution_code = i.institution_code
+                    AND p.program_family = 'BBA'
+              )
+            ORDER BY i.city
+        """))
         cities = [str(r[0]) for r in city_rows]
-    return {"cities": cities, "courses": available_program_families(engine)}
+    return {"cities": cities, "courses": sorted(PUBLIC_COURSES)}
 
 
 class CollegeCard(BaseModel):
@@ -140,15 +162,13 @@ def _drawer_metadata(engine, course: str, institution_codes: list[str]) -> dict[
     code_sql = ", ".join(f":code_{index}" for index in range(len(institution_codes)))
     query = text(
         f"""
-        SELECT c.institution_code, c.is_ladies, c.year,
-               c.base_category, c.section_code
-        FROM cutoffs c
-        JOIN programs p ON p.program_id = c.program_id
-        WHERE p.program_family = :course
-          AND c.institution_code IN ({code_sql})
-          AND NOT (c.rank_number = 0 AND c.percentile = 0.0)
-        ORDER BY c.institution_code, c.is_ladies, c.year,
-                 c.base_category, c.section_code
+        SELECT institution_code, is_ladies, year,
+               base_category, section_code
+        FROM cutoff_filter_options
+        WHERE program_family = :course
+          AND institution_code IN ({code_sql})
+        ORDER BY institution_code, is_ladies, year,
+                 base_category, section_code
         """
     )
     params = {"course": course, **placeholders}
@@ -194,13 +214,12 @@ def _legacy_search_metadata(engine, course: str, institution_codes: list[str]) -
 
     query = text(
         f"""
-        SELECT c.institution_code, c.year, c.percentile, c.rank_number
-        FROM cutoffs c
-        JOIN programs p ON p.program_id = c.program_id
-        WHERE p.program_family = :course
-          AND c.institution_code IN ({", ".join(placeholders)})
-          AND NOT (c.rank_number = 0 AND c.percentile = 0.0)
-        ORDER BY c.institution_code, c.year
+        SELECT institution_code, year, low_percentile,
+               high_percentile, low_rank
+        FROM cutoff_college_year_summary
+        WHERE program_family = :course
+          AND institution_code IN ({", ".join(placeholders)})
+        ORDER BY institution_code, year
         """
     )
 
@@ -211,40 +230,165 @@ def _legacy_search_metadata(engine, course: str, institution_codes: list[str]) -
     for row in rows:
         code = str(row[0])
         year = int(row[1])
-        pct = float(row[2])
-        rank = int(row[3])
+        low_pct = float(row[2])
+        high_pct = float(row[3])
+        low_rank = int(row[4]) if row[4] is not None else 0
         item = result.setdefault(code, {"history": [], "graph_history": []})
-        item.setdefault("_years", {}).setdefault(year, []).append((pct, rank))
+        item["history"].append({
+            "year": year,
+            "percentile": low_pct,
+            "low": low_pct,
+            "high": high_pct,
+            "rank": low_rank,
+        })
 
     for item in result.values():
-        years = item.pop("_years", {})
-        history = []
-        for year in sorted(years):
-            values = years[year]
-            low_pct, low_rank = min(values, key=lambda v: v[0])
-            high_pct = max(v[0] for v in values)
-            history.append({
-                "year": year,
-                "percentile": low_pct,
-                "low": low_pct,
-                "high": high_pct,
-                "rank": low_rank,
-            })
-        item["history"] = history
+        item["history"].sort(key=lambda h: h["year"])
         item["graph_history"] = [
             {"year": h["year"], "low": h["low"], "high": h["high"]}
-            for h in history
+            for h in item["history"]
         ]
-        if history:
-            item["percentile"] = min(h["percentile"] for h in history)
-            item["cutoff"] = next(
-                h["rank"] for h in history if h["percentile"] == item["percentile"]
-            )
+        if item["history"]:
+            best = min(item["history"], key=lambda h: h["percentile"])
+            item["percentile"] = best["percentile"]
+            item["cutoff"] = best["rank"]
         else:
             item["percentile"] = 0.0
             item["cutoff"] = 0
 
     return result
+
+
+@router.get("/colleges/{institution_code}/trend-options")
+def college_trend_options(
+    request: Request,
+    institution_code: str,
+    course: str = Query(...),
+):
+    """Return only the precomputed category/quota/year options for one college."""
+    check_rate_limit(request)
+    _require_public_course(course)
+    engine = get_active_engine()
+    if not _db_available(engine):
+        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT is_ladies, year, base_category, section_code
+            FROM cutoff_filter_options
+            WHERE program_family = :course AND institution_code = :institution
+            ORDER BY is_ladies, year, base_category, section_code
+        """), {"course": course, "institution": institution_code}).fetchall()
+    options = {"0": {"years": set(), "categories": {}}, "1": {"years": set(), "categories": {}}}
+    for row in rows:
+        key = "1" if bool(row[0]) else "0"
+        options[key]["years"].add(int(row[1]))
+        options[key]["categories"].setdefault(str(row[2]), set()).add(str(row[3]))
+    for value in options.values():
+        value["years"] = sorted(value["years"])
+        value["categories"] = [
+            {"value": cat, "quotas": sorted(quotas)}
+            for cat, quotas in sorted(value["categories"].items())
+        ]
+    return {"institution_code": institution_code, "course": course, "options": options}
+
+
+@router.get("/colleges/{institution_code}/trend")
+def college_trend(
+    request: Request,
+    institution_code: str,
+    course: str = Query(...),
+    category: Optional[str] = Query(None),
+    quota: Optional[str] = Query(None),
+    ladies: bool = Query(False),
+):
+    """Return precomputed trend points for one college/filter combination."""
+    check_rate_limit(request)
+    _require_public_course(course)
+    engine = get_active_engine()
+    if not _db_available(engine):
+        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
+    sql = """
+        SELECT program_id, base_category, is_ladies, section_code,
+               year, round, closing_percentile, closing_rank
+        FROM cutoff_trend_points
+        WHERE program_family = :course
+          AND institution_code = :institution
+          AND is_ladies = :ladies
+    """
+    params = {
+        "course": course,
+        "institution": institution_code,
+        "ladies": ladies,
+    }
+    if category:
+        sql += " AND base_category = :category"
+        params["category"] = category
+    if quota:
+        sql += " AND section_code = :quota"
+        params["quota"] = quota
+    sql += " ORDER BY program_id, base_category, section_code, year, round"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    groups = {}
+    for row in rows:
+        key = (int(row[0]), str(row[1]), str(row[3]))
+        group = groups.setdefault(key, {
+            "branch": int(row[0]),
+            "college": institution_code,
+            "category": str(row[1]),
+            "ladies": bool(row[2]),
+            "section": str(row[3]),
+            "points": [],
+        })
+        group["points"].append({
+            "year": int(row[4]),
+            "round": int(row[5]),
+            "percentile": round(float(row[6]), 7),
+            "rank": int(row[7]) if row[7] is not None else None,
+        })
+    return {"course": course, "college": institution_code, "groups": list(groups.values())}
+
+
+@router.get("/colleges/{institution_code}/seats")
+def get_college_seats(
+    request: Request,
+    institution_code: str,
+    course: str = Query(..., description="Course family (e.g. MBA)"),
+):
+    """Fetch the precomputed latest seat matrix for one college."""
+    check_rate_limit(request)
+    _require_public_course(course)
+    engine = get_active_engine()
+    if not _db_available(engine):
+        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT capture_year, choice_code, allocation_lane, base_category,
+                   gender_g, gender_l, category_total, is_total
+            FROM seat_matrix_runtime
+            WHERE institution_code = :institution
+              AND program_family = :course
+            ORDER BY choice_code, allocation_lane, base_category
+        """), {"institution": institution_code, "course": course}).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
+    capture_year = max(int(r[0]) for r in rows)
+    data = {}
+    for row in rows:
+        choice = str(row[1])
+        allocation = str(row[2])
+        data.setdefault(choice, {}).setdefault(allocation, []).append({
+            "category": str(row[3]),
+            "G": int(row[4]) if row[4] is not None else None,
+            "L": int(row[5]) if row[5] is not None else None,
+            "total": int(row[6]) if row[6] is not None else None,
+        })
+    return {
+        "institution_code": institution_code,
+        "course": course,
+        "capture_year": capture_year,
+        "data": data,
+    }
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -255,7 +399,7 @@ def search_colleges(
         ..., ge=0.0, le=100.0, description="Candidate CET percentile between 0 and 100"
     ),
     city: Optional[str] = Query(None, description="Optional city filter (case-insensitive)"),
-    sort: str = Query("comp", pattern="^(comp|alpha|city)$", description="Sort criteria"),
+    sort: str = Query("comp", pattern="^(comp|alpha|city|rank)$", description="Sort criteria"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(25, ge=1, le=50, description="Items per page (max 50)"),
 ):
@@ -274,7 +418,7 @@ def search_colleges(
     if not _db_available(engine):
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
 
-    valid_courses = available_program_families(engine)
+    valid_courses = sorted(PUBLIC_COURSES.intersection(available_program_families(engine)))
     if course not in valid_courses:
         raise HTTPException(
             status_code=400,
@@ -291,6 +435,16 @@ def search_colleges(
     # 3. Aggregate per college
     summary_df = summarize_colleges(raw_df)
 
+    if not summary_df.empty:
+        rank_idx = raw_df.groupby("institution_code")["cutoff_percentile"].idxmin()
+        rank_map = raw_df.loc[rank_idx, ["institution_code", "cutoff_rank"]].copy()
+        rank_map["lowest_rank"] = pd.to_numeric(rank_map["cutoff_rank"], errors="coerce").fillna(10**9)
+        summary_df = summary_df.merge(
+            rank_map[["institution_code", "lowest_rank"]],
+            on="institution_code",
+            how="left",
+        )
+
     if summary_df.empty:
         return SearchResponse(total=0, page=page, page_size=page_size, results=[])
 
@@ -299,6 +453,8 @@ def search_colleges(
         summary_df = summary_df.sort_values(by="institution_name", ascending=True)
     elif sort == "city":
         summary_df = summary_df.sort_values(by=["city", "highest_cutoff"], ascending=[True, False])
+    elif sort == "rank":
+        summary_df = summary_df.sort_values(by="lowest_rank", ascending=True)
     else:  # default 'comp' (most competitive first)
         summary_df = summary_df.sort_values(by="highest_cutoff", ascending=False)
 
@@ -484,36 +640,3 @@ def get_college_year_runtime(request: Request, institution_code: str, year: int,
                 'branches':branches,'categories':categories,'sections':sections,
                 'pdf_rows':pdf_rows}
     raise HTTPException(status_code=404, detail='Cutoff data not found.')
-
-
-@router.get("/colleges/{institution_code}/seats")
-def get_college_seats(
-    request: Request,
-    institution_code: str,
-    course: str = Query(..., description="Course family (e.g. MBA)"),
-):
-    """Fetches seat matrix capacity for a single institution."""
-    check_rate_limit(request)
-    engine = get_active_engine()
-    if not _db_available(engine):
-        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-
-    df = seat_matrix_for_institute(
-        engine, institution_code=institution_code, program_family=course
-    )
-
-    if df.empty:
-        raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
-
-    records = df.where(pd.notna(df), None).to_dict(orient="records")
-    # JSON cannot represent NaN/Infinity; normalize any remaining float sentinels.
-    for record in records:
-        for key, value in list(record.items()):
-            if isinstance(value, float) and not pd.notna(value):
-                record[key] = None
-    return {
-        "institution_code": institution_code,
-        "course": course,
-        "capture_year": int(df["capture_year"].max()) if not df.empty else None,
-        "records": records,
-    }

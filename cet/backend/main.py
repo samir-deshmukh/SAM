@@ -10,7 +10,7 @@ from .admin.processing import process_import,approve_import,rollback_release,pur
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
-from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page
+from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
                               resolve_import_job)
@@ -364,6 +364,90 @@ def logout(request: Request):
 def admin(request: Request):
     require(request)
     return dashboard()
+
+
+def _run_derived_data_build(job_id: int, course_family: str | None):
+    try:
+        with connect() as connection:
+            connection.execute(
+                "UPDATE derived_data_build_jobs SET status='RUNNING',progress=5,message='Starting database-side calculation',started_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            connection.commit()
+        script = BASE / 'scripts' / 'refresh_derived_data.py'
+        cmd = [sys.executable, str(script), '--job-id', str(job_id)]
+        if course_family:
+            cmd += ['--course', course_family]
+        subprocess.run(
+            cmd,
+            cwd=str(BASE),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        with connect() as connection:
+            connection.execute(
+                "UPDATE derived_data_build_jobs SET status='COMPLETED',progress=100,message='Graph, category and seat-matrix data is ready',finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            connection.commit()
+    except Exception as exc:
+        log.exception('Derived data build failed: job_id=%s', job_id)
+        with connect() as connection:
+            connection.execute(
+                "UPDATE derived_data_build_jobs SET status='FAILED',progress=100,message=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (str(exc)[-4000:], job_id),
+            )
+            connection.commit()
+
+
+@app.get('/admin/derived-data', response_class=HTMLResponse)
+def derived_data_page(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'})
+    return derived_data()
+
+
+@app.post('/admin/api/derived-data/build')
+def start_derived_data_build(request: Request, background_tasks: BackgroundTasks, course: str | None = Form(None)):
+    current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    course = (course or '').strip() or None
+    with connect() as connection:
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f'Derived data build #{active["id"]} is already running')
+        if course:
+            exists = connection.execute(
+                "SELECT 1 FROM programs WHERE program_family=? LIMIT 1", (course,)
+            ).fetchone()
+            if not exists:
+                raise HTTPException(400, f'Unknown course family: {course}')
+        row = connection.execute(
+            "INSERT INTO derived_data_build_jobs(course_family,status,progress,message,created_by) VALUES (?,?,?,?,?) RETURNING id",
+            (course, 'QUEUED', 0, 'Queued by admin', current_user['id']),
+        ).fetchone()
+        job_id = int(row['id'])
+        connection.commit()
+    background_tasks.add_task(_run_derived_data_build, job_id, course)
+    return JSONResponse(status_code=202, content={"ok": True, "job_id": job_id, "status": "QUEUED"})
+
+
+@app.get('/admin/api/derived-data/status')
+def derived_data_status(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'})
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT id,course_family,status,progress,message,started_at,finished_at,created_at FROM derived_data_build_jobs ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        courses = connection.execute(
+            "SELECT DISTINCT program_family FROM programs WHERE program_family IS NOT NULL ORDER BY program_family"
+        ).fetchall()
+    return {
+        "jobs": [dict(row) for row in rows],
+        "courses": [str(row['program_family']) for row in courses],
+    }
 
 
 @app.post('/admin/api/imports')

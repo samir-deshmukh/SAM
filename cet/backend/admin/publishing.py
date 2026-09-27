@@ -22,8 +22,9 @@ def _run(cmd: list[str], cwd: Path = BASE, timeout: int = 1800):
 
 def _copy_site_skeleton(dst: Path):
     if dst.exists(): shutil.rmtree(dst)
+    # The candidate site is now API-backed. Do not copy or create any runtime
+    # cutoff/seat data directory in the public tree.
     shutil.copytree(SITE, dst, ignore=shutil.ignore_patterns('data', '404.html', 'robots.txt', 'sitemap.xml'))
-    (dst / 'data').mkdir(parents=True, exist_ok=True)
 
 
 def build_runtime(release_id: int) -> tuple[Path, dict]:
@@ -31,19 +32,14 @@ def build_runtime(release_id: int) -> tuple[Path, dict]:
     public_dir = build_dir / 'site'
     build_dir.mkdir(parents=True, exist_ok=True)
     _copy_site_skeleton(public_dir)
-    out = public_dir / 'data'
     import os
     db_url = os.getenv('DATABASE_URL', '').strip()
     if not db_url:
         raise RuntimeError('DATABASE_URL is required to build a release; PostgreSQL is the sole source of truth.')
-    # Cutoff/search/course-year payloads are derived from the production DB.
-    _run([sys.executable, str(BASE/'scripts'/'build_runtime_data.py'), '--db-url', db_url, '--out', str(out), '--site-root', str(public_dir)])
-    # Seat matrix is generated from the same authoritative approved DB.
-    # Never rebuild public seats from an older extracted CSV: that can make a
-    # successfully approved import invisible on the website.
-    _run([sys.executable, str(BASE/'scripts'/'export_seats_json.py'), '--db-url', db_url, '--out', str(out)])
+    # No cutoff, trend, search-index, or seat-matrix payload is exported to
+    # the public tree. The browser retrieves bounded data through /api/*.
     manifest = {'release_id': release_id, 'built_at': time.time(), 'files': []}
-    for p in sorted(out.rglob('*')):
+    for p in sorted(public_dir.rglob('*')):
         if p.is_file(): manifest['files'].append({'path': str(p.relative_to(public_dir)), 'bytes': p.stat().st_size})
     (build_dir / 'publish_manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     return public_dir, manifest
@@ -52,10 +48,8 @@ def build_runtime(release_id: int) -> tuple[Path, dict]:
 def verify_public_tree(public_dir: Path) -> dict:
     errors = []
     data = public_dir / 'data'
-    required = ['search_index.js', 'runtime-manifest.json']
-    for name in required:
-        p = data / name
-        if not p.exists() or p.stat().st_size == 0: errors.append(f'missing/empty {name}')
+    # The API-backed public tree intentionally contains no runtime data directory.
+    # Validate any JSON artifact if a future public asset adds one.
     # Validate every JSON artifact and reject accidental DB/secret material in public output.
     for p in data.rglob('*.json'):
         try: json.loads(p.read_text(encoding='utf-8'))
