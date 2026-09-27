@@ -10,7 +10,7 @@ from .admin.processing import process_import,approve_import,rollback_release,pur
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
-from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, live_processing, feedback_page, resolver_page
+from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
                               resolve_import_job)
@@ -713,20 +713,6 @@ def import_center_page(request: Request):
     return import_center()
 
 
-@app.get('/admin/imports/{job_id}', response_class=HTMLResponse)
-def live(request: Request, job_id: int):
-    require(request)
-    return live_processing(job_id)
-
-@app.get('/admin/processing', response_class=HTMLResponse)
-def processing_page(request: Request):
-    require(request)
-    with connect() as c:
-        row = c.execute("SELECT id FROM import_jobs ORDER BY id DESC LIMIT 1").fetchone()
-    if row:
-        return live_processing(int(row['id']))
-    return RedirectResponse('/admin/imports', status_code=303)
-
 @app.get('/admin/review', response_class=HTMLResponse)
 def review_center_page(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
@@ -845,10 +831,23 @@ def overview_api(request: Request):
     with connect() as c:
         imports_today=c.execute("SELECT COUNT(*) n FROM import_jobs WHERE created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + INTERVAL '1 day'").fetchone()['n']
         pending=c.execute("SELECT COUNT(*) n FROM import_jobs WHERE status='REVIEW_REQUIRED'").fetchone()['n']
-        production=sum(c.execute(f'SELECT COUNT(*) n FROM {t}').fetchone()['n'] for t in ['institutes','programs','cutoffs','seats'])
+        # Dashboard production records are actual CAP facts, not reference rows.
+        # Institutes/programs are dimensions and must not inflate this KPI.
+        production=sum(c.execute(f'SELECT COUNT(*) n FROM {t}').fetchone()['n'] for t in ['cutoffs','seats'])
+        activity=c.execute("""
+            SELECT TO_CHAR(d.day,'Mon DD') AS label, COUNT(j.id) AS count
+            FROM generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day') AS d(day)
+            LEFT JOIN import_jobs j
+              ON j.created_at >= d.day
+             AND j.created_at < d.day + INTERVAL '1 day'
+            GROUP BY d.day
+            ORDER BY d.day
+        """).fetchall()
         storage_ok=IMPORTS.exists() and IMPORTS.is_dir()
         site_ok=SITE.exists() and (SITE/'index.html').exists()
-        return {'imports_today':imports_today,'pending_review':pending,'production_rows':production,'health':{'ok':storage_ok and site_ok,'application':True,'database':True,'storage':storage_ok,'site':site_ok}}
+        return {'imports_today':imports_today,'pending_review':pending,'production_rows':production,
+                'activity':[dict(r) for r in activity],
+                'health':{'ok':storage_ok and site_ok,'application':True,'database':True,'storage':storage_ok,'site':site_ok}}
 
 @app.get('/admin/api/health')
 def health_api(request: Request):

@@ -648,7 +648,8 @@ def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
         if pid is not None:
             try: affected_program_ids.add(int(pid))
             except (TypeError,ValueError): pass
-    conn.execute("BEGIN IMMEDIATE")
+    # The caller's connection already has an active SQLAlchemy transaction from
+    # the reads above; do not issue a nested BEGIN here.
     try:
         conn.execute("DELETE FROM data_release_items WHERE release_id=?",(release_id,))
         conn.execute("DELETE FROM data_releases WHERE id=?",(release_id,))
@@ -703,7 +704,7 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
         old=BASE/f'.site_rollback_old_{release_id}_{os.getpid()}'
         if old.exists(): shutil.rmtree(old)
         os.replace(public_root,old); os.replace(temp,public_root); shutil.rmtree(old,ignore_errors=True); restored=True
-    conn.execute("BEGIN IMMEDIATE")
+    # The caller's connection already has an active SQLAlchemy transaction.
     try:
         items=conn.execute("SELECT * FROM data_release_items WHERE release_id=? ORDER BY id DESC",(release_id,)).fetchall()
         deleted=0
@@ -757,6 +758,11 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
         conn.execute("""INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)""",
             (actor_user_id,"ROLLBACK_RELEASE","RELEASE",str(release_id),json.dumps({"status":release["status"]}),json.dumps({"status":"ROLLED_BACK","deleted":deleted}),reason))
         conn.commit()
+        # The old published-site backup is no longer needed after a successful
+        # rollback. Delete it only after the DB transaction commits.
+        if release["backup_path"]:
+            backup_to_delete=BASE/release["backup_path"]
+            if backup_to_delete.exists(): shutil.rmtree(backup_to_delete,ignore_errors=True)
         if current_backup: shutil.rmtree(current_backup,ignore_errors=True)
         return {"ok":True,"release_id":release_id,"deleted":deleted,"status":"ROLLED_BACK"}
     except Exception:
