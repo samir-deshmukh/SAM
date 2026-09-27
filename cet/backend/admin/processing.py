@@ -522,6 +522,14 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     lane_raw=str(raw.get("allocation_type","")).strip()
     lane=lane_map.get(lane_raw)
     if not lane: raise ValueError(f"Unknown allocation type: {lane_raw!r}")
+    # The standalone seat ingester bootstraps allocation_lanes before inserts,
+    # but the admin import path writes directly to the production connection.
+    # Ensure the referenced lane exists here as well so a fresh Render database
+    # cannot reject an otherwise validated seat row with a foreign-key error.
+    conn.execute(
+        "INSERT INTO allocation_lanes(lane_code,lane_full) VALUES(?,?) ON CONFLICT(lane_code) DO NOTHING",
+        (lane, lane_raw),
+    )
     cat=str(raw.get("category","")).strip()
     total=cat==TOTAL_MARKER
     base=None if total else normalize_category(cat,alias_map)
