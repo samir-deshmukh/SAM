@@ -1876,10 +1876,8 @@ function enhanceSelect(selectEl, opts = {}) {
 
     // Keep the placeholder at the top. It is a UI control, not a city,
     // so it must never participate in alphabetical sorting.
-    const placeholder = matches.find(({ item }) => item.opt.value === CONFIG.unselected);
-    const cityMatches = matches.filter(({ item }) => item.opt.value !== CONFIG.unselected);
-    cityMatches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
-    const orderedMatches = placeholder ? [placeholder, ...cityMatches] : cityMatches;
+    matches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
+    const orderedMatches = matches;
 
     // Build the visible list in one DOM operation. There is one delegated
     // click handler below, rather than one handler per option.
@@ -1912,7 +1910,8 @@ function enhanceSelect(selectEl, opts = {}) {
 
   function sync() {
     const opt = selectEl.options[selectEl.selectedIndex];
-    btn.textContent = opt ? opt.textContent : "—";
+    const placeholderText = selectEl === citySelect ? "Select City" : "Select Course";
+    btn.textContent = opt ? opt.textContent : placeholderText;
     btn.classList.toggle("placeholder", !opt || opt.value === "");
     btn.disabled = selectEl.disabled;
     btn.setAttribute("aria-expanded", wrap.classList.contains("open") ? "true" : "false");
@@ -2038,10 +2037,8 @@ async function loadRealCollegeData() {
       .map(v => String(v).trim())
       .filter(v => v && v.toLowerCase() !== "select course"))];
 
-    CONFIG.cityOptions = [{ value: CONFIG.unselected, label: "Select City" },
-      ...cities.map(v => ({ value: v, label: v }))];
-    CONFIG.courseOptions = [{ value: CONFIG.unselected, label: "Select Course" },
-      ...courses.map(v => ({ value: v, label: v }))];
+    CONFIG.cityOptions = cities.map(v => ({ value: v, label: v }));
+    CONFIG.courseOptions = courses.map(v => ({ value: v, label: v }));
 
     populateSelects();
     renderResults();
