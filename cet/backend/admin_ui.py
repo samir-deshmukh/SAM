@@ -104,11 +104,62 @@ async function rollback(id){const reason=prompt('Revoke reason (required):');if(
 
 
 def derived_data() -> str:
-    body='''<div class="title"><div><h1>Slide 2 Data Builder</h1><p>Manually calculate and store the precomputed data used by the public college drawer.</p></div><div class="live"><span class="dot"></span>Admin controlled</div></div><div class="pagegrid"><div class="card panel"><div class="toolbar"><h2>Build derived data</h2><span class="muted small">No automatic rebuilds</span></div><div class="notice">The source-of-truth tables remain untouched. This job only rebuilds the small runtime tables used by <b>graph/trend points, college category/quota options, and seat matrix</b>.</div><div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button></div><div class="notice" style="margin-top:12px">Run this when you are comfortable with the server load. While it runs, the public site continues using the last successfully built derived dataset.</div><div style="margin-top:18px"><div class="toolbar"><h2>Latest build</h2><span id="latestStatus" class="muted small">Loading…</span></div><div id="latest" class="notice">Loading build status…</div></div></div><div class="card panel"><div class="toolbar"><h2>What gets calculated</h2></div><div class="timeline"><div class="event"><div class="eventdot"></div><div><h4>Trend / graph points</h4><p>Per college, program, category, quota, year and CAP round.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Category & quota options</h4><p>Only combinations actually present for that particular college are stored.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Seat matrix</h4><p>Latest available seat matrix is reduced to the rows the drawer needs.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Public requests</h4><p>Fast indexed reads only. No heavy aggregation happens when candidates open Slide 2.</p></div></div></div></div></div><div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Build history</h2><button class="btn secondary" onclick="load()">↻ Refresh</button></div><div class="tablewrap"><table class="table"><thead><tr><th>ID</th><th>Course</th><th>Status</th><th>Progress</th><th>Message</th><th>Started</th><th>Finished</th></tr></thead><tbody id="history"></tbody></table></div></div>'''
+    body='''<div class="title"><div><h1>Slide 2 Data Builder</h1><p>Manually calculate and store the precomputed data used by the public college drawer.</p></div><div class="live"><span class="dot"></span>Admin controlled</div></div>
+<div class="pagegrid"><div class="card panel"><div class="toolbar"><h2>Build derived data</h2><span class="muted small">No automatic rebuilds</span></div>
+<div class="notice">The source-of-truth tables remain untouched. This job only rebuilds the small runtime tables used by <b>graph/trend points, college category/quota options, and seat matrix</b>.</div>
+<div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button></div>
+<div class="notice" style="margin-top:12px">Run this when you are comfortable with the server load. While it runs, the public site continues using the last successfully built derived dataset.</div>
+<div id="buildProgress" class="notice" style="margin-top:12px;display:none"><div style="display:flex;justify-content:space-between;gap:12px"><b id="progressTitle">Calculating…</b><span id="progressPct">0%</span></div><div style="height:10px;background:#e8edf3;border-radius:99px;overflow:hidden;margin-top:9px"><div id="progressBar" style="height:100%;width:0%;background:#2563eb;transition:width .35s"></div></div><div id="progressMessage" class="small muted" style="margin-top:7px">Waiting for server…</div></div>
+<div style="margin-top:18px"><div class="toolbar"><h2>Latest build</h2><span id="latestStatus" class="muted small">Loading…</span></div><div id="latest" class="notice">Loading build status…</div></div></div>
+<div class="card panel"><div class="toolbar"><h2>What gets calculated</h2></div><div class="timeline"><div class="event"><div class="eventdot"></div><div><h4>Trend / graph points</h4><p>Per college, program, category, quota, year and CAP round.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Category & quota options</h4><p>Only combinations actually present for that particular college are stored.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Seat matrix</h4><p>Latest available seat matrix is reduced to the rows the drawer needs.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Public requests</h4><p>Fast indexed reads only. No heavy aggregation happens when candidates open Slide 2.</p></div></div></div></div></div>
+<div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Build history</h2><button class="btn secondary" onclick="load()">↻ Refresh</button></div><div class="tablewrap"><table class="table"><thead><tr><th>ID</th><th>Course</th><th>Status</th><th>Progress</th><th>Message</th><th>Started</th><th>Finished</th><th>Actions</th></tr></thead><tbody id="history"></tbody></table></div></div>'''
     js=_common_js()+r'''<script>
 let jobs=[];
-async function load(){try{const d=await api('/admin/api/derived-data/status');jobs=d.jobs||[];const sel=document.querySelector('#course');const current=sel.value;sel.innerHTML='<option value="">All courses in production DB</option>'+d.courses.map(c=>'<option value="'+esc(c)+'">'+esc(c)+'</option>').join('');if([...sel.options].some(o=>o.value===current))sel.value=current;const j=jobs[0];document.querySelector('#latestStatus').textContent=j?(j.status+' · '+j.progress+'%'):'No build yet';document.querySelector('#latest').innerHTML=j?'<b>Build #'+j.id+'</b> · '+badge(j.status)+'<div style="margin-top:8px">'+esc(j.message||'—')+'</div><div style="margin-top:9px;height:8px;background:#edf1f5;border-radius:99px;overflow:hidden"><div style="height:100%;width:'+Math.max(0,Math.min(100,Number(j.progress)||0))+'%;background:#2563eb"></div></div>':'No derived dataset has been built yet.';const active=jobs.some(x=>['QUEUED','RUNNING'].includes(String(x.status).toUpperCase()));document.querySelector('#buildBtn').disabled=active;document.querySelector('#history').innerHTML=jobs.map(x=>'<tr><td>#'+x.id+'</td><td>'+esc(x.course_family||'ALL')+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.progress)+'%</td><td>'+esc(x.message||'—')+'</td><td>'+fmtTime(x.started_at)+'</td><td>'+fmtTime(x.finished_at)+'</td></tr>').join('')||'<tr><td colspan="7" class="empty">No builds yet.</td></tr>'}catch(e){toast(e.message,'err')}}
-async function startBuild(){const course=document.querySelector('#course').value;if(!confirm('Start the Slide 2 derived-data calculation'+(course?' for '+course:' for all production courses')+'? This can use noticeable CPU/database resources while it runs.'))return;try{document.querySelector('#buildBtn').disabled=true;const form=new FormData();if(course)form.append('course',course);await api('/admin/api/derived-data/build',{method:'POST',headers:csrfHeaders(),body:form});toast('Derived-data build started','ok');load()}catch(e){toast(e.message,'err');load()}}
+const activeStates=['QUEUED','RUNNING'];
+const terminalStates=['COMPLETED','FAILED','CANCELLED'];
+function actionButtons(j){
+  const s=String(j.status||'').toUpperCase();
+  if(activeStates.includes(s)) return '<span class="small muted">Running…</span>';
+  let out='';
+  if(s==='FAILED'||s==='CANCELLED') out+='<button class="btn success" style="padding:6px 9px" onclick="retryBuild('+j.id+',this)">↻ Retry</button>';
+  if(terminalStates.includes(s)) out+='<button class="trashbtn" title="Delete build history" aria-label="Delete build history" onclick="deleteBuild('+j.id+',this)">🗑</button>';
+  return out||'<span class="small muted">—</span>';
+}
+async function load(){
+  try{
+    const d=await api('/admin/api/derived-data/status');jobs=d.jobs||[];
+    const sel=document.querySelector('#course'),current=sel.value;
+    sel.innerHTML='<option value="">All courses in production DB</option>'+d.courses.map(c=>'<option value="'+esc(c)+'">'+esc(c)+'</option>').join('');
+    if([...sel.options].some(o=>o.value===current))sel.value=current;
+    const j=jobs[0],box=document.querySelector('#buildProgress');
+    document.querySelector('#latestStatus').textContent=j?(j.status+' · '+j.progress+'%'):'No build yet';
+    if(j){
+      const pct=Math.max(0,Math.min(100,Number(j.progress)||0)),running=activeStates.includes(String(j.status).toUpperCase());
+      box.style.display=running?'block':'none';document.querySelector('#progressTitle').textContent=running?'Calculating Slide 2 data…':j.status;
+      document.querySelector('#progressPct').textContent=Math.round(pct)+'%';document.querySelector('#progressBar').style.width=pct+'%';document.querySelector('#progressMessage').textContent=j.message||'';
+      document.querySelector('#latest').innerHTML='<b>Build #'+j.id+'</b> · '+badge(j.status)+'<div style="margin-top:8px">'+esc(j.message||'—')+'</div>';
+    }else{box.style.display='none';document.querySelector('#latest').textContent='No derived dataset has been built yet.'}
+    const active=jobs.some(x=>activeStates.includes(String(x.status).toUpperCase()));document.querySelector('#buildBtn').disabled=active;
+    document.querySelector('#history').innerHTML=jobs.map(x=>'<tr><td>#'+x.id+'</td><td>'+esc(x.course_family||'ALL')+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.progress)+'%</td><td>'+esc(x.message||'—')+'</td><td>'+fmtTime(x.started_at)+'</td><td>'+fmtTime(x.finished_at)+'</td><td><span class="rowactions">'+actionButtons(x)+'</span></td></tr>').join('')||'<tr><td colspan="8" class="empty">No builds yet.</td></tr>';
+  }catch(e){toast(e.message,'err')}
+}
+async function startBuild(){
+  const course=document.querySelector('#course').value;
+  if(!confirm('Start the Slide 2 derived-data calculation'+(course?' for '+course:' for all production courses')+'? This can use noticeable CPU/database resources while it runs.'))return;
+  try{document.querySelector('#buildBtn').disabled=true;const form=new FormData();if(course)form.append('course',course);await api('/admin/api/derived-data/build',{method:'POST',headers:csrfHeaders(),body:form});toast('Derived-data build started','ok');await load()}catch(e){toast(e.message,'err');await load()}
+}
+async function retryBuild(id,btn){
+  if(btn.disabled)return;
+  if(!confirm('Retry this failed Slide 2 calculation? It will create a new build job using the same course.'))return;
+  btn.disabled=true;const old=btn.textContent;btn.textContent='Retrying…';
+  try{await api('/admin/api/derived-data/retry/'+id,{method:'POST',headers:csrfHeaders()});toast('Retry started','ok');await load()}catch(e){btn.disabled=false;btn.textContent=old;toast(e.message,'err')}
+}
+async function deleteBuild(id,btn){
+  if(btn.disabled)return;
+  if(!confirm('Delete this build history entry? This does NOT delete the successfully stored Slide 2 runtime data.'))return;
+  btn.disabled=true;
+  try{await api('/admin/api/derived-data/'+id,{method:'DELETE',headers:csrfHeaders()});toast('Build history deleted','ok');await load()}catch(e){btn.disabled=false;toast(e.message,'err')}
+}
 load();setInterval(load,3000);
 </script>'''
     return _shell('Slide 2 Data Builder','derived',body,js)

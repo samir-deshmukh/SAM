@@ -439,6 +439,50 @@ def start_derived_data_build(request: Request, background_tasks: BackgroundTasks
     return JSONResponse(status_code=202, content={"ok": True, "job_id": job_id, "status": "QUEUED"})
 
 
+@app.post('/admin/api/derived-data/retry/{job_id}')
+def retry_derived_data_build(job_id: int, request: Request, background_tasks: BackgroundTasks):
+    current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute(
+            "SELECT id,course_family,status FROM derived_data_build_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not job:
+            raise HTTPException(404, 'Build job not found')
+        if str(job['status']).upper() not in {'FAILED', 'CANCELLED'}:
+            raise HTTPException(409, 'Only failed or cancelled builds can be retried')
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f'Derived data build #{active["id"]} is already running')
+        row = connection.execute(
+            "INSERT INTO derived_data_build_jobs(course_family,status,progress,message,created_by) VALUES (?,?,?,?,?) RETURNING id",
+            (job['course_family'], 'QUEUED', 0, f'Retry of build #{job_id}', current_user['uid']),
+        ).fetchone()
+        new_id = int(row['id'])
+        connection.commit()
+    background_tasks.add_task(_run_derived_data_build, new_id, job['course_family'])
+    return JSONResponse(status_code=202, content={"ok": True, "job_id": new_id, "status": "QUEUED"})
+
+
+@app.delete('/admin/api/derived-data/{job_id}')
+def delete_derived_data_build(job_id: int, request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute(
+            "SELECT id,status FROM derived_data_build_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not job:
+            raise HTTPException(404, 'Build job not found')
+        if str(job['status']).upper() in {'QUEUED', 'RUNNING'}:
+            raise HTTPException(409, 'A running build cannot be deleted')
+        connection.execute("DELETE FROM derived_data_build_jobs WHERE id=?", (job_id,))
+        connection.commit()
+    return {"ok": True}
+
+
 @app.get('/admin/api/derived-data/status')
 def derived_data_status(request: Request):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'})
