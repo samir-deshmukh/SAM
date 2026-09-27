@@ -145,7 +145,7 @@ async function load(){
 }
 async function startBuild(){
   const course=document.querySelector('#course').value;
-  if(!confirm('Start the Slide 2 derived-data calculation'+(course?' for '+course:' for all production courses')+'? This can use noticeable CPU/database resources while it runs.'))return;
+
   try{document.querySelector('#buildBtn').disabled=true;const form=new FormData();if(course)form.append('course',course);await api('/admin/api/derived-data/build',{method:'POST',headers:csrfHeaders(),body:form});toast('Derived-data build started','ok');await load()}catch(e){toast(e.message,'err');await load()}
 }
 async function retryBuild(id,btn){
