@@ -534,6 +534,20 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     total=cat==TOTAL_MARKER
     base=None if total else normalize_category(cat,alias_map)
     if not total and base not in valid_cats: raise ValueError(f"Unknown category: {cat!r}")
+
+    # Seat imports use the same PostgreSQL FK graph as cutoff imports.
+    # The standalone seat ingester seeds these reference rows, but the admin
+    # approval path writes directly to production and must do the same.
+    conn.execute(
+        "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
+        "ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name",
+        (inst, str(raw.get("institution_name","")).strip() or inst),
+    )
+    if base is not None:
+        conn.execute(
+            "INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING",
+            (base,),
+        )
     gender=str(raw.get("gender","")).strip()
     is_ladies={"G":False,"L":True}.get(gender) if gender else None
     vals=(int(job["year"]),job["course_family"],inst,str(raw.get("choice_code","")).strip(),

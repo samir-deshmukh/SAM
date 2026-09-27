@@ -617,6 +617,20 @@ def delete_import(request: Request, job_id: int):
         }
         if job['status'] not in deletable:
             raise HTTPException(409, f"Import cannot be deleted while in {job['status']}")
+
+        # A committed/released import is part of the audit trail. PostgreSQL
+        # correctly prevents deleting its source job, so surface a useful 409
+        # instead of leaking a 500 IntegrityError from the FK constraint.
+        release = c.execute(
+            'SELECT release_key,status FROM data_releases WHERE source_job_id=? ORDER BY id DESC LIMIT 1',
+            (job_id,),
+        ).fetchone()
+        if release:
+            raise HTTPException(
+                409,
+                f"Import is referenced by release {release['release_key']} ({release['status']}) and cannot be deleted; keep it for audit history.",
+            )
+
         c.execute('DELETE FROM import_events WHERE job_id=?', (job_id,))
         c.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
         c.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
