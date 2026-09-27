@@ -388,17 +388,26 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
         raise
 
 
-def _resolve_import_background(job_id: int):
-    """Resolve college websites/cities after PDF processing has produced staging rows."""
+def _resolver_server_busy():
+    """Keep AI resolver work out of the critical path on the small web instance."""
+    with connect() as c:
+        active = c.execute(
+            "SELECT COUNT(*) AS n FROM import_jobs WHERE status IN ('RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING')"
+        ).fetchone()['n']
+    if active:
+        return True, f'{active} PDF import(s) are processing'
     try:
-        result = resolve_import_job(job_id)
-        log.info(
-            'Website resolver completed: job_id=%s seeded=%s resolved=%s searched=%s failed=%s',
-            job_id, result.get('seeded'), result.get('resolved'),
-            result.get('searched'), result.get('failed'),
-        )
+        with open('/sys/fs/cgroup/memory.current', 'r', encoding='utf-8') as f:
+            used = int(f.read().strip())
+        with open('/sys/fs/cgroup/memory.max', 'r', encoding='utf-8') as f:
+            raw_max = f.read().strip()
+        if raw_max != 'max':
+            limit = int(raw_max)
+            if limit > 0 and used / limit >= 0.72:
+                return True, 'server memory is above the resolver safety threshold'
     except Exception:
-        log.exception('Website resolver failed: job_id=%s', job_id)
+        pass
+    return False, None
 
 
 def _process_import_background(job_id: int):
@@ -431,9 +440,9 @@ def _process_import_background(job_id: int):
                     'Automatic approval: extraction, normalization, validation and comparison passed',
                 )
                 # Resolve only after extraction/staging has committed. Running
-                # the resolver concurrently with extraction races the staging
-                # table and can make it see zero colleges.
-                _resolve_import_background(job_id)
+                # Website resolution is intentionally NOT started here. It is
+                # driven one college at a time from the admin panel so AI/network
+                # work cannot compete with PDF extraction on the web instance.
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
@@ -793,6 +802,31 @@ def resolver_seed(request: Request):
 def resolver_github_seed(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
     raise HTTPException(410, 'GitHub seed is disabled; resolver scope is the CAP institutes table')
+
+@app.post('/admin/api/resolver/next')
+def resolver_next(request: Request):
+    require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    busy, reason = _resolver_server_busy()
+    if busy:
+        with connect() as c:
+            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED')").fetchone()['n']
+        return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(pending)}
+    try:
+        with connect() as c:
+            current = c.execute(
+                "SELECT institution_code,institution_name,status FROM college_website_resolver "
+                "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED') "
+                "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
+                "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name) LIMIT 1"
+            ).fetchone()
+        result = resolve_import_job(None, limit=1)
+        return {'ok': True, 'busy': False,
+                'current': dict(current) if current else None,
+                'processed': result.get('resolved', 0) + result.get('failed', 0), **result}
+    except Exception as exc:
+        log.exception('Single resolver step failed')
+        raise HTTPException(500, f'Resolver step failed: {str(exc)[:300]}')
+
 
 @app.post('/admin/api/resolver/find')
 async def resolver_find(request: Request):

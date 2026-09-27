@@ -1,5 +1,7 @@
-import csv,json,os,re,urllib.parse,urllib.request,urllib.error
+import csv,json,os,re,logging,urllib.parse,urllib.request,urllib.error
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 BASE=Path(__file__).resolve().parents[2]
 CONTACTS=BASE/'data'/'reference'/'institute_contacts.csv'
 GEMINI_MODEL=os.getenv('GEMINI_RESOLVER_MODEL','gemini-2.5-flash')
@@ -237,8 +239,13 @@ def _update_institute_resolution(conn, code, city=None, address=None, website=No
     )
 
 
-def resolve_import_job(job_id):
-    """Resolve every college from an uploaded PDF without blocking PDF processing.
+def resolve_import_job(job_id=None, limit=None):
+    """Resolve a bounded number of colleges without running a long background loop.
+
+    When job_id is supplied, only colleges from that import are considered.
+    When job_id is None, the resolver queue is taken from the CAP resolver table.
+    A small limit lets the admin UI process one college at a time and keeps the
+    web service responsive on small Render instances.
 
     Order is deliberate:
       1. existing resolver/institute/reference website
@@ -250,35 +257,48 @@ def resolve_import_job(job_id):
     """
     from .db import connect
 
+    seeded = 0
     with connect() as c:
-        seeded = seed_from_import(c, job_id)
-        c.commit()
+        if job_id is not None:
+            seeded = seed_from_import(c, job_id)
+            c.commit()
 
-    if not seeded:
-        return {'ok': True, 'seeded': 0, 'resolved': 0, 'searched': 0}
+        if job_id is None:
+            rows = [
+                dict(r) for r in c.execute(
+                    "SELECT institution_code,institution_name,city,website,status,source "
+                    "FROM college_website_resolver "
+                    "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED') "
+                    "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
+                    "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name)"
+                )
+            ]
+        else:
+            source_rows = c.execute(
+                "SELECT normalized_json FROM import_staging_records "
+                "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') ORDER BY id",
+                (job_id,),
+            ).fetchall()
+            codes = set()
+            for item in source_rows:
+                try:
+                    data = json.loads(item['normalized_json'] or '{}')
+                except Exception:
+                    continue
+                code = str(data.get('institution_code', '')).strip()
+                if code:
+                    codes.add(code)
+            rows = [
+                dict(r) for r in c.execute(
+                    "SELECT institution_code,institution_name,city,website,status,source "
+                    "FROM college_website_resolver ORDER BY institution_name"
+                ) if r['institution_code'] in codes and r['status'] != 'VERIFIED'
+            ]
 
-    with connect() as c:
-        source_rows = c.execute(
-            "SELECT normalized_json FROM import_staging_records "
-            "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') ORDER BY id",
-            (job_id,),
-        ).fetchall()
-        codes = set()
-        for item in source_rows:
-            try:
-                data = json.loads(item['normalized_json'] or '{}')
-            except Exception:
-                continue
-            code = str(data.get('institution_code', '')).strip()
-            if code:
-                codes.add(code)
-        all_rows = [
-            dict(r) for r in c.execute(
-                "SELECT institution_code,institution_name,city,website,status,source "
-                "FROM college_website_resolver ORDER BY institution_name"
-            )
-        ]
-        rows = [r for r in all_rows if r['institution_code'] in codes]
+    if limit is not None:
+        rows = rows[:max(1, int(limit))]
+    if not rows:
+        return {'ok': True, 'seeded': seeded, 'resolved': 0, 'searched': 0, 'failed': 0, 'remaining': 0}
 
     resolved = searched = failed = 0
     refs = _reference_contacts()
@@ -420,12 +440,18 @@ def resolve_import_job(job_id):
                 )
                 c.commit()
 
+    with connect() as c:
+        remaining = c.execute(
+            "SELECT COUNT(*) AS n FROM college_website_resolver "
+            "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED')"
+        ).fetchone()['n']
     return {
         'ok': True,
         'seeded': seeded,
         'resolved': resolved,
         'searched': searched,
         'failed': failed,
+        'remaining': int(remaining),
     }
 
 
