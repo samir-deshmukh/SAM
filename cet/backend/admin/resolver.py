@@ -268,7 +268,7 @@ def resolve_import_job(job_id=None, limit=None):
                 dict(r) for r in c.execute(
                     "SELECT institution_code,institution_name,city,website,status,source "
                     "FROM college_website_resolver "
-                    "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED') "
+                    "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW') "
                     "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
                     "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name)"
                 )
@@ -315,9 +315,13 @@ def resolve_import_job(job_id=None, limit=None):
             candidate_urls.append((ref_url, 'reference_csv'))
 
         verified = None
+        ai_unavailable = False
+        reachable_candidate = None
         for url, source in candidate_urls:
             result = verify_url(url, name)
-            if not result.get('ok'):
+            if result.get('ok'):
+                reachable_candidate = (result, source)
+            else:
                 continue
             # A reachable URL is only a candidate. Gemini + Google Search must
             # confirm the site's identity before we mark it VERIFIED.
@@ -331,7 +335,35 @@ def resolve_import_job(job_id=None, limit=None):
                     verified = (result, source, ai_check)
                     break
             except Exception as exc:
+                if 'GEMINI_API_KEY is not configured' in str(exc):
+                    ai_unavailable = True
+                    break
                 log.warning("AI website verification failed for %s: %s", code, exc)
+
+        if ai_unavailable:
+            # Do not misclassify a reachable college website as FAILED just
+            # because the optional AI verifier is not configured.
+            result, source = reachable_candidate if reachable_candidate else (None, None)
+            with connect() as c:
+                c.execute(
+                    """UPDATE college_website_resolver
+                       SET website=COALESCE(?,website),status='NEEDS_REVIEW',
+                           source=COALESCE(?,source),
+                           source_url=COALESCE(?,source_url),
+                           verification_note=?,
+                           last_checked_at=CURRENT_TIMESTAMP,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE institution_code=?""",
+                    (
+                        result.get('url') if result else None,
+                        source,
+                        result.get('url') if result else None,
+                        'Reachable candidate found; Gemini AI verification is not configured on the server.',
+                        code,
+                    ),
+                )
+                c.commit()
+            continue
 
         if verified:
             result, source, ai_check = verified
@@ -428,6 +460,22 @@ def resolve_import_job(job_id=None, limit=None):
             if status == 'VERIFIED':
                 resolved += 1
         except Exception as exc:
+            message = str(exc)
+            if 'GEMINI_API_KEY is not configured' in message:
+                # Search cannot run without Gemini, so leave the college queued
+                # for a real AI attempt instead of marking it as a dead website.
+                failed_note = 'Gemini AI verification/search is not configured on the server.'
+                with connect() as c:
+                    c.execute(
+                        """UPDATE college_website_resolver
+                           SET status='NEEDS_REVIEW',verification_note=?,
+                               last_checked_at=CURRENT_TIMESTAMP,
+                               updated_at=CURRENT_TIMESTAMP
+                           WHERE institution_code=?""",
+                        (failed_note, code),
+                    )
+                    c.commit()
+                continue
             failed += 1
             with connect() as c:
                 c.execute(
@@ -436,14 +484,14 @@ def resolve_import_job(job_id=None, limit=None):
                            last_checked_at=CURRENT_TIMESTAMP,
                            updated_at=CURRENT_TIMESTAMP
                        WHERE institution_code=?""",
-                    (str(exc)[:500], code),
+                    (message[:500], code),
                 )
                 c.commit()
 
     with connect() as c:
         remaining = c.execute(
             "SELECT COUNT(*) AS n FROM college_website_resolver "
-            "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED')"
+            "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW')"
         ).fetchone()['n']
     return {
         'ok': True,

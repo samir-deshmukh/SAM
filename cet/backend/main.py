@@ -925,16 +925,25 @@ def resolver_github_seed(request: Request):
 @app.post('/admin/api/resolver/next')
 def resolver_next(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    if not os.getenv('GEMINI_API_KEY', '').strip():
+        return {
+            'ok': True,
+            'configured': False,
+            'busy': False,
+            'processed': 0,
+            'remaining': 0,
+            'reason': 'Gemini AI resolver is not configured: GEMINI_API_KEY is missing.',
+        }
     busy, reason = _resolver_server_busy()
     if busy:
         with connect() as c:
-            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED')").fetchone()['n']
+            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW')").fetchone()['n']
         return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(pending)}
     try:
         with connect() as c:
             current = c.execute(
                 "SELECT institution_code,institution_name,status FROM college_website_resolver "
-                "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW','FAILED') "
+                "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW') "
                 "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
                 "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name) LIMIT 1"
             ).fetchone()
