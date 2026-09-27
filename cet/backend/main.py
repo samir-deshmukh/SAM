@@ -523,15 +523,35 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
             if marker.exists():
                 raise HTTPException(409, 'Stop request is still being finalized; wait a moment before retrying')
-        if not job['data_type'] or not job['course_family'] or not job['year'] or not job['round']:
-            raise HTTPException(
-                409,
-                'Source metadata is incomplete; identify year, round and course before processing',
-            )
-
         path = BASE / job['stored_path']
         if not path.exists():
             raise HTTPException(404, 'Stored source PDF is missing')
+
+        # Re-run preflight on every retry. A previous run may have classified
+        # a generic filename incorrectly (especially a seat matrix named like
+        # `BBA 26 C1.pdf`), and retrying stale metadata would repeat the error.
+        if not run_preflight(connection, job_id, path, job['original_filename']):
+            raise HTTPException(409, 'PDF preflight failed; inspect the import error before retrying')
+        job = connection.execute(
+            'SELECT * FROM import_jobs WHERE id=?',
+            (job_id,),
+        ).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found after preflight')
+
+        required_metadata = (
+            not job['data_type']
+            or not job['course_family']
+            or not job['year']
+            or (job['data_type'] == 'CUTOFFS' and not job['round'])
+        )
+        if required_metadata:
+            raise HTTPException(
+                409,
+                'Source metadata is incomplete; identify year and course before processing'
+                if job['data_type'] == 'SEATS'
+                else 'Source metadata is incomplete; identify year, round and course before processing',
+            )
 
         claimed = connection.execute(
             "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('REVIEW_REQUIRED','FAILED','CANCELLED')",

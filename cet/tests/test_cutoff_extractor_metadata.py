@@ -27,10 +27,11 @@ def test_inline_status_and_home_university_are_split():
     assert meta['home_university'] == 'Sant Gadge Baba Amravati University'
 
 
-def test_extractor_uses_trusted_pdfium_backend():
+def test_extractor_uses_hybrid_pdf_backends():
     from scripts import cutoff_extractor
 
-    assert cutoff_extractor.fitz.__name__.endswith("fitz_pdfium")
+    assert cutoff_extractor.fitz.__name__ == "fitz"
+    assert cutoff_extractor.fitz_pdfium.__name__.endswith("fitz_pdfium")
 
 
 def test_program_code_with_letter_suffix_is_parsed():
