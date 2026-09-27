@@ -410,6 +410,30 @@ def _resolver_server_busy():
     return False, None
 
 
+def _resolve_one_import_background(job_id: int):
+    """Start the resolver automatically, but process only one college.
+
+    PDF extraction has already finished before this function is called, so AI
+    network work cannot compete with pdfplumber/Pillow memory usage. The admin
+    resolver can continue the queue one college at a time afterward.
+    """
+    try:
+        busy, reason = _resolver_server_busy()
+        if busy:
+            log.info('Website resolver deferred after import %s: %s', job_id, reason)
+            return
+        result = resolve_import_job(job_id, limit=1)
+        log.info(
+            'Automatic website resolver step: job_id=%s resolved=%s searched=%s failed=%s remaining=%s',
+            job_id, result.get('resolved'), result.get('searched'),
+            result.get('failed'), result.get('remaining'),
+        )
+    except Exception:
+        # Resolver failure must never turn a clean data import into a failed
+        # import. The queue remains visible in the Resolver admin page.
+        log.exception('Automatic website resolver step failed: job_id=%s', job_id)
+
+
 def _process_import_background(job_id: int):
     """Run import processing outside the request so Live Processing can poll it."""
     with connect() as connection:
@@ -439,10 +463,11 @@ def _process_import_background(job_id: int):
                     int(job['created_by']),
                     'Automatic approval: extraction, normalization, validation and comparison passed',
                 )
-                # Resolve only after extraction/staging has committed. Running
-                # Website resolution is intentionally NOT started here. It is
-                # driven one college at a time from the admin panel so AI/network
-                # work cannot compete with PDF extraction on the web instance.
+                # The first resolver step starts only after PDF processing has
+                # completed. It is deliberately limited to one college so the
+                # 512 MB web instance never runs a PDF extractor and AI resolver
+                # concurrently. The remaining queue is available in Resolver.
+                _resolve_one_import_background(job_id)
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
