@@ -1081,7 +1081,15 @@ async def resolver_manual_verify(request: Request):
     with connect() as c:
         row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
         if not row:
-            raise HTTPException(404,'College not found in resolver')
+            # The resolver list is a derived table. If a row was removed between
+            # page load and click, recover it from the authoritative institutes row.
+            institute=c.execute('SELECT institution_code,institution_name,city,website FROM institutes WHERE institution_code=?',(code,)).fetchone()
+            if not institute:
+                raise HTTPException(404,'College not found')
+            c.execute("INSERT INTO college_website_resolver (institution_code,institution_name,city,website,status,source,updated_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT (institution_code) DO NOTHING",(institute['institution_code'],institute['institution_name'],institute['city'],institute['website'],'PENDING','cap_institutes'))
+            row=c.execute('SELECT institution_code,institution_name,city,website,status FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
+            if not row:
+                raise HTTPException(409,'College could not be prepared for verification')
         website=str(row['website'] or '').strip()
         if not website:
             raise HTTPException(409,'This college has no website URL to verify')
