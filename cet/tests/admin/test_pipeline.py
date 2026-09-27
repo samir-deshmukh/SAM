@@ -35,6 +35,16 @@ def test_extract_pdf_metadata_recovers_seat_year(monkeypatch, tmp_path):
     assert extract_pdf_metadata(pdf, pdf.name) == ("BBA", 2026, None)
 
 
+def test_extract_pdf_metadata_recovers_bare_session_year(monkeypatch, tmp_path):
+    pdf = tmp_path / "MCA.SM.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    monkeypatch.setattr(
+        "backend.admin.pipeline._pdf_text_probe",
+        lambda path: "Provisional Seat Distribution MCA 2026-27",
+    )
+    assert extract_pdf_metadata(pdf, pdf.name) == ("MCA", 2026, None)
+
+
 def test_security_check_accepts_pdf_and_returns_sha256(tmp_path):
     pdf = tmp_path / "sample.pdf"
     payload = b"%PDF-1.7\nminimal test content"

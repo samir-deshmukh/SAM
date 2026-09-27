@@ -25,9 +25,15 @@ def _load_module(path: Path, name: str):
     return mod
 
 def _run_validator(script: Path, folder: Path) -> tuple[bool, str]:
+    env = os.environ.copy()
+    # Validation scripts emit Unicode audit markers. Force UTF-8 so the same
+    # subprocess behaves identically on Windows development machines and
+    # Linux/Render production instead of failing on CP1252 stdout.
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
     p = subprocess.run(
         [sys.executable, str(script), str(folder)],
-        cwd=str(BASE), capture_output=True, text=True, timeout=900
+        cwd=str(BASE), capture_output=True, text=True, timeout=900, env=env
     )
     output = (p.stdout or "") + (p.stderr or "")
     return p.returncode == 0, output

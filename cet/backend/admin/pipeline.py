@@ -31,6 +31,11 @@ def extract_pdf_metadata(path, filename):
         )
     year = None
     year_match = re.search(r"(?:ACADEMIC YEAR|A\.Y\.)\s*[:\-]?\s*(20\d{2})\s*[-/]\s*\d{2}", text)
+    if not year_match:
+        # Some CET seat-matrix PDFs print only the session, without the
+        # literal "Academic Year" label. This is still deterministic
+        # because the year pair is read from the PDF itself.
+        year_match = re.search(r"\b(20\d{2})\s*[-/]\s*(?:20)?\d{2}\b", text)
     if year_match:
         year = int(year_match.group(1))
     round_name = None

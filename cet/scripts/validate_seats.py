@@ -70,9 +70,12 @@ def hash_rows(df: pd.DataFrame) -> str:
 
 def main(raw_dir: str) -> None:
     folder = Path(raw_dir)
-    csvs = sorted(folder.glob('*.csv'))
+    # Only canonical seat-matrix artifacts belong in this gate. This prevents
+    # helper CSVs (for example *_courses.csv from the extractor) from being
+    # mistaken for intake files and producing misleading filename errors.
+    csvs = sorted(folder.glob('*_SM.csv'))
     if not csvs:
-        print(f'No CSVs in {folder}')
+        print(f'No canonical seat-matrix CSVs in {folder}')
         sys.exit(1)
 
     print(f'Validating {len(csvs)} seat-matrix files in {folder}\n')
