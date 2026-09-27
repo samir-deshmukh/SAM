@@ -1488,6 +1488,8 @@ body{letter-spacing:-.01em;}
      • The full college list
    ═══════════════════════════════════════════════════════════════════ */
 
+const API_BASE = "https://cetfind-backend.onrender.com";
+
 const CONFIG = {
 
   /* ── Site title shown in the topbar and browser tab ── */
@@ -2015,7 +2017,7 @@ function populateSelects() {
    fetch is in flight; re-renders once the real data is in. */
 async function loadRealCollegeData() {
   try {
-    const response = await fetch("/api/options", { headers: { "Accept": "application/json" } });
+    const response = await fetch(`${API_BASE}/api/options`, { headers: { "Accept": "application/json" } });
     if (!response.ok) throw new Error("API options request failed: " + response.status);
     const data = await response.json();
 
@@ -2187,7 +2189,7 @@ function renderResults() {
         page: "1",
         page_size: "50"
       });
-      const response = await fetch("/api/search?" + params.toString(), {
+      const response = await fetch(`${API_BASE}/api/search?` + params.toString(), {
         headers: { "Accept": "application/json" },
         signal: searchRequest.signal
       });
@@ -2587,7 +2589,7 @@ function createTrendsController(ids) {
     const key = `${course}:${year}:${college}`;
     if (collegeYearCache.has(key)) return collegeYearCache.get(key);
     const response = await fetch(
-      `/api/colleges/${encodeURIComponent(college)}/year/${encodeURIComponent(year)}?course=${encodeURIComponent(course)}`,
+      `${API_BASE}/api/colleges/${encodeURIComponent(college)}/year/${encodeURIComponent(year)}?course=${encodeURIComponent(course)}`,
       { headers: { "Accept": "application/json" } }
     );
     if (!response.ok) throw new Error(`Could not load cutoff data for ${college} (${course}, ${year})`);
@@ -2607,7 +2609,7 @@ function createTrendsController(ids) {
     const key = `${course}:${college}`;
     if (seatDataCache.has(key)) return seatDataCache.get(key);
     const response = await fetch(
-      `/api/colleges/${encodeURIComponent(college)}/seats?course=${encodeURIComponent(course)}`,
+      `${API_BASE}/api/colleges/${encodeURIComponent(college)}/seats?course=${encodeURIComponent(course)}`,
       { headers: { "Accept": "application/json" } }
     );
     if (!response.ok) throw new Error(`Could not load seat matrix for ${college} (${course})`);
@@ -3287,7 +3289,7 @@ function createTrendsController(ids) {
 
     try {
       const response = await fetch(
-        "/api/colleges/" + encodeURIComponent(collegeCode) +
+        `${API_BASE}/api/colleges/` + encodeURIComponent(collegeCode) +
         "/trend-options?course=" + encodeURIComponent(course),
         { headers: { "Accept": "application/json" } }
       );
@@ -3373,7 +3375,7 @@ let drawerTrends = null;
   feedbackModal.addEventListener("click",e=>{if(e.target===feedbackModal)closeFeedback()});
   document.addEventListener("keydown",e=>{if(e.key==="Escape"&&feedbackModal.classList.contains("open"))closeFeedback()});
   feedbackRating.querySelectorAll("button").forEach(btn=>btn.addEventListener("click",()=>{feedbackScore=Number(btn.dataset.rating);feedbackRating.querySelectorAll("button").forEach(b=>b.classList.toggle("selected",b===btn));}));
-  feedbackSubmit.addEventListener("click",async()=>{const message=feedbackMessage.value.trim();if(!message){feedbackStatus.textContent="Please write some feedback first.";feedbackMessage.focus();return}feedbackSubmit.disabled=true;feedbackStatus.textContent="Sending…";try{const response=await fetch("/api/feedback",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({rating:feedbackScore,message,page:location.pathname,website:feedbackWebsite.value})});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||"Couldn’t send feedback.");feedbackStatus.textContent="Thanks — your feedback was sent.";feedbackMessage.value="";feedbackScore=null;feedbackRating.querySelectorAll("button").forEach(b=>b.classList.remove("selected"));setTimeout(closeFeedback,1100)}catch(err){feedbackStatus.textContent=err.message||"Couldn’t send feedback. Please try again."}finally{feedbackSubmit.disabled=false}});
+  feedbackSubmit.addEventListener("click",async()=>{const message=feedbackMessage.value.trim();if(!message){feedbackStatus.textContent="Please write some feedback first.";feedbackMessage.focus();return}feedbackSubmit.disabled=true;feedbackStatus.textContent="Sending…";try{const response=await fetch(`${API_BASE}/api/feedback`,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({rating:feedbackScore,message,page:location.pathname,website:feedbackWebsite.value})});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||"Couldn’t send feedback.");feedbackStatus.textContent="Thanks — your feedback was sent.";feedbackMessage.value="";feedbackScore=null;feedbackRating.querySelectorAll("button").forEach(b=>b.classList.remove("selected"));setTimeout(closeFeedback,1100)}catch(err){feedbackStatus.textContent=err.message||"Couldn’t send feedback. Please try again."}finally{feedbackSubmit.disabled=false}});
 })();
 </script>
 

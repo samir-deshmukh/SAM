@@ -1,6 +1,7 @@
 import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading
 from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
 from .admin.db import connect,init_admin_schema,event
@@ -66,6 +67,13 @@ async def lifespan(_app):
     yield
 
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://cetfind.onrender.com"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type"],
+)
 app.include_router(public_api_router)
 log=logging.getLogger('cet-cap-admin')
 # PDF extraction/normalization is memory-heavy on the free Render instance.
