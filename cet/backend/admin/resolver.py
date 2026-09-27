@@ -33,6 +33,54 @@ def verify_url(url,college_name,timeout=7):
         return {'ok':200<=status<400,'url':valid_url(final),'status':status,'match_score':hits/denom,'note':f'HTTP {status}; college-name match {hits}/{denom}'}
     except Exception as e:return {'ok':False,'url':url,'note':f'Unreachable: {type(e).__name__}'}
 
+def _same_site(a, b):
+    """Compare hostnames while allowing www/subdomains of the same site."""
+    try:
+        ha = (urllib.parse.urlparse(valid_url(a)).hostname or "").lower().removeprefix("www.")
+        hb = (urllib.parse.urlparse(valid_url(b)).hostname or "").lower().removeprefix("www.")
+        return bool(ha and hb and (ha == hb or ha.endswith("." + hb) or hb.endswith("." + ha)))
+    except Exception:
+        return False
+
+
+def gemini_verify_candidate(college_name, candidate_url, city=None):
+    """Use Gemini + Google Search to verify that a working URL belongs to the college."""
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    location = f", {city}" if city else ""
+    prompt = f'''Verify whether this URL is the official website of the exact Indian college/institution.
+College: {college_name}{location}
+Candidate URL: {candidate_url}
+Search the web and inspect the candidate identity. Do not accept directories, social profiles,
+ranking sites, admission aggregators, unrelated universities, or another institution with a
+similar name. Return ONLY JSON with keys verified, confidence, official_url, city, address, note.
+Set verified=true only when the candidate clearly belongs to the named institution.'''
+    payload = {"contents":[{"parts":[{"text":prompt}]}],"tools":[{"google_search":{}}]}
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe='')}:generateContent",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type":"application/json","x-goog-api-key":key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Gemini verification failed ({e.code})")
+    text = "".join(part.get("text","") for c in data.get("candidates",[])
+                   for part in c.get("content",{}).get("parts",[]))
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise RuntimeError("Gemini returned no structured verification result")
+    try:
+        result = json.loads(m.group(0))
+    except Exception:
+        raise RuntimeError("Gemini returned invalid verification JSON")
+    result["official_url"] = valid_url(result.get("official_url"))
+    return result
+
+
 def seed_from_contacts(conn):
     if not CONTACTS.exists():return 0
     n=0
@@ -249,13 +297,25 @@ def resolve_import_job(job_id):
         verified = None
         for url, source in candidate_urls:
             result = verify_url(url, name)
-            if result.get('ok') and result.get('match_score', 0) >= 0.15:
-                verified = (result, source)
-                break
+            if not result.get('ok'):
+                continue
+            # A reachable URL is only a candidate. Gemini + Google Search must
+            # confirm the site's identity before we mark it VERIFIED.
+            try:
+                ai_check = gemini_verify_candidate(name, result['url'], city)
+                ai_conf = float(ai_check.get('confidence') or 0)
+                ai_url = ai_check.get('official_url')
+                if bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
+                    not ai_url or _same_site(result['url'], ai_url)
+                ):
+                    verified = (result, source, ai_check)
+                    break
+            except Exception as exc:
+                log.warning("AI website verification failed for %s: %s", code, exc)
 
         if verified:
-            result, source = verified
-            found_city = city
+            result, source, ai_check = verified
+            found_city = city or (str(ai_check.get('city')).strip() if ai_check.get('city') else None)
             found_address = None
             if not city:
                 # The website is already verified, but city is still missing.
@@ -300,7 +360,20 @@ def resolve_import_job(job_id):
                 if url
                 else {'ok': False, 'url': None, 'note': 'Search returned no official URL'}
             )
-            if result.get('ok') and result.get('match_score', 0) >= 0.15:
+            ai_check = {}
+            if result.get('ok'):
+                try:
+                    ai_check = gemini_verify_candidate(name, result['url'], found_city)
+                except Exception as exc:
+                    ai_check = {'verified': False, 'confidence': 0, 'note': f'AI verification failed: {exc}'}
+            ai_conf = float(ai_check.get('confidence') or 0)
+            ai_url = ai_check.get('official_url')
+            if (
+                result.get('ok')
+                and bool(ai_check.get('verified'))
+                and ai_conf >= 0.70
+                and (not ai_url or _same_site(result['url'], ai_url))
+            ):
                 status = 'VERIFIED'
             elif result.get('ok'):
                 status = 'NEEDS_REVIEW'
@@ -308,7 +381,11 @@ def resolve_import_job(job_id):
                 status = 'FAILED'
                 failed += 1
             final_url = result.get('url') or url
-            note = ((ai.get('note') or '').strip() + ' ' + result.get('note', '')).strip()
+            note = ' '.join(x for x in (
+                (ai.get('note') or '').strip(),
+                (ai_check.get('note') or '').strip(),
+                result.get('note', ''),
+            ) if x)
             with connect() as c:
                 c.execute(
                     """UPDATE college_website_resolver

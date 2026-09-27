@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from backend.admin.pipeline import MAX_PDF_BYTES, identify, security_check
+from backend.admin.pipeline import MAX_PDF_BYTES, detect_data_type, extract_pdf_metadata, identify, security_check
 from backend.admin.processing import _resolve_cutoff_dimensions
 
 
@@ -13,6 +13,26 @@ def test_identify_cutoff_and_seat_filenames():
 
 def test_identify_partial_filename_has_partial_confidence():
     assert identify("BCA_results.pdf") == ("CUTOFFS", "BCA", None, None, 1 / 3)
+
+
+def test_detect_data_type_uses_pdf_content(monkeypatch, tmp_path):
+    pdf = tmp_path / "BCA 26 C1.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    monkeypatch.setattr(
+        "backend.admin.pipeline._pdf_text_probe",
+        lambda path: "Provisional Seat Distribution Choice Code Course Name Category CAP Seats",
+    )
+    assert detect_data_type(pdf, pdf.name) == "SEATS"
+
+
+def test_extract_pdf_metadata_recovers_seat_year(monkeypatch, tmp_path):
+    pdf = tmp_path / "BBA.SM.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    monkeypatch.setattr(
+        "backend.admin.pipeline._pdf_text_probe",
+        lambda path: "Provisional Seat Distribution for BBA / BMS Academic Year 2026-27",
+    )
+    assert extract_pdf_metadata(pdf, pdf.name) == ("BBA", 2026, None)
 
 
 def test_security_check_accepts_pdf_and_returns_sha256(tmp_path):

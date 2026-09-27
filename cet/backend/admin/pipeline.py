@@ -2,6 +2,65 @@ import hashlib
 import re
 from pathlib import Path
 
+
+def _pdf_text_probe(path, max_pages=3):
+    """Read a small native-text sample for content-based PDF classification."""
+    try:
+        import pdfplumber
+        chunks=[]
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages[:max_pages]:
+                chunks.append(page.extract_text() or "")
+        return "\n".join(chunks)
+    except Exception:
+        return ""
+
+
+def extract_pdf_metadata(path, filename):
+    """Recover year/round/family when a PDF filename omits them."""
+    text = _pdf_text_probe(path).upper()
+    upper_name = str(filename or "").upper()
+    family = next(
+        (value for value in ("BCA", "BBA", "MBA", "MCA") if value in upper_name),
+        None,
+    )
+    if not family:
+        family = next(
+            (value for value in ("BCA", "BBA", "MBA", "MCA") if value in text),
+            None,
+        )
+    year = None
+    year_match = re.search(r"(?:ACADEMIC YEAR|A\.Y\.)\s*[:\-]?\s*(20\d{2})\s*[-/]\s*\d{2}", text)
+    if year_match:
+        year = int(year_match.group(1))
+    round_name = None
+    round_match = re.search(r"CAP\s*ROUND\s*[- ]?\s*(I{1,3}|IV|[1-4])\b", text)
+    if round_match:
+        value = round_match.group(1)
+        round_name = {"I":"C1","II":"C2","III":"C3","IV":"C4"}.get(value, f"C{value}")
+    return family, year, round_name
+
+
+def detect_data_type(path, filename):
+    """Identify seat matrices from PDF content as well as filename hints.
+
+    Seat-matrix PDFs are frequently named generically (for example
+    ``BCA 26 C1.pdf``), so filename-only detection can send them through the
+    cutoff extractor. Content markers are stronger evidence when available.
+    """
+    name = str(filename or Path(path).name).upper()
+    text = _pdf_text_probe(path).upper()
+    seat_markers = (
+        "SEAT DISTRIBUTION", "SEAT MATRIX", "CHOICE CODE", "CAP SEATS",
+        "COURSE NAME", "PROVISIONAL SEAT DISTRIBUTION", "FINAL SEAT DISTRIBUTION",
+    )
+    cutoff_markers = ("PERCENTILE", "RANK", "GOPENH", "LOPENH", "STAGE-I")
+    seat_score = sum(marker in text for marker in seat_markers)
+    cutoff_score = sum(marker in text for marker in cutoff_markers)
+    if seat_score >= 2 and seat_score > cutoff_score:
+        return "SEATS"
+    return "SEATS" if ("_SM" in name or "SEAT" in name or "MATRIX" in name) else "CUTOFFS"
+
 from .db import event, update_status
 from .state import JobStatus
 
@@ -90,9 +149,18 @@ def run_preflight(connection, job_id, path, original_filename=None):
             JobStatus.IDENTIFIED.value,
             "Identifying source metadata",
         )
-        data_type, family, year, round_name, confidence = identify(
-            original_filename or Path(path).name
-        )
+        original = original_filename or Path(path).name
+        data_type, family, year, round_name, confidence = identify(original)
+        # Override filename-only type when the PDF itself clearly identifies
+        # a seat matrix. This handles real uploads whose filenames are simply
+        # ``BCA 26 C1.pdf`` or similar.
+        data_type = detect_data_type(path, original)
+        pdf_family, pdf_year, pdf_round = extract_pdf_metadata(path, original)
+        family = family or pdf_family
+        year = year or pdf_year
+        round_name = round_name or pdf_round
+        required_metadata = (family, year) if data_type == "SEATS" else (family, year, round_name)
+        confidence = sum(value is not None for value in required_metadata) / len(required_metadata)
         connection.execute(
             "UPDATE import_jobs SET data_type=?,course_family=?,year=?,round=?,confidence=? WHERE id=?",
             (data_type, family, year, round_name, confidence, job_id),

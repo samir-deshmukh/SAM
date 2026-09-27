@@ -377,7 +377,6 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
                 )
                 connection.commit()
                 background_tasks.add_task(_process_import_background, job_id)
-                background_tasks.add_task(_resolve_import_background, job_id)
         return RedirectResponse('/admin', 303)
     except Exception:
         if tmp.exists():
@@ -429,6 +428,10 @@ def _process_import_background(job_id: int):
                     int(job['created_by']),
                     'Automatic approval: extraction, normalization, validation and comparison passed',
                 )
+                # Resolve only after extraction/staging has committed. Running
+                # the resolver concurrently with extraction races the staging
+                # table and can make it see zero colleges.
+                _resolve_import_background(job_id)
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
@@ -470,7 +473,6 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         connection.commit()
 
         background_tasks.add_task(_process_import_background, job_id)
-        background_tasks.add_task(_resolve_import_background, job_id)
         return JSONResponse(
             status_code=202,
             content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
