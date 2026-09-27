@@ -378,9 +378,13 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
         cmd = [sys.executable, str(script), '--job-id', str(job_id)]
         if course_family:
             cmd += ['--course', course_family]
+        build_env = os.environ.copy()
+        existing_pythonpath = build_env.get('PYTHONPATH', '')
+        build_env['PYTHONPATH'] = str(BASE) + (os.pathsep + existing_pythonpath if existing_pythonpath else '')
         subprocess.run(
             cmd,
             cwd=str(BASE),
+            env=build_env,
             check=True,
             stdout=None,
             stderr=None,
