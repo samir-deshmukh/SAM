@@ -102,14 +102,19 @@ def public_options(request: Request):
 
 
 class CollegeCard(BaseModel):
+    id: str
     institution_code: str
     name: str
     city: Optional[str] = None
     website: Optional[str] = None
     course: str
+    cutoff: int
+    percentile: float
     highest_cutoff: float
     status: str
     years_on_record: int
+    history: list[dict] = []
+    graph_history: list[dict] = []
     drawer: Optional[dict] = None
 
 
@@ -173,6 +178,73 @@ def _drawer_metadata(engine, course: str, institution_codes: list[str]) -> dict[
             ]
 
     return metadata
+
+
+def _legacy_search_metadata(engine, course: str, institution_codes: list[str]) -> dict[str, dict]:
+    """Build the legacy result-card fields used by the public drawer."""
+    if not institution_codes:
+        return {}
+
+    params = {"course": course}
+    placeholders = []
+    for index, code in enumerate(institution_codes):
+        key = f"code_{index}"
+        placeholders.append(f":{key}")
+        params[key] = code
+
+    query = text(
+        f"""
+        SELECT c.institution_code, c.year, c.percentile, c.rank_number
+        FROM cutoffs c
+        JOIN programs p ON p.program_id = c.program_id
+        WHERE p.program_family = :course
+          AND c.institution_code IN ({", ".join(placeholders)})
+          AND NOT (c.rank_number = 0 AND c.percentile = 0.0)
+        ORDER BY c.institution_code, c.year
+        """
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    result = {}
+    for row in rows:
+        code = str(row[0])
+        year = int(row[1])
+        pct = float(row[2])
+        rank = int(row[3])
+        item = result.setdefault(code, {"history": [], "graph_history": []})
+        item.setdefault("_years", {}).setdefault(year, []).append((pct, rank))
+
+    for item in result.values():
+        years = item.pop("_years", {})
+        history = []
+        for year in sorted(years):
+            values = years[year]
+            low_pct, low_rank = min(values, key=lambda v: v[0])
+            high_pct = max(v[0] for v in values)
+            history.append({
+                "year": year,
+                "percentile": low_pct,
+                "low": low_pct,
+                "high": high_pct,
+                "rank": low_rank,
+            })
+        item["history"] = history
+        item["graph_history"] = [
+            {"year": h["year"], "low": h["low"], "high": h["high"]}
+            for h in history
+        ]
+        if history:
+            item["percentile"] = min(h["percentile"] for h in history)
+            item["cutoff"] = next(
+                h["rank"] for h in history if h["percentile"] == item["percentile"]
+            )
+        else:
+            item["percentile"] = 0.0
+            item["cutoff"] = 0
+
+    return result
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -239,6 +311,7 @@ def search_colleges(
     results = []
     paged_codes = [str(v) for v in paged_df["institution_code"].tolist()]
     drawer_meta = _drawer_metadata(engine, course, paged_codes)
+    legacy_meta = _legacy_search_metadata(engine, course, paged_codes)
     for _, row in paged_df.iterrows():
         # Status calculation: safe if candidate percentage >= highest cutoff
         cutoff_val = float(row["highest_cutoff"])
@@ -251,14 +324,19 @@ def search_colleges(
 
         results.append(
             CollegeCard(
+                id=f"{row['institution_code']}_{course}",
                 institution_code=str(row["institution_code"]),
                 name=str(row["institution_name"]),
                 city=str(row["city"]) if pd.notna(row["city"]) else None,
                 website=str(row["website"]) if pd.notna(row["website"]) else None,
                 course=course,
+                cutoff=int(legacy_meta.get(str(row["institution_code"]), {}).get("cutoff", 0)),
+                percentile=round(float(legacy_meta.get(str(row["institution_code"]), {}).get("percentile", cutoff_val)), 2),
                 highest_cutoff=round(cutoff_val, 2),
                 status=status_label,
                 years_on_record=int(row["years_on_record"]),
+                history=legacy_meta.get(str(row["institution_code"]), {}).get("history", []),
+                graph_history=legacy_meta.get(str(row["institution_code"]), {}).get("graph_history", []),
                 drawer=drawer_meta.get(str(row["institution_code"])),
             )
         )

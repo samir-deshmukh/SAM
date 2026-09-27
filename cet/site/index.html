@@ -2175,85 +2175,24 @@ function percentileRange(c) {
    has only ever closed in the 90s. */
 function getFiltered() { return searchResults; }
 
-function renderResults(list) {
-  const items = Array.isArray(list) ? list : [];
+function renderResults(list=searchResults) {
   const searched = citySelect.value !== CONFIG.unselected && courseSelect.value !== CONFIG.unselected && currentPct !== null;
-  resultCount.textContent = String(items.length);
-  resultLabel.textContent = items.length === 1 ? 'college matches your profile' : 'colleges match your profile';
-
+  resultCount.textContent = list.length;
+  resultLabel.textContent = list.length === 1 ? 'college matches your profile' : 'colleges match your profile';
   if (!searched) {
     resultsBody.innerHTML='<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>Search to see colleges</h4><p>Pick a city, a course, and type your percentile above.</p></div></td></tr>';
     return;
   }
-  if (!items.length) {
+  if (!list.length) {
     resultsBody.innerHTML='<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>No colleges found</h4><p>Try a different city or course, or adjust your percentile.</p></div></td></tr>';
     return;
   }
-
-  const fragment = document.createDocumentFragment();
-  try {
-    items.forEach(c => {
-      const row = document.createElement('tr');
-      row.dataset.id = String(c.id || '');
-      if (openId === c.id) row.className = 'active';
-
-      const nameCell = document.createElement('td');
-      const name = document.createElement('span');
-      name.className = 'college-name';
-      name.textContent = String(c.name || 'Unnamed college');
-      const meta = document.createElement('span');
-      meta.className = 'college-meta';
-      meta.textContent = String(c.institution_code || '—') + ' · ' + String(c.city || 'City unknown') + ' · ' + String(c.course || '');
-      const save = document.createElement('button');
-      save.type = 'button';
-      save.className = 'save-college' + (isShortlisted(c.id) ? ' saved' : '');
-      save.style.marginTop = '7px';
-      save.style.padding = '5px 8px';
-      save.style.fontSize = '11px';
-      save.textContent = isShortlisted(c.id) ? '✓ Shortlisted' : '＋ Shortlist';
-      save.addEventListener('click', function(e) {
-        e.stopPropagation();
-        toggleShortlist(c.id);
-        renderResults(searchResults);
-      });
-      nameCell.appendChild(name);
-      nameCell.appendChild(meta);
-      nameCell.appendChild(save);
-
-      const cutoffCell = document.createElement('td');
-      const cutoff = document.createElement('span');
-      cutoff.className = 'cutoff-num';
-      cutoff.textContent = Number(c.cutoff || 0).toFixed(0);
-      cutoffCell.appendChild(cutoff);
-
-      const pctCell = document.createElement('td');
-      const pct = document.createElement('span');
-      pct.className = 'pct-num';
-      pct.textContent = Number(c.highest_cutoff || c.percentile || 0).toFixed(2) + '%';
-      pctCell.appendChild(pct);
-
-      const statusCell = document.createElement('td');
-      const statusKey = String(c.status || 'reach');
-      const dot = document.createElement('span');
-      dot.className = 'status-dot ' + (CONFIG.statusClasses[statusKey] || '');
-      const label = document.createElement('span');
-      label.className = 'status-label';
-      label.textContent = CONFIG.statusLabels[statusKey] || statusKey;
-      statusCell.appendChild(dot);
-      statusCell.appendChild(label);
-
-      row.appendChild(nameCell);
-      row.appendChild(cutoffCell);
-      row.appendChild(pctCell);
-      row.appendChild(statusCell);
-      fragment.appendChild(row);
-    });
-    resultsBody.innerHTML = '';
-    resultsBody.appendChild(fragment);
-  } catch (err) {
-    console.error('Could not render college results:', err);
-    resultsBody.innerHTML='<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>Results could not be displayed</h4><p>Please reload the page and try the search again.</p></div></td></tr>';
-  }
+  resultsBody.innerHTML=list.map(c=>{
+    const lo=Number(c.percentile||0), hi=lo;
+    const key=c.status||getStatus(currentPct,lo,hi).key;
+    const label=CONFIG.statusLabels[key]||key;
+    return '<tr data-id="'+escapeHtml(c.id)+'" class="'+(openId===c.id?'active':'')+'"><td><span class="college-name">'+escapeHtml(c.name)+'</span><span class="college-meta">'+escapeHtml(c.institution_code)+' · '+escapeHtml(c.city||'City unknown')+' · '+escapeHtml(c.course)+'</span><button class="save-college '+(isShortlisted(c.id)?'saved':'')+'" style="margin-top:7px;padding:5px 8px;font-size:11px" type="button" onclick="event.stopPropagation();toggleShortlist(\''+escapeHtml(c.id)+'\');renderResults(searchResults);">'+(isShortlisted(c.id)?'✓ Shortlisted':'＋ Shortlist')+'</button></td><td><span class="cutoff-num">'+Number(c.cutoff||0).toFixed(0)+'</span></td><td><span class="pct-num">'+hi.toFixed(2)+'%</span></td><td><span class="status-dot '+(CONFIG.statusClasses[key]||'')+'"></span><span class="status-label">'+escapeHtml(label)+'</span></td></tr>';
+  }).join('');
 }
 
 /* ── Click on any row in the results table ──
