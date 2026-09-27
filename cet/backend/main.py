@@ -1,4 +1,4 @@
-import os,uuid,json,time,re,secrets,logging,html,sys,subprocess
+import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading
 from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from contextlib import asynccontextmanager
@@ -23,6 +23,27 @@ IMPORTS.mkdir(parents=True, exist_ok=True)
 async def lifespan(_app):
     init_admin_schema()
     ensure_part4_schema()
+
+    # Recover imports that completed extraction/validation but were left in
+    # STAGED by an older worker crash. This is intentionally limited to clean
+    # STAGED jobs; FAILED jobs must not be retried silently.
+    def _recover_staged_imports():
+        try:
+            with connect() as c:
+                jobs = c.execute("SELECT id,created_by FROM import_jobs WHERE status='STAGED' ORDER BY id").fetchall()
+            for job in jobs:
+                try:
+                    with connect() as c:
+                        approve_import(c, int(job['id']), int(job['created_by']),
+                                       'Automatic recovery: staged import resumed after service restart')
+                    log.info('Recovered STAGED import: job_id=%s', job['id'])
+                except Exception:
+                    log.exception('Failed to recover STAGED import: job_id=%s', job['id'])
+        except Exception:
+            log.exception('Unable to scan for STAGED import recovery')
+
+    threading.Thread(target=_recover_staged_imports, daemon=True,
+                     name='staged-import-recovery').start()
     yield
 
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
