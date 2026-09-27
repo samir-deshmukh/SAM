@@ -454,8 +454,12 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         ).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
-        if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value}:
+        if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
             raise HTTPException(409, f'Import is not ready for processing: {job["status"]}')
+        if job['status'] == JobStatus.CANCELLED.value:
+            marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
+            if marker.exists():
+                raise HTTPException(409, 'Stop request is still being finalized; wait a moment before retrying')
         if not job['data_type'] or not job['course_family'] or not job['year'] or not job['round']:
             raise HTTPException(
                 409,
@@ -467,18 +471,48 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             raise HTTPException(404, 'Stored source PDF is missing')
 
         claimed = connection.execute(
-            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('REVIEW_REQUIRED','FAILED')",
+            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('REVIEW_REQUIRED','FAILED','CANCELLED')",
             (job_id,),
         ).rowcount
         if not claimed:
             raise HTTPException(409, 'Import is already being processed')
         connection.commit()
 
+        # A retry clears any previous stop marker before starting a fresh run.
+        cancel_marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
+        if cancel_marker.exists():
+            cancel_marker.unlink()
         background_tasks.add_task(_process_import_background, job_id)
         return JSONResponse(
             status_code=202,
             content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
         )
+
+
+@app.post('/admin/api/imports/{job_id}/cancel')
+def cancel_import(request: Request, job_id: int):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        active = {
+            JobStatus.RECEIVED.value, JobStatus.IDENTIFIED.value,
+            JobStatus.EXTRACTING.value, JobStatus.NORMALIZING.value,
+            JobStatus.VALIDATING.value, JobStatus.COMPARING.value,
+        }
+        if job['status'] not in active:
+            raise HTTPException(409, f"Import cannot be stopped while in {job['status']}")
+        marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        connection.execute(
+            "UPDATE import_jobs SET status='CANCELLED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING')",
+            (job_id,),
+        )
+        event(connection, job_id, 'CANCELLED', 'Processing stop requested by admin', None)
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'status': 'CANCELLED'}
 
 
 @app.delete('/admin/api/imports/{job_id}')
@@ -494,7 +528,9 @@ def delete_import(request: Request, job_id: int):
             JobStatus.REVIEW_REQUIRED.value,
             JobStatus.STAGED.value,
             JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
             JobStatus.QUARANTINED.value,
+            JobStatus.CANCELLED.value,
         }
         if job['status'] not in deletable:
             raise HTTPException(409, f"Import cannot be deleted while in {job['status']}")
@@ -530,7 +566,8 @@ def imports(request: Request):
         return [
             dict(row)
             for row in connection.execute(
-                'SELECT * FROM import_jobs ORDER BY id DESC LIMIT 100'
+                "SELECT j.*, COALESCE((SELECT progress FROM import_events e WHERE e.job_id=j.id ORDER BY e.id DESC LIMIT 1),0) AS progress "
+                "FROM import_jobs j ORDER BY j.id DESC LIMIT 100"
             )
         ]
 

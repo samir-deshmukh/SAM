@@ -16,6 +16,27 @@ SCRIPTS = BASE / "scripts"
 WORK_ROOT = BASE / "data" / "import_work"
 STAGING_ROOT = BASE / "data" / "import_staging"
 
+class ImportCancelled(Exception):
+    pass
+
+def _cancel_marker(job_id: int) -> Path:
+    return STAGING_ROOT / f"job_{job_id}" / "CANCEL"
+
+def _cancel_requested(job_id: int) -> bool:
+    return _cancel_marker(job_id).exists()
+
+def _raise_if_cancelled(conn, job_id: int) -> None:
+    if not _cancel_requested(job_id):
+        return
+    conn.execute(
+        "UPDATE import_jobs SET status=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP "
+        "WHERE id=? AND status NOT IN ('COMPLETED','COMMITTING','PUBLISHING','VERIFYING','CANCELLED')",
+        (JobStatus.CANCELLED.value, job_id),
+    )
+    event(conn, job_id, "CANCELLED", "Processing stopped by admin", None)
+    conn.commit()
+    raise ImportCancelled()
+
 def _load_module(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     if not spec or not spec.loader:
@@ -231,11 +252,13 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
         else:
             event(conn, job_id, "EXTRACT", "Processing job claimed by admin worker", 45)
         event(conn, job_id, "EXTRACT", f"Starting {data_type.lower()} extraction", 45)
+        _raise_if_cancelled(conn, job_id)
 
         if data_type == "CUTOFFS":
             mod = _load_module(SCRIPTS / "cutoff_extractor.py", "cet_cutoff_extractor")
             summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
                                              dpi=300, lang="eng", use_camelot=False)
+            _raise_if_cancelled(conn, job_id)
             extracted_path = raw / f"{pdf_path.stem}_cutoffs.csv"
             if not extracted_path.exists():
                 raise RuntimeError("Cutoff extractor produced no CSV artifact")
@@ -300,12 +323,33 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             env = os.environ.copy()
             env.setdefault("PYTHONIOENCODING", "utf-8")
             env.setdefault("PYTHONUTF8", "1")
-            p = subprocess.run(
-                [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
-                 str(pdf_path), "--out", str(raw), "--dpi", "300"],
-                cwd=str(BASE), capture_output=True, text=True, timeout=1800, env=env,
-            )
-            extractor_output = (p.stdout or "") + (p.stderr or "")
+            env.setdefault("OMP_THREAD_LIMIT", "1")
+            env.setdefault("OPENBLAS_NUM_THREADS", "1")
+            env.setdefault("MKL_NUM_THREADS", "1")
+            log_path = work / "seat_extractor.log"
+            with log_path.open("w", encoding="utf-8") as log:
+                p = subprocess.Popen(
+                    [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
+                     str(pdf_path), "--out", str(raw), "--dpi", "200"],
+                    cwd=str(BASE), stdout=log, stderr=subprocess.STDOUT, text=True, env=env,
+                )
+                started = time.monotonic()
+                while p.poll() is None:
+                    if _cancel_requested(job_id):
+                        p.terminate()
+                        try:
+                            p.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            p.kill()
+                            p.wait(timeout=3)
+                        _raise_if_cancelled(conn, job_id)
+                    if time.monotonic() - started > 1800:
+                        p.kill()
+                        p.wait(timeout=5)
+                        raise RuntimeError("Seat-matrix extractor timed out after 30 minutes")
+                    time.sleep(0.25)
+            extractor_output = log_path.read_text(encoding="utf-8", errors="replace")
+            _raise_if_cancelled(conn, job_id)
             if p.returncode != 0:
                 raise RuntimeError("Seat-matrix extractor failed: " + extractor_output[-6000:])
             summary = {}
@@ -339,6 +383,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                            valid, int(summary.get("seat_rows_extracted", rows)), rows - row_quarantine, row_quarantine,
                            {"extractor": summary, "validation": validation[-12000:]})
 
+        _raise_if_cancelled(conn, job_id)
         update_status(conn, job_id, JobStatus.COMPARING.value, "Comparing staged rows with existing production data")
         result_row = conn.execute("SELECT * FROM import_results WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
         if result_row and result_row["result_type"] == "CUTOFFS":
@@ -366,9 +411,16 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             update_status(conn, job_id, JobStatus.REVIEW_REQUIRED.value, "Validation findings require admin review")
             event(conn, job_id, "REVIEW", "Validation findings require Review Center attention", 100)
             final_status = JobStatus.REVIEW_REQUIRED.value
+        _raise_if_cancelled(conn, job_id)
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": final_status,
                 "work_dir": str(work.relative_to(BASE))}
+    except ImportCancelled:
+        conn.rollback()
+        marker = _cancel_marker(job_id)
+        if marker.exists():
+            marker.unlink()
+        return {"ok": True, "job_id": job_id, "status": JobStatus.CANCELLED.value, "cancelled": True}
     except Exception as exc:
         conn.rollback()
         conn.execute("UPDATE import_jobs SET status=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
