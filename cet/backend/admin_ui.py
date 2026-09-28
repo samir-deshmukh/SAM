@@ -32,7 +32,7 @@ def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
         ('audit','◷','Audit Log','/admin/audit'),
         ('feedback','✦','Feedback','/admin/feedback'),
         ('resolver','⌁','Website Resolver','/admin/resolver'),
-        ('rollback','↶','Rollback','/admin/releases'),
+        ('rollback','↶','Rollback','/admin/rollback'),
     ]
     nav=''.join(f'<a class="{"active" if active==k else ""}" href="{href}">{icon} &nbsp; {label}</a>' for k,icon,label,href in links)
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)} - CET CAP Admin</title><style>{CSS}</style></head><body class="admin-locked">
@@ -174,14 +174,18 @@ window.refreshAdminData=load;load();setInterval(load,5000);
     return _shell('Review Center','review',body,js)
 
 
-def releases_page() -> str:
+def releases_page(active: str = 'releases', title: str = 'Releases') -> str:
     body='''<div class="title"><div><h1>Releases</h1><p>Build, verify, publish and roll back production data releases.</p></div><div class="live"><span class="dot"></span>Live state</div></div><div class="grid4"><div class="card metric"><div class="label">Total Releases</div><div class="value" id="total">0</div></div><div class="card metric"><div class="label">Published</div><div class="value" id="published">0</div></div><div class="card metric"><div class="label">Ready to Publish</div><div class="value" id="ready">0</div></div><div class="card metric"><div class="label">Latest Status</div><div class="value" id="latest" style="font-size:18px">—</div></div></div><div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Release History</h2><button class="btn secondary" onclick="window.refreshAdminData()">↻ Refresh</button></div><div class="tablewrap"><table class="table"><thead><tr><th>Release</th><th>Source Job</th><th>Status</th><th>Created</th><th>Published</th><th>Actions</th></tr></thead><tbody id="list"></tbody></table></div></div>'''
     js=_common_js()+r'''<script>
 async function load(){try{const d=await api('/admin/api/releases');document.querySelector('#total').textContent=d.length;document.querySelector('#published').textContent=d.filter(x=>x.status==='PUBLISHED').length;document.querySelector('#ready').textContent=d.filter(x=>x.status==='COMMITTED').length;document.querySelector('#latest').textContent=d[0]?.status||'—';document.querySelector('#list').innerHTML=d.map(x=>`<tr><td><b>${esc(x.release_key)}</b><div class="small muted">#${x.id}</div></td><td>${esc(x.source_job_id)}</td><td>${badge(x.status)}</td><td>${fmtTime(x.created_at)}</td><td>${fmtTime(x.published_at)}</td><td>${x.status==='COMMITTED'?`<button class="btn primary" onclick="publish(${x.id})">Publish & Verify</button> <button class="btn dangerbtn" onclick="rollback(${x.id})">Revoke & Delete</button>`:x.status==='PUBLISHED'?`<button class="btn dangerbtn" onclick="rollback(${x.id})">Revoke & Delete</button>`:x.status==='ROLLED_BACK'?`<button class="btn dangerbtn" onclick="purge(${x.id})">Delete Permanently</button>`:'<span class="muted small">No action</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">No releases yet.</td></tr>'}catch(e){toast(e.message,'err')}}
 async function publish(id){try{await api('/admin/api/releases/'+id+'/publish',{method:'POST',headers:csrfHeaders()});toast('Release published successfully','ok');load()}catch(e){toast(e.message,'err')}}
 async function rollback(id){const reason=prompt('Revoke reason (required):');if(!reason)return;try{await api('/admin/api/releases/'+id+'/rollback',{method:'POST',headers:csrfHeaders({'Content-Type':'application/json'}),body:JSON.stringify({reason})});toast('Release revoked and production data deleted','ok');load()}catch(e){toast(e.message,'err')}} async function purge(id){try{await api('/admin/api/releases/'+id,{method:'DELETE',headers:csrfHeaders()});toast('Release and source import permanently deleted','ok');load()}catch(e){toast(e.message,'err')}}load();setInterval(load,8000);
 </script>'''
-    return _shell('Releases','releases',body,js)
+    body=body.replace('<h1>Releases</h1>', '<h1>'+escape(title)+'</h1>')
+    if active == 'rollback':
+        body=body.replace('Build, verify, publish and roll back production data releases.', 'Review production releases and manage rollback actions.')
+        body=body.replace('Release History', 'Rollback & Release History')
+    return _shell(title,active,body,js)
 
 
 def derived_data() -> str:
