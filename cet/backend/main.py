@@ -668,20 +668,9 @@ def _process_import_background_locked(job_id: int):
             if not result.get('ok'):
                 log.error('Background import processing failed: job_id=%s error=%s', job_id, result.get('error'))
             elif result.get('status') == JobStatus.STAGED.value:
-                # A clean import must not wait in Review Center. Validation has
-                # already passed, so promote it automatically; publishing remains
-                # a separate explicit release action.
-                approve_import(
-                    connection,
-                    job_id,
-                    int(job['created_by']),
-                    'Automatic approval: extraction, normalization, validation and comparison passed',
-                )
-                # The first resolver step starts only after PDF processing has
-                # completed. It is deliberately limited to one college so the
-                # 512 MB web instance never runs a PDF extractor and AI resolver
-                # concurrently. The remaining queue is available in Resolver.
-                _resolve_one_import_background(job_id)
+                # Successful validation is not administrator approval. Keep the
+                # import staged so a reviewer can inspect and explicitly approve it.
+                log.info('Import is staged and awaiting explicit admin approval: job_id=%s', job_id)
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
@@ -908,13 +897,16 @@ def review_detail(request: Request, job_id: int):
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
 @app.post('/admin/api/imports/{job_id}/approve')
-async def approve(request: Request, job_id: int):
+async def approve(request: Request, job_id: int, background_tasks: BackgroundTasks):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
     try: body=await request.json()
     except Exception: body={}
     notes=str(body.get('notes','')).strip()[:4000]
     with connect() as c:
-        try: return approve_import(c,job_id,u['uid'],notes)
+        try:
+            result = approve_import(c,job_id,u['uid'],notes)
+            background_tasks.add_task(_resolve_one_import_background, job_id)
+            return result
         except ValueError as e: raise HTTPException(409,str(e))
 
 @app.post('/admin/api/imports/{job_id}/reject')
