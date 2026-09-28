@@ -2,7 +2,7 @@
 
 ## Authentication and sessions
 - Login performs a dummy password-hash verification for unknown usernames to reduce timing-based username enumeration.
-- Login attempts are throttled by source address without locking the target account, avoiding attacker-triggered account lockout.
+- Login attempts are throttled by source address without locking the target account, avoiding attacker-triggered account lockout. The in-process login limiter prunes expired keys and caps its key count to bound memory under high-cardinality traffic; it is still per worker/instance and is not a distributed control.
 - Production admin session cookies use Secure, HttpOnly, and SameSite=Strict by default.
 - Sessions are checked against the current database user's active state, role, and authentication version.
 - Disabled users and changed roles invalidate existing sessions.

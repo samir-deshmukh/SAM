@@ -123,11 +123,26 @@ _DATA_DIR = SITE / 'data'
 # ── Login brute-force limiter: 5 attempts per IP per 60 seconds ──
 _LOGIN_RATE: dict[str, list[float]] = {}
 _LOGIN_LIMIT = 5
+_LOGIN_WINDOW = 60.0
+_LOGIN_MAX_KEYS = 5000
 
 def _login_ok(ip: str) -> bool:
     now = time.monotonic()
-    hits = _LOGIN_RATE.get(ip, [])
-    hits = [t for t in hits if now - t < 60]
+    # Expire old keys as well as old hits so spoofed/rotating source addresses
+    # cannot grow this process-local limiter without bound.
+    if len(_LOGIN_RATE) >= _LOGIN_MAX_KEYS and ip not in _LOGIN_RATE:
+        cutoff = now - _LOGIN_WINDOW
+        for key in list(_LOGIN_RATE):
+            fresh = [stamp for stamp in _LOGIN_RATE[key] if stamp > cutoff]
+            if fresh:
+                _LOGIN_RATE[key] = fresh
+            else:
+                del _LOGIN_RATE[key]
+        # Under a sustained high-cardinality flood, cap memory even if every
+        # key remains active. Eviction only affects throttling, not accounts.
+        while len(_LOGIN_RATE) >= _LOGIN_MAX_KEYS and _LOGIN_RATE:
+            _LOGIN_RATE.pop(next(iter(_LOGIN_RATE)))
+    hits = [stamp for stamp in _LOGIN_RATE.get(ip, []) if now - stamp < _LOGIN_WINDOW]
     if len(hits) >= _LOGIN_LIMIT:
         _LOGIN_RATE[ip] = hits
         return False
