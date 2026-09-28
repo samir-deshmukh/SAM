@@ -309,6 +309,7 @@ def _security_event_ok(ip: str) -> bool:
 def _security_notification_text(action: str, username: str | None = None, ip: str | None = None) -> str:
     labels = {
         'ADMIN_LOGIN_ATTEMPT': 'Someone attempted to sign in to the CETFind Admin Panel.',
+        'ADMIN_LOGIN_SUCCESS': 'A successful login to the CETFind Admin Panel was recorded.',
         'ADMIN_LOGIN_FAILED': 'A failed CETFind Admin Panel login attempt was recorded.',
         'ADMIN_TAB_RETRY': 'Someone pressed Retry on the CETFind Admin Panel lock screen.',
         'ADMIN_UNAUTHORIZED': 'An unauthenticated CETFind Admin Panel access attempt was blocked.',
@@ -508,6 +509,10 @@ def login_post(
         )
         connection.commit()
         fresh_auth_version = int(row['auth_version']) + 1
+
+    # Notify the owner only after the credentials and server-side lock have
+    # both succeeded. This is the successful-admin-login alert.
+    _queue_security_notifications('ADMIN_LOGIN_SUCCESS', username[:64], ip)
 
     resp = RedirectResponse('/admin', 303)
     resp.set_cookie(
