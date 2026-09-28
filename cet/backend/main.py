@@ -296,7 +296,23 @@ def login(request: Request):
         f'<input type="hidden" name="csrf_token" value="{token}">'
         '<input name="username" autocomplete="username">'
         '<input name="password" type="password" autocomplete="current-password">'
-        '<button>Sign in</button></form>'
+        '<button type="submit">Sign in</button></form>'
+        '<script>'
+        "const f=document.querySelector('form');"
+        "f.addEventListener('submit',async e=>{"
+        "e.preventDefault();"
+        "const b=f.querySelector('button');"
+        "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
+        "if(lock && Date.now()-Number(lock.ts||0)<60000){"
+        "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
+        "b.disabled=true;b.textContent='Signing in…';"
+        "try{const r=await fetch('/admin/login',{method:'POST',body:new FormData(f),redirect:'follow'});"
+        "if(r.ok && new URL(r.url).pathname==='/admin'){"
+        "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
+        "sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1');"
+        "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1')}"
+        "});"
+        "</script>"
     )
     _set_csrf(resp, token)
     return resp

@@ -44,6 +44,11 @@ def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
 
 def _common_js():
     return r'''<script>
+const ADMIN_AUTH_KEY='cet-cap-admin-auth-v1';
+if(sessionStorage.getItem(ADMIN_AUTH_KEY)!=='1'){
+  window.location.replace('/admin/login');
+  throw new Error('Admin login required for this browser tab.');
+}
 window.__cetAdminTabReady=false;
 (function(){
   const LOCK_KEY='cet-cap-admin-active-tab-v1';
@@ -93,9 +98,15 @@ window.__cetAdminTabReady=false;
   window.addEventListener('storage',function(e){
     if(e.key===LOCK_KEY&&!ownsLock()) showBlocked();
   });
-  // Do not clear the claim on beforeunload: closing the original tab must not
-  // immediately make a copied authenticated /admin URL usable in another tab.
-  // The heartbeat lease above handles crashed/abandoned tabs automatically.
+  // A closed tab should release its local tab claim immediately. The
+  // per-tab sessionStorage auth marker prevents a copied /admin URL from
+  // reusing the authenticated session in a fresh tab; the lease remains a
+  // fallback for crashes where beforeunload never runs.
+  window.addEventListener('beforeunload',function(){
+    if(ownsLock()){
+      try{localStorage.removeItem(LOCK_KEY)}catch(_){ }
+    }
+  });
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):''},extra)};
@@ -103,6 +114,7 @@ async function cetAdminClose(){
   if(!confirm('Close the admin panel? Choose OK to log out and close this session.')) return;
   try{ await fetch('/admin/logout',{method:'POST',headers:csrfHeaders()}); }catch(_){ }
   try{localStorage.removeItem('cet-cap-admin-active-tab-v1')}catch(_){ }
+  try{sessionStorage.removeItem(ADMIN_AUTH_KEY);sessionStorage.removeItem('cet-cap-admin-tab-id-v1')}catch(_){ }
   window.location='/admin/login';
 }
 function toast(msg,type=''){const d=document.createElement('div');d.className='toast '+type;d.textContent=msg;document.querySelector('#toastbox').appendChild(d);setTimeout(()=>d.remove(),3500)}
