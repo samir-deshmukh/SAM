@@ -31,30 +31,6 @@ async def lifespan(_app):
         try:
             init_admin_schema()
             ensure_part4_schema()
-            with connect() as c:
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS admin_active_lock (
-                        user_id BIGINT PRIMARY KEY,
-                        client_id TEXT NOT NULL,
-                        lock_token TEXT NOT NULL DEFAULT '',
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                c.execute("ALTER TABLE admin_active_lock ADD COLUMN IF NOT EXISTS lock_token TEXT NOT NULL DEFAULT ''")
-                c.commit()
-            with connect() as c:
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS site_analytics_events (
-                        id BIGSERIAL PRIMARY KEY,
-                        session_id TEXT NOT NULL,
-                        event_name TEXT NOT NULL,
-                        event_data JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_created ON site_analytics_events(created_at)")
-                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_event ON site_analytics_events(event_name,created_at)")
-                c.commit()
         except Exception:
             log.exception('Database startup maintenance failed')
             return
@@ -179,14 +155,6 @@ def hmac_compare(a: str,b: str) -> bool:
     return hmac.compare_digest(a,b)
 
 
-def _admin_client_id(request: Request) -> str | None:
-    """Return the per-admin-tab identity, falling back to the legacy cookie."""
-    header = (request.headers.get('x-admin-client-id') or '').strip()
-    if header and re.fullmatch(r'[A-Za-z0-9_-]{20,128}', header):
-        return header
-    cookie = (request.cookies.get('cet_admin_client_id') or '').strip()
-    return cookie if cookie and re.fullmatch(r'[A-Za-z0-9_-]{20,128}', cookie) else None
-
 
 @app.middleware('http')
 async def security_headers(request: Request, call_next):
@@ -303,109 +271,12 @@ def user(request):
         return None
 
 
-_SECURITY_EVENT_RATE: dict[str, list[float]] = {}
-_SECURITY_EVENT_WINDOW = 60.0
-_SECURITY_EVENT_LIMIT = 12
-
-def _security_event_ok(ip: str) -> bool:
-    now=time.monotonic()
-    hits=[t for t in _SECURITY_EVENT_RATE.get(ip,[]) if now-t<_SECURITY_EVENT_WINDOW]
-    if len(hits)>=_SECURITY_EVENT_LIMIT:
-        _SECURITY_EVENT_RATE[ip]=hits
-        return False
-    hits.append(now); _SECURITY_EVENT_RATE[ip]=hits
-    return True
-
-def _security_notification_text(action: str, username: str | None = None, ip: str | None = None) -> str:
-    labels = {
-        'ADMIN_LOGIN_ATTEMPT': 'Someone attempted to sign in to the CETFind Admin Panel.',
-        'ADMIN_LOGIN_SUCCESS': 'A successful login to the CETFind Admin Panel was recorded.',
-        'ADMIN_LOGIN_FAILED': 'A failed CETFind Admin Panel login attempt was recorded.',
-        'ADMIN_TAB_RETRY': 'Someone pressed Retry on the CETFind Admin Panel lock screen.',
-        'ADMIN_UNAUTHORIZED': 'An unauthenticated CETFind Admin Panel access attempt was blocked.',
-    }
-    message = labels.get(action, f'CETFind Admin security event: {action}')
-    if username:
-        message += f' Username: {username[:64]}.'
-    if ip:
-        message += f' Source IP: {ip}.'
-    return message
-
-def _send_security_notifications(action: str, username: str | None = None, ip: str | None = None):
-    """Send optional email/WhatsApp alerts using Render environment variables.
-
-    No credentials are stored in Git. Email uses SMTP; WhatsApp uses the
-    official Graph API when the required environment variables are configured.
-    """
-    message = _security_notification_text(action, username, ip)
-    try:
-        import smtplib
-        from email.message import EmailMessage
-        smtp_host = os.getenv('SECURITY_SMTP_HOST', '').strip()
-        smtp_to = (os.getenv('EMAIL', '').strip() or os.getenv('SECURITY_ALERT_EMAIL_TO', '').strip())
-        if smtp_host and smtp_to:
-            smtp_port = int(os.getenv('SECURITY_SMTP_PORT', '587'))
-            smtp_user = os.getenv('SECURITY_SMTP_USERNAME', '').strip()
-            smtp_pass = os.getenv('SECURITY_SMTP_PASSWORD', '')
-            smtp_from = os.getenv('SECURITY_ALERT_EMAIL_FROM', smtp_user or smtp_to).strip()
-            msg = EmailMessage()
-            msg['Subject'] = f'CETFind Admin Security Alert: {action}'
-            msg['From'] = smtp_from
-            msg['To'] = smtp_to
-            msg.set_content(message)
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-                server.starttls()
-                if smtp_user:
-                    server.login(smtp_user, smtp_pass)
-                server.send_message(msg)
-    except Exception:
-        log.exception('Security email notification failed')
-
-    try:
-        import urllib.request
-        token = os.getenv('WHATSAPP_ACCESS_TOKEN', '').strip()
-        phone_id = os.getenv('WHATSAPP_PHONE_NUMBER_ID', '').strip()
-        recipient = os.getenv('WHATSAPP_ALERT_TO', '').strip()
-        version = os.getenv('WHATSAPP_GRAPH_VERSION', 'v23.0').strip()
-        if token and phone_id and recipient:
-            payload = json.dumps({
-                'messaging_product': 'whatsapp',
-                'to': recipient,
-                'type': 'text',
-                'text': {'preview_url': False, 'body': message},
-            }).encode('utf-8')
-            req = urllib.request.Request(
-                f'https://graph.facebook.com/{version}/{phone_id}/messages',
-                data=payload,
-                headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
-                method='POST',
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                response.read()
-    except Exception:
-        log.exception('Security WhatsApp notification failed')
-
-def _queue_security_notifications(action: str, username: str | None = None, ip: str | None = None):
-    if any(os.getenv(k, '').strip() for k in ('EMAIL','SECURITY_ALERT_EMAIL_TO','WHATSAPP_ALERT_TO')):
-        threading.Thread(target=_send_security_notifications, args=(action, username, ip), daemon=True).start()
-
-def _record_security_event(action: str, request: Request, username: str|None=None, reason: str|None=None):
-    ip=client_ip(request)
-    if not _security_event_ok(ip): return
-    try:
-        with connect() as c:
-            c.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
-                      (action,'SECURITY',username[:64] if username else None,None,json.dumps({'ip':ip}),None,reason or 'Admin security event'))
-            c.commit()
-        _queue_security_notifications(action, username, ip)
-    except Exception:
-        log.exception('Could not record admin security event: %s',action)
-
 def require(request, roles=None, csrf=False, csrf_value=None):
     current_user = user(request)
     if not current_user:
-        if request.url.path.startswith('/admin/') and request.url.path != '/admin/login':
-            _record_security_event('ADMIN_UNAUTHORIZED',request,reason='Admin request without a valid authenticated session')
+        # Browser-facing admin pages should go back to the login screen instead
+        # of exposing FastAPI's raw JSON 401 document (which Brave displays as
+        # a "Pretty print" page). Keep API endpoints machine-readable.
         if request.url.path.startswith('/admin/api'):
             raise HTTPException(401, 'Authentication required')
         raise HTTPException(303, 'Authentication required', headers={'Location': '/admin/login'})
@@ -419,13 +290,7 @@ def require(request, roles=None, csrf=False, csrf_value=None):
 @app.get('/admin/login', response_class=HTMLResponse)
 def login(request: Request):
     token = _csrf_value(request)
-    client_id = request.cookies.get('cet_admin_client_id') or secrets.token_urlsafe(24)
-    if request.query_params.get('locked') == '1':
-        error = '<p style="color:#b42333;font-weight:600">Admin panel is already open in another browser. Close/log out of the existing Admin Panel before signing in here.</p>'
-    elif request.query_params.get('error') == '1':
-        error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>'
-    else:
-        error = ''
+    error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else ''
     resp = HTMLResponse(
         f'<h1>CET CAP Admin</h1>{error}<form method="post">'
         f'<input type="hidden" name="csrf_token" value="{token}">'
@@ -434,24 +299,22 @@ def login(request: Request):
         '<button type="submit">Sign in</button></form>'
         '<script>'
         "const f=document.querySelector('form');"
-        "let tabId=sessionStorage.getItem('cet-cap-admin-tab-id-v1');"
-        "if(!tabId){tabId=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));sessionStorage.setItem('cet-cap-admin-tab-id-v1',tabId);}"
         "f.addEventListener('submit',async e=>{"
         "e.preventDefault();"
-        "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
         "const b=f.querySelector('button');"
-
+        "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
+        "if(lock && Date.now()-Number(lock.ts||0)<60000){"
+        "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
         "b.disabled=true;b.textContent='Signing in…';"
-        "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
+        "try{const r=await fetch('/admin/login',{method:'POST',body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
         "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
-        "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
+        "sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1');"
         "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1')}"
         "});"
         "</script>"
     )
     _set_csrf(resp, token)
-    resp.set_cookie('cet_admin_client_id', client_id, httponly=True, samesite='strict', secure=_COOKIE_SECURE, path='/admin', max_age=2592000)
     return resp
 
 
@@ -481,47 +344,16 @@ def login_post(
                 username[:64],
                 ip,
             )
-            # Keep a durable security event so an already-authenticated admin
-            # can see that someone attempted to enter the admin panel.
-            connection.execute(
-                "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
-                ('ADMIN_LOGIN_FAILED','SECURITY',username[:64],None,json.dumps({'ip':ip,'username':username[:64]}),'Invalid admin credentials'),
-            )
-            connection.commit()
-            _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
-        # Valid credentials may reclaim the admin lock from a stale tab or
-        # another browser. Incrementing auth_version below invalidates the
-        # previous authenticated session, so only this fresh login remains valid.
-        client_id = _admin_client_id(request) or secrets.token_urlsafe(24)
-        lock_row = connection.execute(
-            """INSERT INTO admin_active_lock(user_id,client_id,lock_token,updated_at)
-               VALUES (?,?,?,CURRENT_TIMESTAMP)
-               ON CONFLICT (user_id) DO UPDATE
-               SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
-               RETURNING client_id""",
-            (row['id'], client_id, secrets.token_urlsafe(24)),
-        ).fetchone()
-        if not lock_row:
-            connection.execute(
-                "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
-                ('ADMIN_LOGIN_BLOCKED','SECURITY',username[:64],None,json.dumps({'ip':ip}),'Another browser already owns the admin panel'),
-            )
-            connection.commit()
-            _queue_security_notifications('ADMIN_LOGIN_ATTEMPT', username[:64], ip)
-            return RedirectResponse('/admin/login?locked=1', 303)
-        # A successful login starts a fresh authentication session.
+        # A successful login starts a fresh authentication session. Bumping
+        # auth_version invalidates every older browser session for this admin.
         connection.execute(
             'UPDATE admin_users SET last_login_at=CURRENT_TIMESTAMP, auth_version=auth_version+1 WHERE id=?',
             (row['id'],),
         )
         connection.commit()
         fresh_auth_version = int(row['auth_version']) + 1
-
-    # Notify the owner only after the credentials and server-side lock have
-    # both succeeded. This is the successful-admin-login alert.
-    _queue_security_notifications('ADMIN_LOGIN_SUCCESS', username[:64], ip)
 
     resp = RedirectResponse('/admin', 303)
     resp.set_cookie(
@@ -537,159 +369,9 @@ def login_post(
     return resp
 
 
-@app.post('/admin/api/security-event')
-async def security_event_api(request: Request):
-    # Used by the login/lock screens to create a small, rate-limited security audit trail.
-    # No passwords or user-entered credentials are stored.
-    action=''
-    try:
-        body=await request.json()
-        action=str(body.get('action','')).strip().upper()
-    except Exception:
-        raise HTTPException(400,'Invalid security event payload')
-    if action not in {'ADMIN_LOGIN_ATTEMPT','ADMIN_TAB_RETRY'}:
-        raise HTTPException(400,'Unsupported security event')
-    _check_csrf(request)
-    _record_security_event(action,request,reason='Admin access attempt detected')
-    return {'ok':True}
-
-@app.post('/api/analytics/event')
-async def analytics_event(request: Request):
-    """Record anonymous product-usage events for CETFind analytics."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, 'Invalid analytics payload')
-    event_name = str(body.get('event','')).strip().lower()[:80]
-    session_id = re.sub(r'[^a-zA-Z0-9_-]', '', str(body.get('session_id','')))[:80]
-    data = body.get('data') if isinstance(body.get('data'), dict) else {}
-    allowed = {
-        'page_view','search_started','search_completed','college_opened',
-        'college_website_clicked','seat_matrix_opened','trend_opened'
-    }
-    if event_name not in allowed or not session_id:
-        raise HTTPException(400, 'Invalid analytics event')
-    # Keep analytics aggregate and avoid storing raw URLs, IP addresses, or form text.
-    safe = {}
-    for key in ('city','course','result_count','college','year','source'):
-        value = data.get(key)
-        if isinstance(value, (str,int,float)):
-            safe[key] = str(value)[:120]
-    with connect() as c:
-        c.execute('INSERT INTO site_analytics_events(session_id,event_name,event_data) VALUES (?,?,?)',
-                  (session_id,event_name,json.dumps(safe)))
-        c.commit()
-    return {'ok': True}
-
-@app.get('/admin/api/analytics/summary')
-def analytics_summary(request: Request, days: int = 30):
-    require(request)
-    days = max(1, min(int(days or 30), 90))
-    with connect() as c:
-        totals = c.execute("""
-            SELECT COUNT(*) AS events,
-                   COUNT(DISTINCT session_id) AS visitors,
-                   COUNT(DISTINCT CASE WHEN event_name='search_started' THEN session_id END) AS searchers,
-                   COUNT(*) FILTER (WHERE event_name='search_started') AS searches,
-                   COUNT(*) FILTER (WHERE event_name='college_opened') AS college_opens,
-                   COUNT(*) FILTER (WHERE event_name='college_website_clicked') AS website_clicks
-            FROM site_analytics_events
-            WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-        """, (days,)).fetchone()
-        events = [dict(r) for r in c.execute("""
-            SELECT event_name, COUNT(*) AS count
-            FROM site_analytics_events
-            WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-            GROUP BY event_name ORDER BY count DESC
-        """, (days,))]
-        searches = [dict(r) for r in c.execute("""
-            SELECT event_data->>'city' AS city, event_data->>'course' AS course, COUNT(*) AS count
-            FROM site_analytics_events
-            WHERE event_name='search_started'
-              AND created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
-            GROUP BY event_data->>'city', event_data->>'course'
-            ORDER BY count DESC LIMIT 20
-        """, (days,))]
-    return {'days': days, 'totals': dict(totals), 'events': events, 'search_breakdown': searches}
-
-@app.get('/admin/api/security-alerts')
-def security_alerts_api(request: Request, after: int = 0):
-    require(request)
-    after=max(0,int(after or 0))
-    with connect() as c:
-        latest=c.execute("SELECT COALESCE(MAX(id),0) AS id FROM audit_log").fetchone()['id']
-        events=[]
-        if after:
-            events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_BLOCKED','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
-    return {'latest_id':int(latest or 0),'events':events}
-
-@app.post('/admin/api/admin-lock/acquire')
-def admin_lock_acquire(request: Request):
-    current = require(request, csrf=True)
-    client_id = _admin_client_id(request)
-    if not client_id:
-        raise HTTPException(409, 'Admin tab identity missing')
-    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
-    if not lock_token or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', lock_token):
-        raise HTTPException(409, 'Admin lock generation missing')
-    with connect() as c:
-        row = c.execute(
-            """INSERT INTO admin_active_lock(user_id,client_id,lock_token,updated_at)
-               VALUES (?,?,?,CURRENT_TIMESTAMP)
-               ON CONFLICT (user_id) DO UPDATE
-               SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
-               RETURNING client_id,lock_token""",
-            (current['uid'], client_id, lock_token),
-        ).fetchone()
-        if not row:
-            raise HTTPException(409, 'Admin panel is active in another browser')
-        c.commit()
-    return {'ok': True, 'lock_token': lock_token}
-
-
-@app.post('/admin/api/admin-lock/heartbeat')
-def admin_lock_heartbeat(request: Request):
-    current = require(request, csrf=True)
-    client_id = _admin_client_id(request)
-    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
-    if not client_id or not lock_token:
-        raise HTTPException(409, 'Admin tab identity missing')
-    with connect() as c:
-        row = c.execute(
-            "SELECT client_id,lock_token FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'",
-            (current['uid'],),
-        ).fetchone()
-        if not row or row['client_id'] != client_id or row['lock_token'] != lock_token:
-            raise HTTPException(409, 'Admin panel is active in another browser')
-        c.execute("UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=? AND lock_token=?",
-                  (current['uid'], client_id, lock_token))
-        c.commit()
-    return {'ok': True}
-
-
-@app.post('/admin/api/admin-lock/release')
-def admin_lock_release(request: Request):
-    current = require(request, csrf=True)
-    client_id = _admin_client_id(request)
-    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
-    if client_id and lock_token:
-        with connect() as c:
-            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=? AND lock_token=?", (current['uid'], client_id, lock_token))
-            c.commit()
-    return {'ok': True}
-
 @app.post('/admin/logout')
 def logout(request: Request):
-    current = require(request, csrf=True)
-    client_id = _admin_client_id(request)
-    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
-    if client_id:
-        with connect() as c:
-            if lock_token:
-                c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=? AND lock_token=?", (current['uid'], client_id, lock_token))
-            else:
-                c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
-            c.commit()
+    require(request, csrf=True)
     resp = RedirectResponse('/admin/login', 303)
     resp.delete_cookie(_SESSION_COOKIE, path='/admin')
     resp.delete_cookie(_CSRF_COOKIE, path='/admin')
