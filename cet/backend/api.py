@@ -123,6 +123,36 @@ def public_options(request: Request):
     return {"cities": cities, "courses": sorted(PUBLIC_COURSES)}
 
 
+@router.get("/stats")
+def public_stats(request: Request):
+    """Return public-facing totals calculated directly from released BBA cutoff facts."""
+    check_rate_limit(request)
+    try:
+        engine = get_active_engine()
+        if not _db_available(engine):
+            raise RuntimeError("database unavailable")
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT COUNT(DISTINCT c.institution_code) AS colleges,
+                       COUNT(*) AS cutoff_records,
+                       COUNT(DISTINCT c.round) AS cap_rounds,
+                       MAX(c.year) AS latest_year
+                FROM cutoffs c
+                JOIN programs p ON p.program_id = c.program_id
+                WHERE p.program_family = 'BBA'
+            """)).mappings().one()
+        return {
+            "colleges": int(row["colleges"] or 0),
+            "cutoff_records": int(row["cutoff_records"] or 0),
+            "cap_rounds": int(row["cap_rounds"] or 0),
+            "latest_year": int(row["latest_year"] or 0),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Public database statistics are unavailable.")
+
+
 class CollegeCard(BaseModel):
     id: str
     institution_code: str

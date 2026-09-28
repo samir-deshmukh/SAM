@@ -1029,7 +1029,7 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
   .topbar { padding: 0 20px; height: 60px; }
   .topbar-nav { display: none; }        /* hide the nav links on mobile */
   .hero { padding: 110px 20px 60px; min-height: auto; }
-  .hero-stats { grid-template-columns: repeat(2, 1fr); }  /* 2x2 instead of 1x4 */
+  /* Keep the four hero statistics in one row on desktop. */
   .hero-stat { padding: 18px; }
   .hero-actions { flex-direction: column; width: 100%; }
   .btn-primary, .btn-ghost { width: 100%; justify-content: center; }
@@ -1123,7 +1123,7 @@ body{letter-spacing:-.01em;}
 .drawer{border-radius:0;}
 .drawer-head{border-bottom:1px solid var(--paper-300);}
 .d-section,.trend-card,.seat-card{border-radius:8px;box-shadow:none;border:1px solid var(--paper-300);}
-@media(max-width:760px){.hero-inner,.section-head{display:block}.hero h1{font-size:clamp(3.5rem,15vw,6rem)}.section-head{padding-top:16px}.section-desc{margin-top:18px}.hero-stats{margin-top:42px}.hero-stat{min-height:105px}}
+@media(max-width:760px){.hero-stats{grid-template-columns:repeat(2,1fr)}.hero-inner,.section-head{display:block}.hero h1{font-size:clamp(3.5rem,15vw,6rem)}.section-head{padding-top:16px}.section-desc{margin-top:18px}.hero-stats{margin-top:42px}.hero-stat{min-height:105px}}
 
 .feedback-launch{position:fixed;right:24px;bottom:24px;z-index:1200;display:inline-flex;align-items:center;gap:10px;margin:0;padding:13px 18px;border:1px solid rgba(255,255,255,.28);background:var(--ink-900);color:var(--paper-50);border-radius:8px;font:700 .72rem Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.2s ease;box-shadow:0 10px 30px rgba(0,0,0,.22)}.feedback-launch:hover{background:var(--paper-50);color:var(--ink-900)}@media (max-width:640px){.feedback-launch{right:16px;bottom:16px;padding:12px 15px;font-size:.68rem}}
 .feedback-modal{position:fixed;inset:0;z-index:3000;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(11,11,15,.58);backdrop-filter:blur(5px)}.feedback-modal.open{display:flex}.feedback-card{width:min(560px,100%);background:var(--paper-50);border:1px solid var(--paper-300);border-radius:12px;padding:28px;box-shadow:0 24px 70px rgba(0,0,0,.2)}.feedback-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.feedback-card h2{font-family:Fraunces,serif;font-size:32px;margin:0 0 6px}.feedback-card p{margin:0;color:var(--paper-600);line-height:1.5}.feedback-close{border:1px solid var(--paper-300);background:transparent;width:40px;height:40px;border-radius:8px;cursor:pointer;font-size:20px}.feedback-label{display:block;margin:22px 0 8px;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.feedback-rating{display:flex;gap:10px;align-items:center}.feedback-rating button{width:46px;height:46px;border:1px solid var(--paper-300);background:transparent;border-radius:8px;cursor:pointer;font-size:25px;line-height:1;color:var(--paper-400);transition:.15s ease}.feedback-rating button:hover{color:var(--ink-900);border-color:var(--ink-900);transform:translateY(-1px)}.feedback-rating button.selected{background:var(--ink-900);color:var(--paper-50);border-color:var(--ink-900)}.feedback-message{width:100%;min-height:130px;resize:vertical;border:1px solid var(--paper-300);border-radius:8px;padding:12px;font:inherit;background:white} .feedback-actions{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:18px}.feedback-actions .feedback-close{width:auto;min-width:88px;height:44px;padding:0 18px;font-size:14px}.feedback-submit{border:0;background:var(--ink-900);color:var(--paper-50);padding:0 20px;min-width:128px;height:44px;border-radius:7px;font-weight:700;cursor:pointer;white-space:nowrap}.feedback-submit:disabled{opacity:.55;cursor:wait}.feedback-status{min-height:20px;margin-top:12px;font-size:13px}.feedback-hp{position:absolute;left:-9999px;opacity:0}
@@ -1324,10 +1324,10 @@ body{letter-spacing:-.01em;}
       </div>
       <div class="hero-stats">
         <!-- data-target = the number the JS counter animates to -->
-        <div class="hero-stat"><span class="hero-stat-num" data-target="923">0</span><span class="hero-stat-label">Colleges</span></div>
-        <div class="hero-stat"><span class="hero-stat-num" data-target="67769">0</span><span class="hero-stat-label">Cutoff Records</span></div>
-        <div class="hero-stat"><span class="hero-stat-num" data-target="4">0</span><span class="hero-stat-label">CAP Rounds</span></div>
-        <div class="hero-stat"><span class="hero-stat-num" data-target="2026">0</span><span class="hero-stat-label">Latest Year</span></div>
+        <div class="hero-stat"><span class="hero-stat-num" data-stat="colleges" data-target="0">—</span><span class="hero-stat-label">Colleges</span></div>
+        <div class="hero-stat"><span class="hero-stat-num" data-stat="cutoff_records" data-target="0">—</span><span class="hero-stat-label">Cutoff Records</span></div>
+        <div class="hero-stat"><span class="hero-stat-num" data-stat="cap_rounds" data-target="0">—</span><span class="hero-stat-label">CAP Rounds</span></div>
+        <div class="hero-stat"><span class="hero-stat-num" data-stat="latest_year" data-target="0">—</span><span class="hero-stat-label">Latest Year</span></div>
       </div>
     </div>
   </section>
@@ -2459,6 +2459,27 @@ const revealObserver = new IntersectionObserver((entries) => {
   });
 }, { threshold: 0.12, rootMargin: "0px 0px -50px 0px" });
 
+/* ── Hero totals: use live counts from the public PostgreSQL dataset ── */
+async function loadHeroStats() {
+  const fields = ["colleges", "cutoff_records", "cap_rounds", "latest_year"];
+  const nodes = new Map([...document.querySelectorAll(".hero-stat-num[data-stat]")].map(el => [el.dataset.stat, el]));
+  try {
+    const response = await fetch(`${API_BASE}/api/stats`, { headers: { "Accept": "application/json" } });
+    if (!response.ok) throw new Error("Statistics request failed: " + response.status);
+    const stats = await response.json();
+    for (const key of fields) {
+      const value = Number(stats[key]);
+      const el = nodes.get(key);
+      if (!el || !Number.isFinite(value) || value < 0) continue;
+      el.dataset.target = String(Math.trunc(value));
+      animateCounter(el, Math.trunc(value));
+    }
+  } catch (err) {
+    console.error("Could not load live public statistics:", err);
+    nodes.forEach(el => { el.textContent = "—"; });
+  }
+}
+
 /* ── Hero number counter animation ── */
 function animateCounter(el, target, duration = 1400) {
   const start = performance.now();
@@ -3373,6 +3394,7 @@ let drawerTrends = null;
 
   renderResults();                          /* build the initial "search to see colleges" prompt */
   loadRealCollegeData();                    /* fetch the real data, then re-render */
+  loadHeroStats();                           /* populate hero totals from PostgreSQL */
   enhanceSelect(citySelect,   { search: true });
   enhanceSelect(courseSelect, { search: true });
 
