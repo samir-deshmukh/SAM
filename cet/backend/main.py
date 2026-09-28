@@ -196,15 +196,17 @@ async def not_found(request: Request, exc: HTTPException):
 # ── Public candidate site ──
 @app.get('/', include_in_schema=False)
 def public_home():
-    return FileResponse(SITE/'index.html', media_type='text/html')
+    # The canonical frontend is hosted by the dedicated static-site service.
+    # Keep this backend host API/admin-only and prevent a stale duplicate homepage.
+    return RedirectResponse('https://cetfind.onrender.com/', status_code=307)
 
 @app.get('/privacy.html', include_in_schema=False)
 def public_privacy():
-    return FileResponse(SITE/'privacy.html', media_type='text/html')
+    return RedirectResponse('https://cetfind.onrender.com/privacy.html', status_code=307)
 
 @app.get('/knowledge.html', include_in_schema=False)
 def public_knowledge():
-    return FileResponse(SITE/'knowledge.html', media_type='text/html')
+    return RedirectResponse('https://cetfind.onrender.com/knowledge.html', status_code=307)
 
 # Public feedback uses a separate limiter so normal data browsing is unaffected.
 _FEEDBACK_RATE: dict[str, list[float]] = {}
