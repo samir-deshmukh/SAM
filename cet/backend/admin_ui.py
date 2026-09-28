@@ -96,7 +96,7 @@ window.__cetAdminTabReady=false;
     try{
       const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);
       if(!m)return;
-      await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action})});
+      await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'X-Admin-Client-ID':tabId,'Content-Type':'application/json'},body:JSON.stringify({action})});
     }catch(_){ }
   }
   function notifyOtherAdmin(action){
@@ -116,7 +116,7 @@ window.__cetAdminTabReady=false;
   window.__cetAdminTabRetry=function(){securityAlert('ADMIN_TAB_RETRY');return acquire()};
   async function serverHeartbeat(){
     try{
-      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:csrfHeaders(),cache:'no-store'});
+      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId}),cache:'no-store'});
       if(r.status===409){
         sessionStorage.removeItem(ADMIN_AUTH_KEY);
         try{localStorage.removeItem(LOCK_KEY)}catch(_){}

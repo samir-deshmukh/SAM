@@ -177,6 +177,14 @@ def hmac_compare(a: str,b: str) -> bool:
     return hmac.compare_digest(a,b)
 
 
+def _admin_client_id(request: Request) -> str | None:
+    """Return the per-admin-tab identity, falling back to the legacy cookie."""
+    header = (request.headers.get('x-admin-client-id') or '').strip()
+    if header and re.fullmatch(r'[A-Za-z0-9_-]{20,128}', header):
+        return header
+    cookie = (request.cookies.get('cet_admin_client_id') or '').strip()
+    return cookie if cookie and re.fullmatch(r'[A-Za-z0-9_-]{20,128}', cookie) else None
+
 
 @app.middleware('http')
 async def security_headers(request: Request, call_next):
@@ -424,6 +432,8 @@ def login(request: Request):
         '<button type="submit">Sign in</button></form>'
         '<script>'
         "const f=document.querySelector('form');"
+        "let tabId=sessionStorage.getItem('cet-cap-admin-tab-id-v1');"
+        "if(!tabId){tabId=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));sessionStorage.setItem('cet-cap-admin-tab-id-v1',tabId);}"
         "f.addEventListener('submit',async e=>{"
         "e.preventDefault();"
         "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
@@ -432,7 +442,7 @@ def login(request: Request):
         "if(lock && Date.now()-Number(lock.ts||0)<12000){"
         "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
         "b.disabled=true;b.textContent='Signing in…';"
-        "try{const r=await fetch('/admin/login',{method:'POST',body:new FormData(f),redirect:'follow'});"
+        "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
         "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
         "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
@@ -481,10 +491,10 @@ def login_post(
             _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
-        # One-admin-session policy is enforced on the server, so Brave and
-        # Chrome share the same lock. The old localStorage lock only worked
-        # inside one browser and could never protect across browsers.
-        client_id = request.cookies.get('cet_admin_client_id') or secrets.token_urlsafe(24)
+        # The lock owner is the tab identity sent by the page, not the shared
+        # HttpOnly browser cookie. This keeps a second tab from taking over
+        # the first tab's session and keeps refreshes stable.
+        client_id = _admin_client_id(request) or secrets.token_urlsafe(24)
         active = connection.execute(
             "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
             (row['id'],),
@@ -617,9 +627,9 @@ def security_alerts_api(request: Request, after: int = 0):
 @app.post('/admin/api/admin-lock/heartbeat')
 def admin_lock_heartbeat(request: Request):
     current = require(request, csrf=True)
-    client_id = request.cookies.get('cet_admin_client_id')
+    client_id = _admin_client_id(request)
     if not client_id:
-        raise HTTPException(409, 'Admin browser identity missing')
+        raise HTTPException(409, 'Admin tab identity missing')
     with connect() as c:
         row = c.execute(
             "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
@@ -635,7 +645,7 @@ def admin_lock_heartbeat(request: Request):
 @app.post('/admin/api/admin-lock/release')
 def admin_lock_release(request: Request):
     current = require(request, csrf=True)
-    client_id = request.cookies.get('cet_admin_client_id')
+    client_id = _admin_client_id(request)
     if client_id:
         with connect() as c:
             c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
@@ -645,7 +655,7 @@ def admin_lock_release(request: Request):
 @app.post('/admin/logout')
 def logout(request: Request):
     current = require(request, csrf=True)
-    client_id = request.cookies.get('cet_admin_client_id')
+    client_id = _admin_client_id(request)
     if client_id:
         with connect() as c:
             c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
