@@ -913,67 +913,52 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
 .trends-ladies-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--ink-900); cursor: pointer; }
 
 /* ── Year chips (formerly round-toggle chips) ── */
-.trends-rounds-wrap { margin: 18px 0 20px; }
-.trends-rounds-label { display: block; margin-bottom: 9px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--paper-700); font-weight: 700; }
-.trends-rounds { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 0; }
+.trends-rounds-wrap { margin: 22px 0 24px; }
+.trends-rounds-label { display: block; margin-bottom: 10px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--paper-700); font-weight: 700; }
+.trends-rounds { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 0; }
 .trends-rounds:empty { display: none; }
 .round-chip {
-  padding: 8px 16px; border-radius: 10px;
-  border: 1px solid rgba(232,232,228,0.9);
-  background: rgba(253,253,253,0.8);
-  font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
-  cursor: pointer; transition: all .18s;
-  display: flex; align-items: center; gap: 8px;
+  min-width: 88px; padding: 11px 16px; border-radius: 14px;
+  border: 1px solid var(--paper-300);
+  background: var(--paper-50); color: var(--ink-900);
+  font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+  cursor: pointer; transition: transform .18s, background .18s, border-color .18s;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
 }
-.round-chip .dot { width: 9px; height: 9px; border-radius: 50%; }
-.round-chip.active { background: var(--ink-900); color: #fff; border-color: var(--ink-900); }
-.round-chip:hover { border-color: var(--paper-500); }
+.round-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--paper-300); }
+.round-chip.active { background: var(--paper-200); color: var(--ink-900); border-color: var(--ink-900); box-shadow: 0 3px 0 var(--ink-900); }
+.round-chip:hover { border-color: var(--paper-500); transform: translateY(-1px); }
 
 /* Seat Matrix toggle button */
 .seat-matrix-toggle { margin-left: auto; }
-.seat-matrix-toggle.active { background: var(--ink-900); color: #fff; border-color: var(--ink-900); }
+.seat-matrix-toggle.active { background: var(--paper-200); color: var(--ink-900); border-color: var(--ink-900); box-shadow: 0 3px 0 var(--ink-900); }
 
-/* ── PDF-style tables (per-year cutoff table + Seat Matrix) ──
-   Deliberately plain/bordered, mimicking the layout of the official
-   CET cutoff and seat-matrix PDFs, and flexible enough to fit however
-   many rows/columns a given college's data has. */
-.pdf-table-title { font-size: 13px; font-weight: 700; color: var(--ink-900); margin: 16px 0 8px; }
+/* ── PDF-style tables (per-year cutoff table + Seat Matrix) ── */
+.pdf-table-title { font-size: 13px; font-weight: 700; color: var(--ink-900); margin: 18px 0 10px; padding-left: 12px; border-left: 3px solid var(--paper-300); }
 .pdf-table-title:first-child { margin-top: 0; }
 .pdf-table-scroll {
   width: 100%; overflow-x: auto; overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
-  border: 1.5px solid #9a9a9a;
-  background: #fff;
-  margin: 0 0 12px;
+  border: 1px solid var(--paper-300);
+  border-radius: 14px; background: var(--paper-50); margin: 0 0 18px;
 }
 .pdf-table {
-  width: 100%; min-width: 520px; border-collapse: collapse;
-  border-spacing: 0;
-  font-size: 13px; margin: 0;
-  background: #fff;
+  width: 100%; min-width: 520px; border-collapse: collapse; border-spacing: 0;
+  font-size: 13px; margin: 0; background: var(--paper-50);
 }
-.pdf-table th, .pdf-table td {
-  border: 1px solid #a6a6a6;
-  padding: 9px 10px; text-align: center;
-  vertical-align: middle;
-}
-.pdf-table th { background: #eef0fa; font-weight: 800; color: var(--ink-900); }
-.pdf-table tbody tr:nth-child(even) td { background: #fafafa; }
+.pdf-table th, .pdf-table td { border: 1px solid var(--paper-300); padding: 11px 12px; text-align: center; vertical-align: middle; }
+.pdf-table th { background: var(--paper-200); font-weight: 800; color: var(--ink-900); }
+.pdf-table tbody tr:nth-child(even) td { background: #FAF8F2; }
 .pdf-table td.pdf-cat { text-align: left; font-weight: 600; }
 .pdf-table .pdf-selected {
-  background: rgba(24, 35, 58, 0.10);
-  box-shadow: inset 0 0 0 2px var(--ink-900);
-  font-weight: 700;
+  background: var(--paper-200) !important;
+  box-shadow: inset 0 0 0 2px var(--paper-500);
+  font-weight: 800;
 }
-.pdf-table th.pdf-selected {
-  background: var(--ink-900); color: #fff;
-}
-.pdf-selected-title {
-  padding-left: 8px;
-  border-left: 3px solid var(--ink-900);
-}
+.pdf-table th.pdf-selected { background: var(--paper-300); color: var(--ink-900); }
+.pdf-selected-title { padding-left: 12px; border-left: 3px solid var(--paper-500); }
 .pdf-table .pdf-cell-line + .pdf-cell-line { margin-top: 3px; }
-.pdf-view-note { font-size: 12px; color: var(--paper-600); margin: 0 0 12px; line-height: 1.5; }
+.pdf-view-note { font-size: 12px; color: var(--paper-600); margin: 0 0 14px; line-height: 1.5; }
 .pdf-round-title { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--paper-600); margin: 20px 0 8px; }
 #dTrendTable, #dSeatMatrixBody { overflow-x: auto; }
 
