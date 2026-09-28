@@ -598,7 +598,12 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
   background: var(--paper-50);
   transform: translateY(100%);   /* starts pushed down off-screen */
   transition: transform var(--drawer-speed) cubic-bezier(0.16, 1, 0.3, 1);
-  display: flex; flex-direction: column;
+  display: block;
+  overflow-y: auto;              /* the entire detail slide moves, including its header */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   will-change: transform;        /* hints the browser to optimise */
 }
 .drawer.open { transform: translateY(0); }   /* slides up into view */
@@ -608,9 +613,18 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
   width: 100%;
   max-width: var(--drawer-max);
   margin: 0 auto;
-  height: 100%;
-  display: flex; flex-direction: column;
-  min-height: 0;                 /* required for scrollable children in flex */
+  min-height: 100%;
+}
+
+/* The whole slide scrolls now, so the college name/header moves away with the content. */
+.drawer-head {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.drawer-body {
+  overflow: visible;
+  min-height: 0;
 }
 
 /* ─── Slide header: badge + title on left, close button on right ─── */
@@ -644,13 +658,9 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 }
 .drawer-close:hover { background: var(--ink-900); color: var(--paper-50); border-color: var(--ink-900); transform: rotate(90deg); }
 
-/* Scrollable content area of the slide */
+/* Content area of the slide. Scrolling is handled by .drawer so the header moves too. */
 .drawer-body {
-  flex: 1;
-  overflow-y: auto;
   padding: 40px 40px 60px;
-  -webkit-overflow-scrolling: touch;
-  min-height: 0;
 }
 /* Custom scrollbar (Chrome/Safari/Edge) */
 .drawer-body::-webkit-scrollbar { width: 10px; }
