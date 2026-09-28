@@ -344,6 +344,13 @@ def login_post(
                 username[:64],
                 ip,
             )
+            # Keep a durable security event so an already-authenticated admin
+            # can see that someone attempted to enter the admin panel.
+            connection.execute(
+                "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
+                ('ADMIN_LOGIN_FAILED','SECURITY',username[:64],None,json.dumps({'ip':ip,'username':username[:64]}),'Invalid admin credentials'),
+            )
+            connection.commit()
             return RedirectResponse('/admin/login?error=1', 303)
 
         # A successful login starts a fresh authentication session. Bumping

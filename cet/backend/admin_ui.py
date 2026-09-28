@@ -57,7 +57,9 @@ window.__cetAdminTabReady=false;
   // may retain the HttpOnly admin session cookie after a tab is closed, so
   // releasing the claim in beforeunload would let a copied /admin URL reuse it.
   // A short lease still recovers automatically from crashes or abandoned tabs.
-  const TTL=60000;
+  // Keep the lock short-lived so a browser that skips beforeunload (common on
+  // mobile/backgrounded tabs) cannot leave a false "already open" screen.
+  const TTL=12000;
   const body=document.body;
   const gate=document.getElementById('adminTabLock');
   let tabId=sessionStorage.getItem(TAB_KEY);
