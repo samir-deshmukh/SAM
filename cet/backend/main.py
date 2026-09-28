@@ -31,6 +31,15 @@ async def lifespan(_app):
         try:
             init_admin_schema()
             ensure_part4_schema()
+            with connect() as c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_active_lock (
+                        user_id BIGINT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                c.commit()
         except Exception:
             log.exception('Database startup maintenance failed')
             return
@@ -271,7 +280,29 @@ def user(request):
         return None
 
 
-def require(request, roles=None, csrf=False, csrf_value=None):
+_ADMIN_LOCK_TTL_SECONDS = 45
+_ADMIN_TAB_HEADER = 'x-admin-client-id'
+
+
+def _admin_tab_id(request: Request) -> str | None:
+    value = (request.headers.get(_ADMIN_TAB_HEADER) or '').strip()
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{20,128}', value) else None
+
+
+def _acquire_admin_lock(connection, user_id: int, client_id: str):
+    return connection.execute(
+        """INSERT INTO admin_active_lock(user_id,client_id,updated_at)
+           VALUES (?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT (user_id) DO UPDATE
+           SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP
+           WHERE admin_active_lock.client_id=EXCLUDED.client_id
+              OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '45 seconds'
+           RETURNING client_id""",
+        (user_id, client_id),
+    ).fetchone()
+
+
+def require(request, roles=None, csrf=False, csrf_value=None, check_tab=True):
     current_user = user(request)
     if not current_user:
         # Browser-facing admin pages should go back to the login screen instead
@@ -280,6 +311,17 @@ def require(request, roles=None, csrf=False, csrf_value=None):
         if request.url.path.startswith('/admin/api'):
             raise HTTPException(401, 'Authentication required')
         raise HTTPException(303, 'Authentication required', headers={'Location': '/admin/login'})
+    if check_tab and (request.url.path.startswith('/admin/api/') or request.url.path == '/admin/logout'):
+        client_id = _admin_tab_id(request)
+        if not client_id:
+            raise HTTPException(409, 'Admin tab identity missing. Please sign in again.')
+        with connect() as connection:
+            lock = connection.execute(
+                "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '45 seconds'",
+                (current_user['uid'],),
+            ).fetchone()
+        if not lock or lock['client_id'] != client_id:
+            raise HTTPException(409, 'Admin panel is active in another tab. Use the tab that signed in.')
     if roles and current_user['role'] not in roles:
         raise HTTPException(403, 'Insufficient role')
     if csrf:
@@ -290,7 +332,8 @@ def require(request, roles=None, csrf=False, csrf_value=None):
 @app.get('/admin/login', response_class=HTMLResponse)
 def login(request: Request):
     token = _csrf_value(request)
-    error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else ''
+    error = ('<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else
+             '<p style="color:#b42333;font-weight:600">Admin panel is already active in another tab. Close it or wait for its lock to expire.</p>' if request.query_params.get('locked') == '1' else '')
     resp = HTMLResponse(
         f'<h1>CET CAP Admin</h1>{error}<form method="post">'
         f'<input type="hidden" name="csrf_token" value="{token}">'
@@ -302,14 +345,13 @@ def login(request: Request):
         "f.addEventListener('submit',async e=>{"
         "e.preventDefault();"
         "const b=f.querySelector('button');"
-        "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
-        "if(lock && Date.now()-Number(lock.ts||0)<60000){"
-        "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
+        "const TAB_KEY='cet-cap-admin-tab-id-v1';let tabId=sessionStorage.getItem(TAB_KEY);"
+        "if(!tabId){tabId=crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);sessionStorage.setItem(TAB_KEY,tabId);}"
         "b.disabled=true;b.textContent='Signing in…';"
-        "try{const r=await fetch('/admin/login',{method:'POST',body:new FormData(f),redirect:'follow'});"
+        "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
         "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
-        "sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1');"
+        "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
         "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1')}"
         "});"
         "</script>"
@@ -329,6 +371,9 @@ def login_post(
     if not _login_ok(ip):
         raise HTTPException(429, 'Too many login attempts. Please wait before trying again.')
     _check_csrf(request, csrf_token)
+    client_id = _admin_tab_id(request)
+    if not client_id:
+        raise HTTPException(400, 'Admin tab identity missing. Refresh the login page and try again.')
 
     with connect() as connection:
         row = connection.execute(
@@ -345,6 +390,10 @@ def login_post(
                 ip,
             )
             return RedirectResponse('/admin/login?error=1', 303)
+
+        lock = _acquire_admin_lock(connection, int(row['id']), client_id)
+        if not lock:
+            return RedirectResponse('/admin/login?locked=1', 303)
 
         # A successful login starts a fresh authentication session. Bumping
         # auth_version invalidates every older browser session for this admin.
@@ -369,9 +418,46 @@ def login_post(
     return resp
 
 
+@app.post('/admin/api/admin-lock/acquire')
+def admin_lock_acquire(request: Request):
+    current = require(request, csrf=True, check_tab=False)
+    client_id = _admin_tab_id(request)
+    if not client_id:
+        raise HTTPException(409, 'Admin tab identity missing')
+    with connect() as connection:
+        lock = _acquire_admin_lock(connection, current['uid'], client_id)
+        if not lock:
+            raise HTTPException(409, 'Admin panel is active in another tab')
+        connection.commit()
+    return {'ok': True}
+
+
+@app.post('/admin/api/admin-lock/heartbeat')
+def admin_lock_heartbeat(request: Request):
+    current = require(request, csrf=True, check_tab=False)
+    client_id = _admin_tab_id(request)
+    if not client_id:
+        raise HTTPException(409, 'Admin tab identity missing')
+    with connect() as connection:
+        row = connection.execute(
+            'UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=? RETURNING client_id',
+            (current['uid'], client_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(409, 'Admin panel is active in another tab')
+        connection.commit()
+    return {'ok': True}
+
+
 @app.post('/admin/logout')
 def logout(request: Request):
-    require(request, csrf=True)
+    current = require(request, csrf=True)
+    client_id = _admin_tab_id(request)
+    if not client_id:
+        raise HTTPException(409, 'Admin tab identity missing')
+    with connect() as connection:
+        connection.execute('DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?', (current['uid'], client_id))
+        connection.commit()
     resp = RedirectResponse('/admin/login', 303)
     resp.delete_cookie(_SESSION_COOKIE, path='/admin')
     resp.delete_cookie(_CSRF_COOKIE, path='/admin')

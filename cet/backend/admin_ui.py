@@ -53,63 +53,39 @@ window.__cetAdminTabReady=false;
 (function(){
   const LOCK_KEY='cet-cap-admin-active-tab-v1';
   const TAB_KEY='cet-cap-admin-tab-id-v1';
-  // Keep the single-tab claim through normal tab closing/navigation. The browser
-  // may retain the HttpOnly admin session cookie after a tab is closed, so
-  // releasing the claim in beforeunload would let a copied /admin URL reuse it.
-  // A short lease still recovers automatically from crashes or abandoned tabs.
-  const TTL=60000;
-  const body=document.body;
-  const gate=document.getElementById('adminTabLock');
+  const TTL=45000;
+  const body=document.body, gate=document.getElementById('adminTabLock');
   let tabId=sessionStorage.getItem(TAB_KEY);
-  if(!tabId){
-    tabId=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
-    sessionStorage.setItem(TAB_KEY,tabId);
-  }
-  function readLock(){
-    try{return JSON.parse(localStorage.getItem(LOCK_KEY)||'null')}catch(_){return null}
-  }
-  function ownsLock(){
-    const x=readLock();
-    return x&&x.id===tabId;
-  }
-  function showBlocked(){
-    window.__cetAdminTabReady=false;
-    body.classList.add('admin-locked');
-    gate.classList.add('show');
-  }
-  function acquire(){
-    const now=Date.now();
-    const x=readLock();
-    if(x&&x.id!==tabId&&(now-Number(x.ts||0))<TTL){
-      showBlocked();
-      return false;
-    }
-    localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:now}));
-    body.classList.remove('admin-locked');
-    gate.classList.remove('show');
-    window.__cetAdminTabReady=true;
-    return true;
+  if(!tabId){tabId=crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);sessionStorage.setItem(TAB_KEY,tabId);}
+  function csrf(){const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return m?decodeURIComponent(m[1]):'';}
+  function readLock(){try{return JSON.parse(localStorage.getItem(LOCK_KEY)||'null')}catch(_){return null}}
+  function showBlocked(){window.__cetAdminTabReady=false;body.classList.add('admin-locked');gate.classList.add('show');}
+  async function acquire(){
+    const now=Date.now(), x=readLock(), stamp=Number(x?.ts||0);
+    if(x&&x.id!==tabId&&Number.isFinite(stamp)&&now>=stamp&&now-stamp<TTL){showBlocked();return false;}
+    try{
+      const r=await fetch('/admin/api/admin-lock/acquire',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store'});
+      if(r.status===401){window.location.replace('/admin/login');return false;}if(!r.ok){showBlocked();return false;}
+      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));}catch(_){}
+      body.classList.remove('admin-locked');gate.classList.remove('show');window.__cetAdminTabReady=true;return true;
+    }catch(_){showBlocked();return false;}
   }
   window.__cetAdminTabRetry=acquire;
-  if(acquire()) setInterval(function(){
-    if(ownsLock()) localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));
-    else showBlocked();
+  window.__cetAdminLockPromise=acquire();
+  setInterval(async function(){
+    if(!window.__cetAdminTabReady)return;
+    try{
+      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store'});
+      if(r.status===401){window.location.replace('/admin/login');return;}if(!r.ok){showBlocked();return;}
+      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));}catch(_){}
+    }catch(_){showBlocked();}
   },5000);
-  window.addEventListener('storage',function(e){
-    if(e.key===LOCK_KEY&&!ownsLock()) showBlocked();
-  });
-  // A closed tab should release its local tab claim immediately. The
-  // per-tab sessionStorage auth marker prevents a copied /admin URL from
-  // reusing the authenticated session in a fresh tab; the lease remains a
-  // fallback for crashes where beforeunload never runs.
-  window.addEventListener('beforeunload',function(){
-    if(ownsLock()){
-      try{localStorage.removeItem(LOCK_KEY)}catch(_){ }
-    }
-  });
+  window.addEventListener('storage',function(e){if(e.key===LOCK_KEY&&e.newValue){const x=readLock();if(x&&x.id!==tabId)showBlocked();}});
+  // Do not release on unload: internal navigation and mobile tab suspension are ambiguous.
+  // Explicit logout releases the server lease; crashes recover after the 45-second expiry.
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):''},extra)};
+const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):'','X-Admin-Client-ID':sessionStorage.getItem('cet-cap-admin-tab-id-v1')||''},extra)};
 async function cetAdminClose(){
   if(!confirm('Close the admin panel? Choose OK to log out and close this session.')) return;
   try{ await fetch('/admin/logout',{method:'POST',headers:csrfHeaders()}); }catch(_){ }
@@ -118,7 +94,7 @@ async function cetAdminClose(){
   window.location='/admin/login';
 }
 function toast(msg,type=''){const d=document.createElement('div');d.className='toast '+type;d.textContent=msg;document.querySelector('#toastbox').appendChild(d);setTimeout(()=>d.remove(),3500)}
-async function api(url,opts={}){if(!window.__cetAdminTabReady)throw new Error('Admin panel is already open in another tab.');const r=await fetch(url,opts);const raw=await r.text();let data=raw;try{data=raw?JSON.parse(raw):null}catch{}if(r.status===401){window.location='/admin/login';throw new Error('Admin session expired. Please sign in again.')}if(!r.ok)throw new Error(typeof data==='string'?data:(data?.detail||'Request failed'));return data}
+async function api(url,opts={}){if(window.__cetAdminLockPromise)await window.__cetAdminLockPromise;if(!window.__cetAdminTabReady)throw new Error('Admin panel is already open in another tab.');const h=Object.assign({},opts.headers||{},{'X-Admin-Client-ID':sessionStorage.getItem('cet-cap-admin-tab-id-v1')||''});const r=await fetch(url,Object.assign({},opts,{headers:h}));const raw=await r.text();let data=raw;try{data=raw?JSON.parse(raw):null}catch{}if(r.status===401){window.location='/admin/login';throw new Error('Admin session expired. Please sign in again.')}if(!r.ok)throw new Error(typeof data==='string'?data:(data?.detail||'Request failed'));return data}
 function fmtTime(v){if(!v)return '—';const d=new Date(String(v).replace(' ','T')+'Z');if(Number.isNaN(d.getTime()))return esc(v);return d.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}
 function badge(s){const x=String(s||'').toUpperCase(),c=x.includes('REVIEW')?'red':x.includes('FAIL')||x.includes('QUARANT')?'red':x.includes('PUBLISH')||x.includes('COMPLETE')||x.includes('VALID')?'green':x.includes('STAGED')||x.includes('COMMIT')?'purple':x.includes('RECEIVED')||x.includes('EXTRACT')||x.includes('NORMAL')?'blue':x.includes('WARN')?'amber':'gray';const loading=['RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING'].includes(x);const label=x==='COMMITTING'?'COMMITTED • READY TO PUBLISH':x==='CANDIDATE'?'UNVERIFIED':x.replaceAll('_',' ');return `<span class="status ${c}${loading?' loading':''}">${esc(label)}</span>`}
 function countUp(el,to){const n=Number(to)||0,from=Number(el.dataset.value||0),start=performance.now(),dur=450;function tick(t){const p=Math.min(1,(t-start)/dur),e=1-Math.pow(1-p,3);el.textContent=Math.round(from+(n-from)*e).toLocaleString();if(p<1)requestAnimationFrame(tick)}el.dataset.value=n;requestAnimationFrame(tick)}
