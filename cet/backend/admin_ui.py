@@ -51,7 +51,13 @@ if(sessionStorage.getItem(ADMIN_AUTH_KEY)!=='1'){
 }
 window.__cetAdminTabReady=false;
 (function(){
+  const LOCK_KEY='cet-cap-admin-active-tab-v1';
   const TAB_KEY='cet-cap-admin-tab-id-v1';
+  // Keep the single-tab claim through normal tab closing/navigation. The browser
+  // may retain the HttpOnly admin session cookie after a tab is closed, so
+  // releasing the claim in beforeunload would let a copied /admin URL reuse it.
+  // A short lease still recovers automatically from crashes or abandoned tabs.
+  const TTL=60000;
   const body=document.body;
   const gate=document.getElementById('adminTabLock');
   let tabId=sessionStorage.getItem(TAB_KEY);
@@ -59,100 +65,55 @@ window.__cetAdminTabReady=false;
     tabId=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
     sessionStorage.setItem(TAB_KEY,tabId);
   }
-  // A fresh document gets a fresh lock token. This makes an old page's
-  // delayed pagehide/release or heartbeat harmless after navigation: it can
-  // only affect the exact lock generation it originally acquired.
-  const LOCK_TOKEN_KEY='cet-cap-admin-lock-token-v1';
-  let lockToken=crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);
-  function lockHeaders(){
-    return Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId,'X-Admin-Lock-Token':lockToken});
+  function readLock(){
+    try{return JSON.parse(localStorage.getItem(LOCK_KEY)||'null')}catch(_){return null}
+  }
+  function ownsLock(){
+    const x=readLock();
+    return x&&x.id===tabId;
   }
   function showBlocked(){
     window.__cetAdminTabReady=false;
     body.classList.add('admin-locked');
     gate.classList.add('show');
   }
-  function showReady(){
-    window.__cetAdminTabReady=true;
+  function acquire(){
+    const now=Date.now();
+    const x=readLock();
+    if(x&&x.id!==tabId&&(now-Number(x.ts||0))<TTL){
+      showBlocked();
+      return false;
+    }
+    localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:now}));
     body.classList.remove('admin-locked');
     gate.classList.remove('show');
-  }
-  async function securityAlert(action){
-    try{
-      const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);
-      if(!m)return;
-      await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'X-Admin-Client-ID':tabId,'Content-Type':'application/json'},body:JSON.stringify({action})});
-    }catch(_){ }
-  }
-  async function acquireServerLock(){
-    try{
-      const r=await fetch('/admin/api/admin-lock/acquire',{method:'POST',headers:lockHeaders(),cache:'no-store'});
-      if(r.ok){showReady();return true;}
-      if(r.status===409){showBlocked();return false;}
-    }catch(_){ }
-    // Keep the page usable during a transient network failure; the heartbeat
-    // will enforce the server-side lock as soon as the connection recovers.
-    showReady();
+    window.__cetAdminTabReady=true;
     return true;
   }
-  window.__cetAdminTabRetry=function(){securityAlert('ADMIN_TAB_RETRY');return acquireServerLock()};
-  async function serverHeartbeat(){
-    try{
-      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:lockHeaders(),cache:'no-store'});
-      if(r.status===409){
-        sessionStorage.removeItem(ADMIN_AUTH_KEY);
-        showBlocked();
-      }
-    }catch(_){}
-  }
-  async function releaseServerLock(){
-    try{
-      await fetch('/admin/api/admin-lock/release',{method:'POST',headers:lockHeaders(),cache:'no-store',keepalive:true});
-    }catch(_){ }
-  }
-  async function bootAdminLock(){
-    const acquired=await acquireServerLock();
-    if(!acquired)return;
-    serverHeartbeat();
-    setInterval(serverHeartbeat,5000);
-  }
-  // Internal admin navigation keeps the same tab identity. Do not release
-  // the server lock during that navigation, otherwise the next admin page can
-  // race the keepalive release and briefly lock itself out.
-  let internalNavigation=false;
-  document.addEventListener('click',function(event){
-    const link=event.target.closest('a[href]');
-    if(!link)return;
-    const href=link.getAttribute('href')||'';
-    if(href.startsWith('/admin') && !link.target && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey){
-      internalNavigation=true;
+  window.__cetAdminTabRetry=acquire;
+  if(acquire()) setInterval(function(){
+    if(ownsLock()) localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));
+    else showBlocked();
+  },5000);
+  window.addEventListener('storage',function(e){
+    if(e.key===LOCK_KEY&&!ownsLock()) showBlocked();
+  });
+  // A closed tab should release its local tab claim immediately. The
+  // per-tab sessionStorage auth marker prevents a copied /admin URL from
+  // reusing the authenticated session in a fresh tab; the lease remains a
+  // fallback for crashes where beforeunload never runs.
+  window.addEventListener('beforeunload',function(){
+    if(ownsLock()){
+      try{localStorage.removeItem(LOCK_KEY)}catch(_){ }
     }
-  },true);
-  // pageswap is emitted for a cross-document navigation before the old
-  // document is unloaded. It catches browser Back/Forward and programmatic
-  // navigations that do not pass through our click handler.
-  window.addEventListener('pageswap',function(){
-    internalNavigation=true;
   });
-  window.addEventListener('pagehide',function(event){
-    if(internalNavigation)return;
-    // Actual tab/window exit: release immediately. keepalive lets the request
-    // continue while the document is being unloaded.
-    releaseServerLock();
-  });
-  window.addEventListener('pageshow',function(event){
-    // Only reacquire for a bfcache restore. A normal page load already calls
-    // bootAdminLock(), so doing it here would create a redundant request.
-    if(event.persisted) acquireServerLock();
-  });
-  window.__cetAdminBootLock=bootAdminLock;
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):''},extra)};
-if(window.__cetAdminBootLock) window.__cetAdminBootLock();
 async function cetAdminClose(){
   if(!confirm('Close the admin panel? Choose OK to log out and close this session.')) return;
   try{ await fetch('/admin/logout',{method:'POST',headers:csrfHeaders()}); }catch(_){ }
+  try{localStorage.removeItem('cet-cap-admin-active-tab-v1')}catch(_){ }
   try{sessionStorage.removeItem(ADMIN_AUTH_KEY);sessionStorage.removeItem('cet-cap-admin-tab-id-v1')}catch(_){ }
   window.location='/admin/login';
 }
@@ -171,7 +132,6 @@ async function toggleProcess(id,btn){const d=await api('/admin/api/imports/'+id)
 def dashboard() -> str:
     body='''<div class="title"><div><h1>Admin Dashboard</h1><p>Live overview of imports, processing, releases and data quality.</p></div><div class="live"><span class="dot"></span>Live · <span id="lastRefresh">updating</span></div></div>
 <div class="cards"><div class="card kpi"><div class="khead"><span class="ki sky">⇧</span>Imports Today</div><div class="num" id="today">0</div><div class="trend up">Real-time import history</div></div><div class="card kpi"><div class="khead"><span class="ki rose">▤</span>Pending Review</div><div class="num" id="pending">0</div><div class="trend warn">Needs admin action</div></div><div class="card kpi"><div class="khead"><span class="ki mint">▣</span>Production Records</div><div class="num" id="production">0</div><div class="trend up">Published database rows</div></div><div class="card kpi"><div class="khead"><span class="ki lav">♡</span>Data Health</div><div class="num" id="health">—</div><div class="trend" id="healthHint">Checking runtime…</div></div></div>
-<div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>◌ &nbsp;Website Usage</h2><span class="muted small">last 30 days</span></div><div class="cards" style="grid-template-columns:repeat(4,1fr);margin-top:14px"><div class="card kpi"><div class="khead">Visitors</div><div class="num" id="siteVisitors">0</div></div><div class="card kpi"><div class="khead">Searches</div><div class="num" id="siteSearches">0</div></div><div class="card kpi"><div class="khead">College Opens</div><div class="num" id="siteCollegeOpens">0</div></div><div class="card kpi"><div class="khead">Website Clicks</div><div class="num" id="siteClicks">0</div></div></div><div id="siteUsageDetail" class="muted small" style="margin-top:12px">Collecting anonymous usage events…</div></div>
 <div class="layout"><div><div class="card panel"><div class="toolbar"><h2>▤ &nbsp;Import Processing Pipeline</h2><span class="small muted" id="pipelineHint">Waiting for live data</span></div><div class="pipeline" id="pipeline"></div></div><div class="card panel recent"><div class="toolbar"><h2>☷ &nbsp;Recent Imports</h2><a class="muted" href="/admin/review">View All →</a></div><div class="tablewrap"><table class="table"><thead><tr><th>File</th><th>Year</th><th>Round</th><th>Type</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody id="rows"><tr><td colspan="7" class="skeleton">Loading</td></tr></tbody></table></div></div></div><div class="sidepanel"><div class="card panel"><div class="toolbar"><h2>▥ &nbsp;Recent Activity</h2><span class="muted small">last 7 days</span></div><div class="trendbox"><div class="bars" id="bars"></div><div class="muted" style="font-size:10px;text-align:center;padding-top:7px">Imports created per day</div></div></div><div class="card panel"><div class="toolbar"><h2>♡ &nbsp;System Health</h2><a class="muted" href="/admin/health">Details →</a></div><div id="healthList"></div></div></div></div>'''
     js=_common_js()+r'''<script>
 const stages=['RECEIVED','SECURITY_CHECK','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING','STAGED','REVIEW_REQUIRED','COMMITTING','PUBLISHING','VERIFYING','COMPLETED'];
