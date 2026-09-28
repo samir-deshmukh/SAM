@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -36,13 +35,15 @@ from cet_cap.queries import (
     seat_matrix_for_institute,
 )
 from cet_cap.search import filter_by_city, summarize_colleges
+from .admin.network import client_ip
 
 router = APIRouter(prefix="/api", tags=["Public Portal API"])
 
-# Rate limiting state: client_ip -> list of timestamps
+# Rate limiting state: client_ip -> list of monotonic timestamps
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 60
-_request_history: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT_MAX_KEYS = 5000
+_request_history: dict[str, list[float]] = {}
 
 # Current public release scope. Expand deliberately when the corresponding
 # datasets have been verified and the UI is ready for them.
@@ -50,22 +51,34 @@ PUBLIC_COURSES = {"BBA"}
 
 
 def check_rate_limit(request: Request):
-    """Enforce rate limits per client IP to prevent bulk data scraping."""
-    client_ip = request.client.host if request.client else "unknown"
-    now = time.time()
-    timestamps = _request_history[client_ip]
-
-    # Remove timestamps older than window
+    """Enforce bounded, per-process request limits per client IP."""
+    ip = client_ip(request)
+    now = time.monotonic()
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
-    _request_history[client_ip] = [ts for ts in timestamps if ts > cutoff]
 
-    if len(_request_history[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+    # Bound memory when requests arrive from many distinct source addresses.
+    if len(_request_history) >= RATE_LIMIT_MAX_KEYS and ip not in _request_history:
+        for key in list(_request_history):
+            fresh = [stamp for stamp in _request_history[key] if stamp > cutoff]
+            if fresh:
+                _request_history[key] = fresh
+            else:
+                del _request_history[key]
+        # Sustained high-cardinality traffic may keep every key active.
+        # Eviction can weaken throttling for that key but keeps memory bounded.
+        while len(_request_history) >= RATE_LIMIT_MAX_KEYS and _request_history:
+            _request_history.pop(next(iter(_request_history)))
+
+    timestamps = [stamp for stamp in _request_history.get(ip, []) if stamp > cutoff]
+    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
+        _request_history[ip] = timestamps
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Scraping protection active. Please try again shortly.",
         )
 
-    _request_history[client_ip].append(now)
+    timestamps.append(now)
+    _request_history[ip] = timestamps
 
 
 _engine_cache = None

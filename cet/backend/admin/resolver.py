@@ -1,4 +1,4 @@
-import csv,json,os,re,logging,urllib.parse,urllib.request,urllib.error
+import csv,json,os,re,logging,urllib.parse,urllib.request,urllib.error,ipaddress,socket,http.client,ssl
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -16,24 +16,93 @@ def valid_url(url):
     if not parsed.scheme:
         url = "https://" + url
     try:
-        u=urllib.parse.urlparse(url)
-        if u.scheme.lower() not in ('http','https') or not u.netloc:return None
-        if (u.hostname or '').lower() in {'localhost','127.0.0.1','0.0.0.0','::1'}:return None
-        return urllib.parse.urlunparse((u.scheme.lower(),u.netloc,u.path or '/',u.params,u.query,''))
-    except Exception:return None
+        u = urllib.parse.urlparse(url)
+        host = (u.hostname or "").rstrip(".").lower()
+        if u.scheme.lower() not in ("http", "https") or not host or not u.netloc:
+            return None
+        if u.username is not None or u.password is not None:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+            return None
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return None
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            return None
+        # Accessing .port also validates malformed/out-of-range port values.
+        _ = u.port
+        return urllib.parse.urlunparse((u.scheme.lower(), u.netloc, u.path or "/", u.params, u.query, ""))
+    except (ValueError, UnicodeError):
+        return None
 
-def verify_url(url,college_name,timeout=7):
-    url=valid_url(url)
-    if not url:return {'ok':False,'url':None,'note':'Invalid URL'}
+
+def _public_dns_target(url):
+    """Resolve once and return only public socket addresses for a pinned request."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return []
     try:
-        req=urllib.request.Request(url,headers={'User-Agent':'CET-CAP-Website-Resolver/1.0'})
-        with urllib.request.urlopen(req,timeout=timeout) as r:
-            final=r.geturl(); status=getattr(r,'status',200); ctype=r.headers.get('content-type','')
-            body=r.read(120000).decode('utf-8','ignore') if 'text' in ctype.lower() or 'html' in ctype.lower() else ''
-        tokens=[x.lower() for x in re.findall(r'[a-z0-9]+',college_name) if len(x)>2]
-        hay=(final+' '+body[:100000]).lower(); hits=sum(t in hay for t in tokens); denom=max(1,min(len(tokens),8))
-        return {'ok':200<=status<400,'url':valid_url(final),'status':status,'match_score':hits/denom,'note':f'HTTP {status}; college-name match {hits}/{denom}'}
-    except Exception as e:return {'ok':False,'url':url,'note':f'Unreachable: {type(e).__name__}'}
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        targets = []
+        for family, socktype, proto, canonname, sockaddr in records:
+            address = ipaddress.ip_address(sockaddr[0])
+            if not address.is_global:
+                return []
+            targets.append((family, socktype, proto, sockaddr))
+        return targets
+    except (OSError, ValueError):
+        return []
+
+def verify_url(url, college_name, timeout=7):
+    url = valid_url(url)
+    if not url:
+        return {'ok': False, 'url': None, 'note': 'Invalid URL'}
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    targets = _public_dns_target(url)
+    if not targets:
+        return {'ok': False, 'url': None, 'note': 'URL resolves to a non-public or unreachable address'}
+    try:
+        response = None
+        for family, socktype, proto, sockaddr in targets:
+            try:
+                raw = socket.socket(family, socktype, proto)
+                raw.settimeout(timeout)
+                raw.connect(sockaddr)
+                if parsed.scheme == "https":
+                    context = ssl.create_default_context()
+                    raw = context.wrap_socket(raw, server_hostname=host)
+                conn = http.client.HTTPConnection(host, port, timeout=timeout)
+                conn.sock = raw
+                path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+                conn.request("GET", path, headers={"Host": parsed.netloc, "User-Agent": "CET-CAP-Website-Resolver/1.0", "Connection": "close"})
+                response = conn.getresponse()
+                break
+            except OSError:
+                try:
+                    raw.close()
+                except (UnboundLocalError, OSError):
+                    pass
+        if response is None:
+            return {'ok': False, 'url': url, 'note': 'Unreachable: ConnectionError'}
+        status = response.status
+        ctype = response.getheader('content-type', '')
+        body = response.read(120000).decode('utf-8', 'ignore') if 'text' in ctype.lower() or 'html' in ctype.lower() else ''
+        # Redirects are intentionally not followed; the caller must review a redirect target separately.
+        tokens = [x.lower() for x in re.findall(r'[a-z0-9]+', college_name) if len(x) > 2]
+        hay = (url + ' ' + body[:100000]).lower()
+        hits = sum(t in hay for t in tokens)
+        denom = max(1, min(len(tokens), 8))
+        return {'ok': 200 <= status < 400, 'url': url, 'status': status,
+                'match_score': hits / denom, 'note': f'HTTP {status}; college-name match {hits}/{denom}'}
+    except Exception as e:
+        return {'ok': False, 'url': url, 'note': f'Unreachable: {type(e).__name__}'}
 
 def _same_site(a, b):
     """Compare hostnames while allowing www/subdomains of the same site."""

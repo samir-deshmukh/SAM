@@ -1,35 +1,45 @@
-# Security hardening applied
-
-This release incorporates the security fixes identified in `SECURITY_REVIEW.docx`.
+# Security hardening
 
 ## Authentication and sessions
-- Login is throttled by both source address and username, with temporary lockout after repeated failures.
-- Production uses Secure + HttpOnly + SameSite=Strict admin session cookies by default.
-- Sessions contain an authentication version and are checked against the current database user on every authenticated request.
-- Disabled users and changed roles immediately invalidate existing sessions.
-- `/admin/logout` explicitly clears the session and CSRF cookies.
-- The bundled database contains no admin accounts or test import/audit state.
+- Login performs a dummy password-hash verification for unknown usernames to reduce timing-based username enumeration.
+- Login attempts are throttled by source address without locking the target account, avoiding attacker-triggered account lockout. The in-process login limiter prunes expired keys and caps its key count to bound memory under high-cardinality traffic; it is still per worker/instance and is not a distributed control.
+- Production admin session cookies use Secure, HttpOnly, and SameSite=Strict by default.
+- Sessions are checked against the current database user's active state, role, and authentication version.
+- Disabled users and changed roles invalidate existing sessions.
+- /admin/logout clears session and CSRF cookies.
+
+## Request provenance and rate limiting
+- Rate-limit keys use the direct peer address unless CET_TRUSTED_PROXY_IPS explicitly lists trusted reverse-proxy IPs/CIDRs.
+- For configured trusted proxies, the helper uses the rightmost valid X-Forwarded-For address, assuming the trusted proxy appends the observed client IP. Never trust arbitrary client-supplied forwarding headers.
+- Public API and login in-process limits prune expired entries and cap key counts to bound memory under high-cardinality traffic. Eviction may weaken throttling for an evicted key; these limits remain per worker/instance, and multi-instance deployments need a shared rate-limit store.
+
+## API documentation
+- FastAPI Swagger, ReDoc, and OpenAPI routes are disabled.
 
 ## CSRF
 - State-changing admin endpoints require a CSRF token.
 - Login uses a synchronizer-style token delivered in the login form and CSRF cookie.
-- Admin JavaScript sends the CSRF token on process, approve, reject, publish, and rollback requests.
+- Admin JavaScript sends CSRF tokens for state-changing operations.
 
 ## Upload and processing safety
-- Failed uploads clean up both temporary and renamed PDF files.
-- Import processing atomically claims a REVIEW_REQUIRED job before starting, preventing duplicate processing by concurrent requests in the same database.
-- Client-facing processing/publishing failures no longer expose raw internal exception details.
+- Failed uploads clean up temporary and renamed PDF files.
+- Import processing atomically claims a review-required job before processing to prevent duplicate work.
+- Client-facing processing/publishing failures do not expose raw internal exception details.
 
-## Public-site URL safety
-- Institute enrichment accepts only absolute HTTP(S) URLs without embedded credentials or control characters.
-- Public rendering validates the URL again and HTML-escapes it before inserting it into the link attribute.
+## Admin website resolver / SSRF mitigation
+- Website URLs must use HTTP(S), contain no embedded credentials/control characters, and must not target localhost, local/internal suffixes, or non-global IP literals.
+- DNS results are checked and requests to hostnames resolving to non-public addresses are rejected.
+- Automatic redirects are disabled for URL verification so a public URL cannot redirect the checker to a private target.
+- DNS validation and connection are separate operations; production-grade protection against DNS rebinding should use a network-level egress policy that blocks private, loopback, link-local, and metadata-service ranges.
 
-## Database hygiene
-- The empty duplicate `db/cet-cap.db` artifact was removed.
-- `admin_users.auth_version` is part of the schema and is added automatically to older PostgreSQL databases.
+## Remaining security work
+- Add administrator two-factor authentication (TOTP or WebAuthn) with recovery and enrollment flows before treating MFA as implemented.
+- Consider a shared rate-limit store if the API scales beyond one worker/instance.
+- Re-run a complete dependency vulnerability audit after dependency resolution and test the deployed build.
 
-## Important deployment notes
-- Set `CET_ADMIN_SESSION_SECRET` to a long random secret in production.
-- Keep `CET_ENV=production` (the default) and do not disable `CET_ADMIN_COOKIE_SECURE` in production.
-- Create the first real administrator after deployment using `backend/admin/create_admin.py`; do not ship administrator credentials in source/data artifacts.
-- PostgreSQL production deployment still requires validating the complete admin workflow against the target PostgreSQL schema before enabling it as the runtime database.
+## Deployment notes
+- Set CET_ADMIN_SESSION_SECRET to a long random secret in production.
+- Keep CET_ENV=production and do not disable CET_ADMIN_COOKIE_SECURE in production.
+- Configure CET_TRUSTED_PROXY_IPS only after confirming the actual trusted proxy addresses and forwarded-header behavior for the hosting platform.
+- Create the first real administrator after deployment; never ship administrator credentials in source/data artifacts.
+- Validate the complete admin workflow against the target PostgreSQL schema before enabling it as the runtime database.

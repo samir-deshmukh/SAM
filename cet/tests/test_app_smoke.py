@@ -17,3 +17,10 @@ def test_streamlit_app_declares_postgres_only_connection_path():
     source = open("app/Home.py", encoding="utf-8").read()
     assert "DATABASE_URL" in source
     assert "sqlite" not in source.lower()
+
+
+def test_fastapi_docs_and_openapi_routes_are_disabled():
+    mod = importlib.import_module("backend.main")
+    assert mod.app.docs_url is None
+    assert mod.app.redoc_url is None
+    assert mod.app.openapi_url is None

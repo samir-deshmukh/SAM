@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
 from .admin.db import connect,init_admin_schema,event
-from .admin.security import verify_password,make_session,read_session
+from .admin.security import verify_password,make_session,read_session,hash_password
+from .admin.network import client_ip
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES
 from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
 from .admin.publishing import publish_release
@@ -34,10 +35,9 @@ async def lifespan(_app):
             log.exception('Database startup maintenance failed')
             return
 
-        # Recover imports that completed extraction/validation but were left in
-        # STAGED by an older worker crash. This is intentionally limited to clean
-        # STAGED jobs; FAILED jobs must not be retried silently.
-        _recover_staged_imports()
+        # STAGED imports must remain pending until an administrator explicitly
+        # approves them in the Review Center. A service restart is not approval.
+        log.info('Startup maintenance will leave STAGED imports pending')
         # Rebuild the derived website-resolver view after every deploy so an
         # admin page visit is never required to make current CAP colleges appear.
         try:
@@ -47,26 +47,11 @@ async def lifespan(_app):
         except Exception:
             log.exception('Startup resolver sync failed')
 
-    def _recover_staged_imports():
-        try:
-            with connect() as c:
-                jobs = c.execute("SELECT id,created_by FROM import_jobs WHERE status='STAGED' ORDER BY id").fetchall()
-            for job in jobs:
-                try:
-                    with connect() as c:
-                        approve_import(c, int(job['id']), int(job['created_by']),
-                                       'Automatic recovery: staged import resumed after service restart')
-                    log.info('Recovered STAGED import: job_id=%s', job['id'])
-                except Exception:
-                    log.exception('Failed to recover STAGED import: job_id=%s', job['id'])
-        except Exception:
-            log.exception('Unable to scan for STAGED import recovery')
-
     threading.Thread(target=_startup_database_maintenance, daemon=True,
                      name='database-startup-maintenance').start()
     yield
 
-app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
+app=FastAPI(title='CET CAP Admin API', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://cetfind.onrender.com"],
@@ -84,6 +69,8 @@ _PRODUCTION=os.getenv('CET_ENV','production').lower() == 'production'
 _COOKIE_SECURE=os.getenv('CET_ADMIN_COOKIE_SECURE','1' if _PRODUCTION else '0') == '1'
 _CSRF_COOKIE='cet_admin_csrf'
 _SESSION_COOKIE='cet_admin_session'
+# Equal-cost password verification for unknown usernames reduces account enumeration by timing.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 # ── Simple in-process rate limiter for the public data API ──
@@ -120,37 +107,32 @@ _DATA_DIR = SITE / 'data'
 # ── Login brute-force limiter: 5 attempts per IP per 60 seconds ──
 _LOGIN_RATE: dict[str, list[float]] = {}
 _LOGIN_LIMIT = 5
+_LOGIN_WINDOW = 60.0
+_LOGIN_MAX_KEYS = 5000
 
 def _login_ok(ip: str) -> bool:
     now = time.monotonic()
-    hits = _LOGIN_RATE.get(ip, [])
-    hits = [t for t in hits if now - t < 60]
+    # Expire old keys as well as old hits so spoofed/rotating source addresses
+    # cannot grow this process-local limiter without bound.
+    if len(_LOGIN_RATE) >= _LOGIN_MAX_KEYS and ip not in _LOGIN_RATE:
+        cutoff = now - _LOGIN_WINDOW
+        for key in list(_LOGIN_RATE):
+            fresh = [stamp for stamp in _LOGIN_RATE[key] if stamp > cutoff]
+            if fresh:
+                _LOGIN_RATE[key] = fresh
+            else:
+                del _LOGIN_RATE[key]
+        # Under a sustained high-cardinality flood, cap memory even if every
+        # key remains active. Eviction only affects throttling, not accounts.
+        while len(_LOGIN_RATE) >= _LOGIN_MAX_KEYS and _LOGIN_RATE:
+            _LOGIN_RATE.pop(next(iter(_LOGIN_RATE)))
+    hits = [stamp for stamp in _LOGIN_RATE.get(ip, []) if now - stamp < _LOGIN_WINDOW]
     if len(hits) >= _LOGIN_LIMIT:
         _LOGIN_RATE[ip] = hits
         return False
     hits.append(now)
     _LOGIN_RATE[ip] = hits
     return True
-
-_LOGIN_ACCOUNT: dict[str, list[float]] = {}
-_LOGIN_LOCK: dict[str, float] = {}
-
-def _login_account_ok(username: str) -> bool:
-    now = time.monotonic()
-    key = username.strip().lower()[:128]
-    until=_LOGIN_LOCK.get(key,0)
-    if until > now: return False
-    hits=[t for t in _LOGIN_ACCOUNT.get(key,[]) if now-t < 300]
-    _LOGIN_ACCOUNT[key]=hits
-    return len(hits) < 5
-
-def _record_login_failure(username: str) -> None:
-    now = time.monotonic()
-    key = username.strip().lower()[:128]
-    hits=[t for t in _LOGIN_ACCOUNT.get(key,[]) if now-t < 300]
-    hits.append(now)
-    _LOGIN_ACCOUNT[key] = hits
-    if len(hits) >= 5: _LOGIN_LOCK[key]=now+300
 
 def _csrf_value(request: Request) -> str:
     token=request.cookies.get(_CSRF_COOKIE)
@@ -229,7 +211,7 @@ def _feedback_ok(ip: str) -> bool:
 
 @app.post('/api/feedback')
 async def public_feedback(request: Request):
-    ip=(request.headers.get('x-forwarded-for') or '').split(',')[0].strip() or (request.client.host if request.client else 'unknown')
+    ip=client_ip(request)
     if not _feedback_ok(ip):
         raise HTTPException(429, 'Please wait before sending more feedback.')
     try:
@@ -327,9 +309,8 @@ def login_post(
     password: str = Form(...),
     csrf_token: str = Form(...),
 ):
-    ip = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
-    ip = ip or (request.client.host if request.client else 'unknown')
-    if not _login_ok(ip) or not _login_account_ok(username):
+    ip = client_ip(request)
+    if not _login_ok(ip):
         raise HTTPException(429, 'Too many login attempts. Please wait before trying again.')
     _check_csrf(request, csrf_token)
 
@@ -338,8 +319,10 @@ def login_post(
             'SELECT * FROM admin_users WHERE username=? AND is_active=TRUE',
             (username,),
         ).fetchone()
-        if not row or not verify_password(password, row['password_hash']):
-            _record_login_failure(username)
+        # Perform the same expensive password-hash operation for unknown users.
+        # This reduces timing differences that could reveal valid usernames.
+        password_ok = verify_password(password, row['password_hash']) if row else verify_password(password, _DUMMY_PASSWORD_HASH)
+        if not row or not password_ok:
             log.warning(
                 'Failed admin login for username=%r from %s',
                 username[:64],
@@ -685,20 +668,9 @@ def _process_import_background_locked(job_id: int):
             if not result.get('ok'):
                 log.error('Background import processing failed: job_id=%s error=%s', job_id, result.get('error'))
             elif result.get('status') == JobStatus.STAGED.value:
-                # A clean import must not wait in Review Center. Validation has
-                # already passed, so promote it automatically; publishing remains
-                # a separate explicit release action.
-                approve_import(
-                    connection,
-                    job_id,
-                    int(job['created_by']),
-                    'Automatic approval: extraction, normalization, validation and comparison passed',
-                )
-                # The first resolver step starts only after PDF processing has
-                # completed. It is deliberately limited to one college so the
-                # 512 MB web instance never runs a PDF extractor and AI resolver
-                # concurrently. The remaining queue is available in Resolver.
-                _resolve_one_import_background(job_id)
+                # Successful validation is not administrator approval. Keep the
+                # import staged so a reviewer can inspect and explicitly approve it.
+                log.info('Import is staged and awaiting explicit admin approval: job_id=%s', job_id)
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
             connection.rollback()
@@ -925,13 +897,16 @@ def review_detail(request: Request, job_id: int):
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
 @app.post('/admin/api/imports/{job_id}/approve')
-async def approve(request: Request, job_id: int):
+async def approve(request: Request, job_id: int, background_tasks: BackgroundTasks):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
     try: body=await request.json()
     except Exception: body={}
     notes=str(body.get('notes','')).strip()[:4000]
     with connect() as c:
-        try: return approve_import(c,job_id,u['uid'],notes)
+        try:
+            result = approve_import(c,job_id,u['uid'],notes)
+            background_tasks.add_task(_resolve_one_import_background, job_id)
+            return result
         except ValueError as e: raise HTTPException(409,str(e))
 
 @app.post('/admin/api/imports/{job_id}/reject')
