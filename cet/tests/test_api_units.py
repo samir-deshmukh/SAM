@@ -61,12 +61,12 @@ def test_public_options_uses_database_values(monkeypatch):
 
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
-    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BCA", "MCA"])
+    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BBA"])
     api._request_history.clear()
 
     result = api.public_options(request_for("10.0.0.2"))
 
-    assert result == {"cities": ["Amravati", "Pune"], "courses": ["BCA", "MCA"]}
+    assert result == {"cities": ["Amravati", "Pune"], "courses": ["BBA"]}
 
 
 def test_search_colleges_builds_bounded_cards(monkeypatch):
@@ -81,6 +81,7 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
                 "city": "Amravati",
                 "website": "https://example.edu",
                 "cutoff_percentile": 80.0,
+                "cutoff_rank": 1200,
                 "year": 2026,
             },
             {
@@ -89,20 +90,22 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
                 "city": "Amravati",
                 "website": "https://example.edu",
                 "cutoff_percentile": 75.0,
+                "cutoff_rank": 1500,
                 "year": 2025,
             },
         ]
     )
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
-    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BCA"])
+    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BBA"])
     monkeypatch.setattr(api, "search_cutoffs_for_course", lambda *args, **kwargs: raw)
     monkeypatch.setattr(api, "_drawer_metadata", lambda *args: {})
+    monkeypatch.setattr(api, "_legacy_search_metadata", lambda *args: {"01102": {"cutoff": 1200, "percentile": 75.0, "history": [], "graph_history": []}})
     api._request_history.clear()
 
     result = api.search_colleges(
         request_for("10.0.0.3"),
-        course="BCA",
+        course="BBA",
         percentile=82.0,
         city=None,
         sort="comp",

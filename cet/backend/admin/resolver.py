@@ -1,4 +1,4 @@
-import csv,json,os,re,logging,urllib.parse,urllib.request,urllib.error
+import csv,json,os,re,logging,urllib.parse,urllib.request,urllib.error,ipaddress,socket
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -16,18 +16,54 @@ def valid_url(url):
     if not parsed.scheme:
         url = "https://" + url
     try:
-        u=urllib.parse.urlparse(url)
-        if u.scheme.lower() not in ('http','https') or not u.netloc:return None
-        if (u.hostname or '').lower() in {'localhost','127.0.0.1','0.0.0.0','::1'}:return None
-        return urllib.parse.urlunparse((u.scheme.lower(),u.netloc,u.path or '/',u.params,u.query,''))
-    except Exception:return None
+        u = urllib.parse.urlparse(url)
+        host = (u.hostname or "").rstrip(".").lower()
+        if u.scheme.lower() not in ("http", "https") or not host or not u.netloc:
+            return None
+        if u.username is not None or u.password is not None:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+            return None
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return None
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            return None
+        # Accessing .port also validates malformed/out-of-range port values.
+        _ = u.port
+        return urllib.parse.urlunparse((u.scheme.lower(), u.netloc, u.path or "/", u.params, u.query, ""))
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _public_dns_target(url):
+    """Reject hostnames resolving to any non-public address before outbound requests."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
+                                       type=socket.SOCK_STREAM)
+        return bool(addresses) and all(ipaddress.ip_address(item[4][0]).is_global for item in addresses)
+    except (OSError, ValueError):
+        return False
 
 def verify_url(url,college_name,timeout=7):
     url=valid_url(url)
     if not url:return {'ok':False,'url':None,'note':'Invalid URL'}
+    if not _public_dns_target(url):
+        return {'ok':False,'url':None,'note':'URL resolves to a non-public or unreachable address'}
     try:
         req=urllib.request.Request(url,headers={'User-Agent':'CET-CAP-Website-Resolver/1.0'})
-        with urllib.request.urlopen(req,timeout=timeout) as r:
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener=urllib.request.build_opener(_NoRedirect)
+        with opener.open(req,timeout=timeout) as r:
             final=r.geturl(); status=getattr(r,'status',200); ctype=r.headers.get('content-type','')
             body=r.read(120000).decode('utf-8','ignore') if 'text' in ctype.lower() or 'html' in ctype.lower() else ''
         tokens=[x.lower() for x in re.findall(r'[a-z0-9]+',college_name) if len(x)>2]

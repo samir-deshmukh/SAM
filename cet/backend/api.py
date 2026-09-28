@@ -36,6 +36,7 @@ from cet_cap.queries import (
     seat_matrix_for_institute,
 )
 from cet_cap.search import filter_by_city, summarize_colleges
+from .admin.network import client_ip
 
 router = APIRouter(prefix="/api", tags=["Public Portal API"])
 
@@ -51,21 +52,21 @@ PUBLIC_COURSES = {"BBA"}
 
 def check_rate_limit(request: Request):
     """Enforce rate limits per client IP to prevent bulk data scraping."""
-    client_ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     now = time.time()
-    timestamps = _request_history[client_ip]
+    timestamps = _request_history[ip]
 
     # Remove timestamps older than window
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
-    _request_history[client_ip] = [ts for ts in timestamps if ts > cutoff]
+    _request_history[ip] = [ts for ts in timestamps if ts > cutoff]
 
-    if len(_request_history[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+    if len(_request_history[ip]) >= RATE_LIMIT_MAX_REQUESTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Scraping protection active. Please try again shortly.",
         )
 
-    _request_history[client_ip].append(now)
+    _request_history[ip].append(now)
 
 
 _engine_cache = None

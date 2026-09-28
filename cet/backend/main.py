@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
 from .admin.db import connect,init_admin_schema,event
-from .admin.security import verify_password,make_session,read_session
+from .admin.security import verify_password,make_session,read_session,hash_password
+from .admin.network import client_ip
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES
 from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
 from .admin.publishing import publish_release
@@ -66,7 +67,7 @@ async def lifespan(_app):
                      name='database-startup-maintenance').start()
     yield
 
-app=FastAPI(title='CET CAP Admin API', lifespan=lifespan)
+app=FastAPI(title='CET CAP Admin API', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://cetfind.onrender.com"],
@@ -84,6 +85,8 @@ _PRODUCTION=os.getenv('CET_ENV','production').lower() == 'production'
 _COOKIE_SECURE=os.getenv('CET_ADMIN_COOKIE_SECURE','1' if _PRODUCTION else '0') == '1'
 _CSRF_COOKIE='cet_admin_csrf'
 _SESSION_COOKIE='cet_admin_session'
+# Equal-cost password verification for unknown usernames reduces account enumeration by timing.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 # ── Simple in-process rate limiter for the public data API ──
@@ -131,26 +134,6 @@ def _login_ok(ip: str) -> bool:
     hits.append(now)
     _LOGIN_RATE[ip] = hits
     return True
-
-_LOGIN_ACCOUNT: dict[str, list[float]] = {}
-_LOGIN_LOCK: dict[str, float] = {}
-
-def _login_account_ok(username: str) -> bool:
-    now = time.monotonic()
-    key = username.strip().lower()[:128]
-    until=_LOGIN_LOCK.get(key,0)
-    if until > now: return False
-    hits=[t for t in _LOGIN_ACCOUNT.get(key,[]) if now-t < 300]
-    _LOGIN_ACCOUNT[key]=hits
-    return len(hits) < 5
-
-def _record_login_failure(username: str) -> None:
-    now = time.monotonic()
-    key = username.strip().lower()[:128]
-    hits=[t for t in _LOGIN_ACCOUNT.get(key,[]) if now-t < 300]
-    hits.append(now)
-    _LOGIN_ACCOUNT[key] = hits
-    if len(hits) >= 5: _LOGIN_LOCK[key]=now+300
 
 def _csrf_value(request: Request) -> str:
     token=request.cookies.get(_CSRF_COOKIE)
@@ -229,7 +212,7 @@ def _feedback_ok(ip: str) -> bool:
 
 @app.post('/api/feedback')
 async def public_feedback(request: Request):
-    ip=(request.headers.get('x-forwarded-for') or '').split(',')[0].strip() or (request.client.host if request.client else 'unknown')
+    ip=client_ip(request)
     if not _feedback_ok(ip):
         raise HTTPException(429, 'Please wait before sending more feedback.')
     try:
@@ -327,9 +310,8 @@ def login_post(
     password: str = Form(...),
     csrf_token: str = Form(...),
 ):
-    ip = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
-    ip = ip or (request.client.host if request.client else 'unknown')
-    if not _login_ok(ip) or not _login_account_ok(username):
+    ip = client_ip(request)
+    if not _login_ok(ip):
         raise HTTPException(429, 'Too many login attempts. Please wait before trying again.')
     _check_csrf(request, csrf_token)
 
@@ -338,8 +320,10 @@ def login_post(
             'SELECT * FROM admin_users WHERE username=? AND is_active=TRUE',
             (username,),
         ).fetchone()
-        if not row or not verify_password(password, row['password_hash']):
-            _record_login_failure(username)
+        # Perform the same expensive password-hash operation for unknown users.
+        # This reduces timing differences that could reveal valid usernames.
+        password_ok = verify_password(password, row['password_hash']) if row else verify_password(password, _DUMMY_PASSWORD_HASH)
+        if not row or not password_ok:
             log.warning(
                 'Failed admin login for username=%r from %s',
                 username[:64],
