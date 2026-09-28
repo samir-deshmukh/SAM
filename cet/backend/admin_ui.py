@@ -80,14 +80,30 @@ window.__cetAdminTabReady=false;
     const labels={ADMIN_LOGIN_ATTEMPT:'Security alert: someone attempted to sign in to the Admin Panel.',ADMIN_LOGIN_BLOCKED:'Security alert: another admin login was blocked because this Admin Panel is already active.',ADMIN_LOGIN_FAILED:'Security alert: a failed Admin Panel login attempt was recorded.',ADMIN_TAB_RETRY:'Security alert: someone pressed Retry on the Admin Panel lock screen.',ADMIN_UNAUTHORIZED:'Security alert: an unauthenticated Admin Panel access attempt was blocked.'};
     toast(labels[action]||'Security alert: an admin access attempt was detected.','err');
   }
-  let securityAfter=0,securityReady=false;
+  // Keep the security-alert cursor for this browser tab. A normal admin
+  // navigation creates a new document, so an in-memory cursor would reset to
+  // zero and replay old security events as fresh alerts on every page.
+  const SECURITY_CURSOR_KEY='cet-cap-admin-security-cursor-v1';
+  let securityAfter=Number(sessionStorage.getItem(SECURITY_CURSOR_KEY)||0);
+  let securityReady=securityAfter>0;
   async function pollSecurityAlerts(){
     try{
       const r=await fetch('/admin/api/security-alerts?after='+securityAfter,{cache:'no-store'});
       if(!r.ok)return;
       const d=await r.json();
-      if(!securityReady){securityAfter=Number(d.latest_id||securityAfter);securityReady=true;return;}
-      for(const x of (d.events||[])){securityAfter=Math.max(securityAfter,Number(x.id)||0);notifyOtherAdmin(x.action)}
+      if(!securityReady){
+        securityAfter=Number(d.latest_id||securityAfter);
+        sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
+        securityReady=true;
+        return;
+      }
+      for(const x of (d.events||[])){
+        securityAfter=Math.max(securityAfter,Number(x.id)||0);
+        sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
+        notifyOtherAdmin(x.action);
+      }
+      securityAfter=Math.max(securityAfter,Number(d.latest_id||securityAfter));
+      sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
     }catch(_){ }
   }
   async function acquireServerLock(){
