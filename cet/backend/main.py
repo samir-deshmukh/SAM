@@ -33,6 +33,15 @@ async def lifespan(_app):
             ensure_part4_schema()
             with connect() as c:
                 c.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_active_lock (
+                        user_id BIGINT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                c.commit()
+            with connect() as c:
+                c.execute("""
                     CREATE TABLE IF NOT EXISTS site_analytics_events (
                         id BIGSERIAL PRIMARY KEY,
                         session_id TEXT NOT NULL,
@@ -399,7 +408,13 @@ def require(request, roles=None, csrf=False, csrf_value=None):
 @app.get('/admin/login', response_class=HTMLResponse)
 def login(request: Request):
     token = _csrf_value(request)
-    error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else ''
+    client_id = request.cookies.get('cet_admin_client_id') or secrets.token_urlsafe(24)
+    if request.query_params.get('locked') == '1':
+        error = '<p style="color:#b42333;font-weight:600">Admin panel is already open in another browser. Close/log out of the existing Admin Panel before signing in here.</p>'
+    elif request.query_params.get('error') == '1':
+        error = '<p style="color:#b42333;font-weight:600">Invalid username or password.</p>'
+    else:
+        error = ''
     resp = HTMLResponse(
         f'<h1>CET CAP Admin</h1>{error}<form method="post">'
         f'<input type="hidden" name="csrf_token" value="{token}">'
@@ -413,18 +428,19 @@ def login(request: Request):
         "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
         "const b=f.querySelector('button');"
         "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
-        "if(lock && Date.now()-Number(lock.ts||0)<60000){"
+        "if(lock && Date.now()-Number(lock.ts||0)<12000){"
         "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
         "b.disabled=true;b.textContent='Signing in…';"
         "try{const r=await fetch('/admin/login',{method:'POST',body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
         "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
-        "sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1');"
+        "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
         "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1')}"
         "});"
         "</script>"
     )
     _set_csrf(resp, token)
+    resp.set_cookie('cet_admin_client_id', client_id, httponly=True, samesite='strict', secure=_COOKIE_SECURE, path='/admin', max_age=2592000)
     return resp
 
 
@@ -464,8 +480,28 @@ def login_post(
             _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
-        # A successful login starts a fresh authentication session. Bumping
-        # auth_version invalidates every older browser session for this admin.
+        # One-admin-session policy is enforced on the server, so Brave and
+        # Chrome share the same lock. The old localStorage lock only worked
+        # inside one browser and could never protect across browsers.
+        client_id = request.cookies.get('cet_admin_client_id') or secrets.token_urlsafe(24)
+        active = connection.execute(
+            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'",
+            (row['id'],),
+        ).fetchone()
+        if active and active['client_id'] != client_id:
+            connection.execute(
+                "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
+                ('ADMIN_LOGIN_BLOCKED','SECURITY',username[:64],None,json.dumps({'ip':ip}),'Another browser already owns the admin panel'),
+            )
+            connection.commit()
+            _queue_security_notifications('ADMIN_LOGIN_ATTEMPT', username[:64], ip)
+            return RedirectResponse('/admin/login?locked=1', 303)
+        connection.execute(
+            """INSERT INTO admin_active_lock(user_id,client_id,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT (user_id) DO UPDATE SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP""",
+            (row['id'], client_id),
+        )
+        # A successful login starts a fresh authentication session.
         connection.execute(
             'UPDATE admin_users SET last_login_at=CURRENT_TIMESTAMP, auth_version=auth_version+1 WHERE id=?',
             (row['id'],),
@@ -573,9 +609,42 @@ def security_alerts_api(request: Request, after: int = 0):
             events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
     return {'latest_id':int(latest or 0),'events':events}
 
+@app.post('/admin/api/admin-lock/heartbeat')
+def admin_lock_heartbeat(request: Request):
+    current = require(request, csrf=True)
+    client_id = request.cookies.get('cet_admin_client_id')
+    if not client_id:
+        raise HTTPException(409, 'Admin browser identity missing')
+    with connect() as c:
+        row = c.execute(
+            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'",
+            (current['id'],),
+        ).fetchone()
+        if not row or row['client_id'] != client_id:
+            raise HTTPException(409, 'Admin panel is active in another browser')
+        c.execute("UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=?",
+                  (current['id'], client_id))
+        c.commit()
+    return {'ok': True}
+
+@app.post('/admin/api/admin-lock/release')
+def admin_lock_release(request: Request):
+    current = require(request, csrf=True)
+    client_id = request.cookies.get('cet_admin_client_id')
+    if client_id:
+        with connect() as c:
+            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['id'], client_id))
+            c.commit()
+    return {'ok': True}
+
 @app.post('/admin/logout')
 def logout(request: Request):
-    require(request, csrf=True)
+    current = require(request, csrf=True)
+    client_id = request.cookies.get('cet_admin_client_id')
+    if client_id:
+        with connect() as c:
+            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['id'], client_id))
+            c.commit()
     resp = RedirectResponse('/admin/login', 303)
     resp.delete_cookie(_SESSION_COOKIE, path='/admin')
     resp.delete_cookie(_CSRF_COOKIE, path='/admin')

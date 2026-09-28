@@ -114,10 +114,22 @@ window.__cetAdminTabReady=false;
     }catch(_){ }
   }
   window.__cetAdminTabRetry=function(){securityAlert('ADMIN_TAB_RETRY');return acquire()};
+  async function serverHeartbeat(){
+    try{
+      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:csrfHeaders(),cache:'no-store'});
+      if(r.status===409){
+        sessionStorage.removeItem(ADMIN_AUTH_KEY);
+        try{localStorage.removeItem(LOCK_KEY)}catch(_){}
+        window.location.replace('/admin/login?locked=1');
+      }
+    }catch(_){}
+  }
   if(acquire()){
     securityReady=false;
     pollSecurityAlerts();
+    serverHeartbeat();
     setInterval(pollSecurityAlerts,5000);
+    setInterval(serverHeartbeat,5000);
   }
   setInterval(function(){
     if(ownsLock()) localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));
