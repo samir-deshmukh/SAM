@@ -332,7 +332,7 @@ def _send_security_notifications(action: str, username: str | None = None, ip: s
         import smtplib
         from email.message import EmailMessage
         smtp_host = os.getenv('SECURITY_SMTP_HOST', '').strip()
-        smtp_to = os.getenv('SECURITY_ALERT_EMAIL_TO', '').strip()
+        smtp_to = (os.getenv('EMAIL', '').strip() or os.getenv('SECURITY_ALERT_EMAIL_TO', '').strip())
         if smtp_host and smtp_to:
             smtp_port = int(os.getenv('SECURITY_SMTP_PORT', '587'))
             smtp_user = os.getenv('SECURITY_SMTP_USERNAME', '').strip()
@@ -376,7 +376,7 @@ def _send_security_notifications(action: str, username: str | None = None, ip: s
         log.exception('Security WhatsApp notification failed')
 
 def _queue_security_notifications(action: str, username: str | None = None, ip: str | None = None):
-    if any(os.getenv(k, '').strip() for k in ('SECURITY_ALERT_EMAIL_TO','WHATSAPP_ALERT_TO')):
+    if any(os.getenv(k, '').strip() for k in ('EMAIL','SECURITY_ALERT_EMAIL_TO','WHATSAPP_ALERT_TO')):
         threading.Thread(target=_send_security_notifications, args=(action, username, ip), daemon=True).start()
 
 def _record_security_event(action: str, request: Request, username: str|None=None, reason: str|None=None):
@@ -611,7 +611,7 @@ def security_alerts_api(request: Request, after: int = 0):
         latest=c.execute("SELECT COALESCE(MAX(id),0) AS id FROM audit_log").fetchone()['id']
         events=[]
         if after:
-            events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
+            events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_BLOCKED','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
     return {'latest_id':int(latest or 0),'events':events}
 
 @app.post('/admin/api/admin-lock/heartbeat')
