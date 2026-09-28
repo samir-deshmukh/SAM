@@ -35,10 +35,9 @@ async def lifespan(_app):
             log.exception('Database startup maintenance failed')
             return
 
-        # Recover imports that completed extraction/validation but were left in
-        # STAGED by an older worker crash. This is intentionally limited to clean
-        # STAGED jobs; FAILED jobs must not be retried silently.
-        _recover_staged_imports()
+        # STAGED imports must remain pending until an administrator explicitly
+        # approves them in the Review Center. A service restart is not approval.
+        log.info('Startup maintenance will leave STAGED imports pending')
         # Rebuild the derived website-resolver view after every deploy so an
         # admin page visit is never required to make current CAP colleges appear.
         try:
@@ -47,21 +46,6 @@ async def lifespan(_app):
             log.info('Startup resolver sync completed: colleges=%s', resolver_count)
         except Exception:
             log.exception('Startup resolver sync failed')
-
-    def _recover_staged_imports():
-        try:
-            with connect() as c:
-                jobs = c.execute("SELECT id,created_by FROM import_jobs WHERE status='STAGED' ORDER BY id").fetchall()
-            for job in jobs:
-                try:
-                    with connect() as c:
-                        approve_import(c, int(job['id']), int(job['created_by']),
-                                       'Automatic recovery: staged import resumed after service restart')
-                    log.info('Recovered STAGED import: job_id=%s', job['id'])
-                except Exception:
-                    log.exception('Failed to recover STAGED import: job_id=%s', job['id'])
-        except Exception:
-            log.exception('Unable to scan for STAGED import recovery')
 
     threading.Thread(target=_startup_database_maintenance, daemon=True,
                      name='database-startup-maintenance').start()
