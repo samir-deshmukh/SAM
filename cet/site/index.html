@@ -1515,6 +1515,32 @@ body{letter-spacing:-.01em;}
 
 const API_BASE = "https://cetfind-backend.onrender.com";
 
+  /* ── Lightweight first-party usage analytics ──
+     The backend stores only an anonymous session ID plus a small allow-list
+     of product events. No names, emails, IPs, or raw URLs are sent. */
+  const ANALYTICS_SESSION_KEY = "cetfind-analytics-session-v1";
+  let ANALYTICS_SESSION_ID = localStorage.getItem(ANALYTICS_SESSION_KEY);
+  if (!ANALYTICS_SESSION_ID) {
+    ANALYTICS_SESSION_ID = (crypto.randomUUID ? crypto.randomUUID() : ("s-" + Date.now() + "-" + Math.random().toString(36).slice(2)));
+    localStorage.setItem(ANALYTICS_SESSION_KEY, ANALYTICS_SESSION_ID);
+  }
+  function trackEvent(event, data = {}) {
+    try {
+      const allowed = ["city","course","result_count","college","year","source"];
+      const safe = {};
+      allowed.forEach(k => {
+        if (data[k] !== undefined && data[k] !== null) safe[k] = String(data[k]).slice(0, 120);
+      });
+      fetch(API_BASE + "/api/analytics/event", {
+        method: "POST",
+        headers: {"Content-Type":"application/json","Accept":"application/json"},
+        body: JSON.stringify({event, session_id: ANALYTICS_SESSION_ID, data: safe}),
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  }
+  trackEvent("page_view");
+
 const CONFIG = {
 
   /* ── Site title shown in the topbar and browser tab ── */
@@ -2283,6 +2309,7 @@ function toggleCollege(id) {
    Fills the slide with the college's data and opens it. */
 function showDrawer(college) {
   openId = college.id;
+  trackEvent("college_opened", {college: college.name, city: college.city, course: college.course});
 
   /* Fill header */
   drawerBadge.textContent  = college.institution_code;
@@ -2475,8 +2502,38 @@ $("sortChips").addEventListener("click", e => {
 /* ── Search button: blur input, re-render, scroll to results ── */
 $("searchBtn").addEventListener("click", () => {
   pctInput.blur();
+  const searchData = {
+    city: citySelect.value,
+    course: courseSelect.value,
+    source: "search_button"
+  };
+  trackEvent("search_started", searchData);
   renderResults();
+  setTimeout(() => {
+    trackEvent("search_completed", {
+      ...searchData,
+      result_count: resultCount.textContent || "0"
+    });
+  }, 250);
   $("results").scrollIntoView({ behavior: "smooth" });
+});
+
+/* ── Product-usage click tracking for dynamic Slide 2 controls ── */
+document.addEventListener("click", (event) => {
+  const website = event.target.closest(".d-cta");
+  if (website) {
+    trackEvent("college_website_clicked", {
+      source: "college_detail",
+      college: drawerTitle.textContent || ""
+    });
+  }
+  const seat = event.target.closest("#dSeatMatrixBtn");
+  if (seat) {
+    trackEvent("seat_matrix_opened", {
+      source: "college_detail",
+      college: drawerTitle.textContent || ""
+    });
+  }
 });
 
 /* ── applyBranding() ──

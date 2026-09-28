@@ -31,6 +31,19 @@ async def lifespan(_app):
         try:
             init_admin_schema()
             ensure_part4_schema()
+            with connect() as c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS site_analytics_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        event_name TEXT NOT NULL,
+                        event_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_created ON site_analytics_events(created_at)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_event ON site_analytics_events(event_name,created_at)")
+                c.commit()
         except Exception:
             log.exception('Database startup maintenance failed')
             return
@@ -284,6 +297,78 @@ def _security_event_ok(ip: str) -> bool:
     hits.append(now); _SECURITY_EVENT_RATE[ip]=hits
     return True
 
+def _security_notification_text(action: str, username: str | None = None, ip: str | None = None) -> str:
+    labels = {
+        'ADMIN_LOGIN_ATTEMPT': 'Someone attempted to sign in to the CETFind Admin Panel.',
+        'ADMIN_LOGIN_FAILED': 'A failed CETFind Admin Panel login attempt was recorded.',
+        'ADMIN_TAB_RETRY': 'Someone pressed Retry on the CETFind Admin Panel lock screen.',
+        'ADMIN_UNAUTHORIZED': 'An unauthenticated CETFind Admin Panel access attempt was blocked.',
+    }
+    message = labels.get(action, f'CETFind Admin security event: {action}')
+    if username:
+        message += f' Username: {username[:64]}.'
+    if ip:
+        message += f' Source IP: {ip}.'
+    return message
+
+def _send_security_notifications(action: str, username: str | None = None, ip: str | None = None):
+    """Send optional email/WhatsApp alerts using Render environment variables.
+
+    No credentials are stored in Git. Email uses SMTP; WhatsApp uses the
+    official Graph API when the required environment variables are configured.
+    """
+    message = _security_notification_text(action, username, ip)
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        smtp_host = os.getenv('SECURITY_SMTP_HOST', '').strip()
+        smtp_to = os.getenv('SECURITY_ALERT_EMAIL_TO', '').strip()
+        if smtp_host and smtp_to:
+            smtp_port = int(os.getenv('SECURITY_SMTP_PORT', '587'))
+            smtp_user = os.getenv('SECURITY_SMTP_USERNAME', '').strip()
+            smtp_pass = os.getenv('SECURITY_SMTP_PASSWORD', '')
+            smtp_from = os.getenv('SECURITY_ALERT_EMAIL_FROM', smtp_user or smtp_to).strip()
+            msg = EmailMessage()
+            msg['Subject'] = f'CETFind Admin Security Alert: {action}'
+            msg['From'] = smtp_from
+            msg['To'] = smtp_to
+            msg.set_content(message)
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                server.starttls()
+                if smtp_user:
+                    server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+    except Exception:
+        log.exception('Security email notification failed')
+
+    try:
+        import urllib.request
+        token = os.getenv('WHATSAPP_ACCESS_TOKEN', '').strip()
+        phone_id = os.getenv('WHATSAPP_PHONE_NUMBER_ID', '').strip()
+        recipient = os.getenv('WHATSAPP_ALERT_TO', '').strip()
+        version = os.getenv('WHATSAPP_GRAPH_VERSION', 'v23.0').strip()
+        if token and phone_id and recipient:
+            payload = json.dumps({
+                'messaging_product': 'whatsapp',
+                'to': recipient,
+                'type': 'text',
+                'text': {'preview_url': False, 'body': message},
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                f'https://graph.facebook.com/{version}/{phone_id}/messages',
+                data=payload,
+                headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response.read()
+    except Exception:
+        log.exception('Security WhatsApp notification failed')
+
+def _queue_security_notifications(action: str, username: str | None = None, ip: str | None = None):
+    if any(os.getenv(k, '').strip() for k in ('SECURITY_ALERT_EMAIL_TO','WHATSAPP_ALERT_TO')):
+        threading.Thread(target=_send_security_notifications, args=(action, username, ip), daemon=True).start()
+
 def _record_security_event(action: str, request: Request, username: str|None=None, reason: str|None=None):
     ip=client_ip(request)
     if not _security_event_ok(ip): return
@@ -292,6 +377,7 @@ def _record_security_event(action: str, request: Request, username: str|None=Non
             c.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
                       (action,'SECURITY',username[:64] if username else None,None,json.dumps({'ip':ip}),None,reason or 'Admin security event'))
             c.commit()
+        _queue_security_notifications(action, username, ip)
     except Exception:
         log.exception('Could not record admin security event: %s',action)
 
@@ -300,9 +386,6 @@ def require(request, roles=None, csrf=False, csrf_value=None):
     if not current_user:
         if request.url.path.startswith('/admin/') and request.url.path != '/admin/login':
             _record_security_event('ADMIN_UNAUTHORIZED',request,reason='Admin request without a valid authenticated session')
-        # Browser-facing admin pages should go back to the login screen instead
-        # of exposing FastAPI's raw JSON 401 document (which Brave displays as
-        # a "Pretty print" page). Keep API endpoints machine-readable.
         if request.url.path.startswith('/admin/api'):
             raise HTTPException(401, 'Authentication required')
         raise HTTPException(303, 'Authentication required', headers={'Location': '/admin/login'})
@@ -378,6 +461,7 @@ def login_post(
                 ('ADMIN_LOGIN_FAILED','SECURITY',username[:64],None,json.dumps({'ip':ip,'username':username[:64]}),'Invalid admin credentials'),
             )
             connection.commit()
+            _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
         # A successful login starts a fresh authentication session. Bumping
@@ -418,6 +502,65 @@ async def security_event_api(request: Request):
     _check_csrf(request)
     _record_security_event(action,request,reason='Admin access attempt detected')
     return {'ok':True}
+
+@app.post('/api/analytics/event')
+async def analytics_event(request: Request):
+    """Record anonymous product-usage events for CETFind analytics."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, 'Invalid analytics payload')
+    event_name = str(body.get('event','')).strip().lower()[:80]
+    session_id = re.sub(r'[^a-zA-Z0-9_-]', '', str(body.get('session_id','')))[:80]
+    data = body.get('data') if isinstance(body.get('data'), dict) else {}
+    allowed = {
+        'page_view','search_started','search_completed','college_opened',
+        'college_website_clicked','seat_matrix_opened','trend_opened'
+    }
+    if event_name not in allowed or not session_id:
+        raise HTTPException(400, 'Invalid analytics event')
+    # Keep analytics aggregate and avoid storing raw URLs, IP addresses, or form text.
+    safe = {}
+    for key in ('city','course','result_count','college','year','source'):
+        value = data.get(key)
+        if isinstance(value, (str,int,float)):
+            safe[key] = str(value)[:120]
+    with connect() as c:
+        c.execute('INSERT INTO site_analytics_events(session_id,event_name,event_data) VALUES (?,?,?)',
+                  (session_id,event_name,json.dumps(safe)))
+        c.commit()
+    return {'ok': True}
+
+@app.get('/admin/api/analytics/summary')
+def analytics_summary(request: Request, days: int = 30):
+    require(request)
+    days = max(1, min(int(days or 30), 90))
+    with connect() as c:
+        totals = c.execute("""
+            SELECT COUNT(*) AS events,
+                   COUNT(DISTINCT session_id) AS visitors,
+                   COUNT(DISTINCT CASE WHEN event_name='search_started' THEN session_id END) AS searchers,
+                   COUNT(*) FILTER (WHERE event_name='search_started') AS searches,
+                   COUNT(*) FILTER (WHERE event_name='college_opened') AS college_opens,
+                   COUNT(*) FILTER (WHERE event_name='college_website_clicked') AS website_clicks
+            FROM site_analytics_events
+            WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        """, (days,)).fetchone()
+        events = [dict(r) for r in c.execute("""
+            SELECT event_name, COUNT(*) AS count
+            FROM site_analytics_events
+            WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            GROUP BY event_name ORDER BY count DESC
+        """, (days,))]
+        searches = [dict(r) for r in c.execute("""
+            SELECT event_data->>'city' AS city, event_data->>'course' AS course, COUNT(*) AS count
+            FROM site_analytics_events
+            WHERE event_name='search_started'
+              AND created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+            GROUP BY event_data->>'city', event_data->>'course'
+            ORDER BY count DESC LIMIT 20
+        """, (days,))]
+    return {'days': days, 'totals': dict(totals), 'events': events, 'search_breakdown': searches}
 
 @app.get('/admin/api/security-alerts')
 def security_alerts_api(request: Request, after: int = 0):
