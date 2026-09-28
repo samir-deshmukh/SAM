@@ -432,6 +432,21 @@ def admin_lock_acquire(request: Request):
     return {'ok': True}
 
 
+@app.post('/admin/api/admin-lock/release')
+def admin_lock_release(request: Request):
+    current = require(request, csrf=True, check_tab=False)
+    client_id = _admin_tab_id(request)
+    if not client_id:
+        raise HTTPException(409, 'Admin tab identity missing')
+    with connect() as connection:
+        connection.execute(
+            'DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?',
+            (current['uid'], client_id),
+        )
+        connection.commit()
+    return {'ok': True}
+
+
 @app.post('/admin/api/admin-lock/heartbeat')
 def admin_lock_heartbeat(request: Request):
     current = require(request, csrf=True, check_tab=False)

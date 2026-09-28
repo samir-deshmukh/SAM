@@ -81,8 +81,16 @@ window.__cetAdminTabReady=false;
     }catch(_){showBlocked();}
   },5000);
   window.addEventListener('storage',function(e){if(e.key===LOCK_KEY&&e.newValue){const x=readLock();if(x&&x.id!==tabId)showBlocked();}});
-  // Do not release on unload: internal navigation and mobile tab suspension are ambiguous.
-  // Explicit logout releases the server lease; crashes recover after the 45-second expiry.
+  // Release promptly when the page is leaving; the server TTL remains the crash/offline fallback.
+  window.addEventListener('pagehide',function(){
+    try{
+      const x=readLock();
+      if(x&&x.id===tabId)localStorage.removeItem(LOCK_KEY);
+    }catch(_){}
+    try{
+      fetch('/admin/api/admin-lock/release',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store',keepalive:true});
+    }catch(_){}
+  });
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):'','X-Admin-Client-ID':sessionStorage.getItem('cet-cap-admin-tab-id-v1')||''},extra)};
