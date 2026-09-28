@@ -11,7 +11,7 @@
 ## Request provenance and rate limiting
 - Rate-limit keys use the direct peer address unless CET_TRUSTED_PROXY_IPS explicitly lists trusted reverse-proxy IPs/CIDRs.
 - For configured trusted proxies, the helper uses the rightmost valid X-Forwarded-For address, assuming the trusted proxy appends the observed client IP. Never trust arbitrary client-supplied forwarding headers.
-- In-process limits are per worker/instance; multi-instance deployments need a shared rate-limit store.
+- Public API and login in-process limits prune expired entries and cap key counts to bound memory under high-cardinality traffic. Eviction may weaken throttling for an evicted key; these limits remain per worker/instance, and multi-instance deployments need a shared rate-limit store.
 
 ## API documentation
 - FastAPI Swagger, ReDoc, and OpenAPI routes are disabled.

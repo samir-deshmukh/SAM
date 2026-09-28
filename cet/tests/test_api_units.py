@@ -36,6 +36,31 @@ def test_rate_limit_blocks_after_configured_threshold(monkeypatch):
     api._request_history.clear()
 
 
+def test_public_rate_limiter_bounds_high_cardinality_keys(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(api, "client_ip", lambda request: request.scope["client"][0])
+    monkeypatch.setattr(api, "_request_history", {"first": [100.0], "second": [100.0]})
+    monkeypatch.setattr(api, "RATE_LIMIT_MAX_KEYS", 2)
+
+    api.check_rate_limit(request_for("third"))
+
+    assert len(api._request_history) <= 2
+    assert "third" in api._request_history
+
+
+def test_public_rate_limiter_expires_old_keys(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(api, "client_ip", lambda request: request.scope["client"][0])
+    monkeypatch.setattr(api, "_request_history", {"old": [1.0]})
+    monkeypatch.setattr(api, "RATE_LIMIT_MAX_KEYS", 1)
+
+    api.check_rate_limit(request_for("new"))
+
+    assert api._request_history == {"new": [100.0]}
+
+
 def test_db_available_reports_connection_failure():
     class BrokenEngine:
         def connect(self):
