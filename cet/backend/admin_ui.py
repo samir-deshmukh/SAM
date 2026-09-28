@@ -125,13 +125,28 @@ window.__cetAdminTabReady=false;
     setInterval(pollSecurityAlerts,5000);
     setInterval(serverHeartbeat,5000);
   }
+  // Internal admin navigation keeps the same tab identity. Do not release
+  // the server lock during that navigation, otherwise the next admin page can
+  // race the keepalive release and briefly lock itself out.
+  let internalNavigation=false;
+  document.addEventListener('click',function(event){
+    const link=event.target.closest('a[href]');
+    if(!link)return;
+    const href=link.getAttribute('href')||'';
+    if(href.startsWith('/admin') && !link.target && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey){
+      internalNavigation=true;
+    }
+  },true);
   window.addEventListener('pagehide',function(){
-    // pagehide is used instead of beforeunload. keepalive lets the POST
+    if(internalNavigation)return;
+    // Actual tab/window exit: release immediately. keepalive lets the request
     // continue while the document is being unloaded.
     releaseServerLock();
   });
-  window.addEventListener('pageshow',function(){
-    if(document.visibilityState==='visible') acquireServerLock();
+  window.addEventListener('pageshow',function(event){
+    // Only reacquire for a bfcache restore. A normal page load already calls
+    // bootAdminLock(), so doing it here would create a redundant request.
+    if(event.persisted) acquireServerLock();
   });
   window.__cetAdminBootLock=bootAdminLock;
 })();
