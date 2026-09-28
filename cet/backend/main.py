@@ -271,9 +271,35 @@ def user(request):
         return None
 
 
+_SECURITY_EVENT_RATE: dict[str, list[float]] = {}
+_SECURITY_EVENT_WINDOW = 60.0
+_SECURITY_EVENT_LIMIT = 12
+
+def _security_event_ok(ip: str) -> bool:
+    now=time.monotonic()
+    hits=[t for t in _SECURITY_EVENT_RATE.get(ip,[]) if now-t<_SECURITY_EVENT_WINDOW]
+    if len(hits)>=_SECURITY_EVENT_LIMIT:
+        _SECURITY_EVENT_RATE[ip]=hits
+        return False
+    hits.append(now); _SECURITY_EVENT_RATE[ip]=hits
+    return True
+
+def _record_security_event(action: str, request: Request, username: str|None=None, reason: str|None=None):
+    ip=client_ip(request)
+    if not _security_event_ok(ip): return
+    try:
+        with connect() as c:
+            c.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
+                      (action,'SECURITY',username[:64] if username else None,None,json.dumps({'ip':ip}),None,reason or 'Admin security event'))
+            c.commit()
+    except Exception:
+        log.exception('Could not record admin security event: %s',action)
+
 def require(request, roles=None, csrf=False, csrf_value=None):
     current_user = user(request)
     if not current_user:
+        if request.url.path.startswith('/admin/') and request.url.path != '/admin/login':
+            _record_security_event('ADMIN_UNAUTHORIZED',request,reason='Admin request without a valid authenticated session')
         # Browser-facing admin pages should go back to the login screen instead
         # of exposing FastAPI's raw JSON 401 document (which Brave displays as
         # a "Pretty print" page). Keep API endpoints machine-readable.
@@ -301,6 +327,7 @@ def login(request: Request):
         "const f=document.querySelector('form');"
         "f.addEventListener('submit',async e=>{"
         "e.preventDefault();"
+        "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
         "const b=f.querySelector('button');"
         "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
         "if(lock && Date.now()-Number(lock.ts||0)<60000){"
@@ -375,6 +402,33 @@ def login_post(
     _set_csrf(resp, _csrf_value(request))
     return resp
 
+
+@app.post('/admin/api/security-event')
+async def security_event_api(request: Request):
+    # Used by the login/lock screens to create a small, rate-limited security audit trail.
+    # No passwords or user-entered credentials are stored.
+    action=''
+    try:
+        body=await request.json()
+        action=str(body.get('action','')).strip().upper()
+    except Exception:
+        raise HTTPException(400,'Invalid security event payload')
+    if action not in {'ADMIN_LOGIN_ATTEMPT','ADMIN_TAB_RETRY'}:
+        raise HTTPException(400,'Unsupported security event')
+    _check_csrf(request)
+    _record_security_event(action,request,reason='Admin access attempt detected')
+    return {'ok':True}
+
+@app.get('/admin/api/security-alerts')
+def security_alerts_api(request: Request, after: int = 0):
+    require(request)
+    after=max(0,int(after or 0))
+    with connect() as c:
+        latest=c.execute("SELECT COALESCE(MAX(id),0) AS id FROM audit_log").fetchone()['id']
+        events=[]
+        if after:
+            events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
+    return {'latest_id':int(latest or 0),'events':events}
 
 @app.post('/admin/logout')
 def logout(request: Request):

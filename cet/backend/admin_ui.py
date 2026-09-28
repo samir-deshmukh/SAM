@@ -92,8 +92,34 @@ window.__cetAdminTabReady=false;
     window.__cetAdminTabReady=true;
     return true;
   }
-  window.__cetAdminTabRetry=acquire;
-  if(acquire()) setInterval(function(){
+  async function securityAlert(action){
+    try{
+      const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);
+      if(!m)return;
+      await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action})});
+    }catch(_){ }
+  }
+  function notifyOtherAdmin(action){
+    const labels={ADMIN_LOGIN_ATTEMPT:'Security alert: someone attempted to sign in to the Admin Panel.',ADMIN_LOGIN_FAILED:'Security alert: a failed Admin Panel login attempt was recorded.',ADMIN_TAB_RETRY:'Security alert: someone pressed Retry on the Admin Panel lock screen.',ADMIN_UNAUTHORIZED:'Security alert: an unauthenticated Admin Panel access attempt was blocked.'};
+    toast(labels[action]||'Security alert: an admin access attempt was detected.','err');
+  }
+  let securityAfter=0,securityReady=false;
+  async function pollSecurityAlerts(){
+    try{
+      const r=await fetch('/admin/api/security-alerts?after='+securityAfter,{cache:'no-store'});
+      if(!r.ok)return;
+      const d=await r.json();
+      if(!securityReady){securityAfter=Number(d.latest_id||securityAfter);securityReady=true;return;}
+      for(const x of (d.events||[])){securityAfter=Math.max(securityAfter,Number(x.id)||0);notifyOtherAdmin(x.action)}
+    }catch(_){ }
+  }
+  window.__cetAdminTabRetry=function(){securityAlert('ADMIN_TAB_RETRY');return acquire()};
+  if(acquire()){
+    securityReady=false;
+    pollSecurityAlerts();
+    setInterval(pollSecurityAlerts,5000);
+  }
+  setInterval(function(){
     if(ownsLock()) localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));
     else showBlocked();
   },5000);
