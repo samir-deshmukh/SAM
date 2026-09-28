@@ -486,7 +486,7 @@ def login_post(
         # inside one browser and could never protect across browsers.
         client_id = request.cookies.get('cet_admin_client_id') or secrets.token_urlsafe(24)
         active = connection.execute(
-            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'",
+            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
             (row['id'],),
         ).fetchone()
         if active and active['client_id'] != client_id:
@@ -622,13 +622,13 @@ def admin_lock_heartbeat(request: Request):
         raise HTTPException(409, 'Admin browser identity missing')
     with connect() as c:
         row = c.execute(
-            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'",
-            (current['id'],),
+            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
+            (current['uid'],),
         ).fetchone()
         if not row or row['client_id'] != client_id:
             raise HTTPException(409, 'Admin panel is active in another browser')
         c.execute("UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=?",
-                  (current['id'], client_id))
+                  (current['uid'], client_id))
         c.commit()
     return {'ok': True}
 
@@ -638,7 +638,7 @@ def admin_lock_release(request: Request):
     client_id = request.cookies.get('cet_admin_client_id')
     if client_id:
         with connect() as c:
-            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['id'], client_id))
+            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
             c.commit()
     return {'ok': True}
 
@@ -648,7 +648,7 @@ def logout(request: Request):
     client_id = request.cookies.get('cet_admin_client_id')
     if client_id:
         with connect() as c:
-            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['id'], client_id))
+            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
             c.commit()
     resp = RedirectResponse('/admin/login', 303)
     resp.delete_cookie(_SESSION_COOKIE, path='/admin')
