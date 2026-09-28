@@ -491,15 +491,20 @@ def login_post(
             _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
-        # The lock owner is the tab identity sent by the page, not the shared
-        # HttpOnly browser cookie. This keeps a second tab from taking over
-        # the first tab's session and keeps refreshes stable.
+        # Atomically acquire the global admin lock. A different client may
+        # take it only when the previous lease is older than 30 seconds.
         client_id = _admin_client_id(request) or secrets.token_urlsafe(24)
-        active = connection.execute(
-            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
-            (row['id'],),
+        lock_row = connection.execute(
+            """INSERT INTO admin_active_lock(user_id,client_id,updated_at)
+               VALUES (?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT (user_id) DO UPDATE
+               SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP
+               WHERE admin_active_lock.client_id=EXCLUDED.client_id
+                  OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+               RETURNING client_id""",
+            (row['id'], client_id),
         ).fetchone()
-        if active and active['client_id'] != client_id:
+        if not lock_row:
             connection.execute(
                 "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
                 ('ADMIN_LOGIN_BLOCKED','SECURITY',username[:64],None,json.dumps({'ip':ip}),'Another browser already owns the admin panel'),
@@ -507,11 +512,6 @@ def login_post(
             connection.commit()
             _queue_security_notifications('ADMIN_LOGIN_ATTEMPT', username[:64], ip)
             return RedirectResponse('/admin/login?locked=1', 303)
-        connection.execute(
-            """INSERT INTO admin_active_lock(user_id,client_id,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
-               ON CONFLICT (user_id) DO UPDATE SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP""",
-            (row['id'], client_id),
-        )
         # A successful login starts a fresh authentication session.
         connection.execute(
             'UPDATE admin_users SET last_login_at=CURRENT_TIMESTAMP, auth_version=auth_version+1 WHERE id=?',
@@ -624,6 +624,29 @@ def security_alerts_api(request: Request, after: int = 0):
             events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_BLOCKED','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
     return {'latest_id':int(latest or 0),'events':events}
 
+@app.post('/admin/api/admin-lock/acquire')
+def admin_lock_acquire(request: Request):
+    current = require(request, csrf=True)
+    client_id = _admin_client_id(request)
+    if not client_id:
+        raise HTTPException(409, 'Admin tab identity missing')
+    with connect() as c:
+        row = c.execute(
+            """INSERT INTO admin_active_lock(user_id,client_id,updated_at)
+               VALUES (?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT (user_id) DO UPDATE
+               SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP
+               WHERE admin_active_lock.client_id=EXCLUDED.client_id
+                  OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+               RETURNING client_id""",
+            (current['uid'], client_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(409, 'Admin panel is active in another browser')
+        c.commit()
+    return {'ok': True}
+
+
 @app.post('/admin/api/admin-lock/heartbeat')
 def admin_lock_heartbeat(request: Request):
     current = require(request, csrf=True)
@@ -632,7 +655,7 @@ def admin_lock_heartbeat(request: Request):
         raise HTTPException(409, 'Admin tab identity missing')
     with connect() as c:
         row = c.execute(
-            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '120 seconds'",
+            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'",
             (current['uid'],),
         ).fetchone()
         if not row or row['client_id'] != client_id:
