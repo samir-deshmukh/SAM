@@ -178,10 +178,14 @@ window.__cetAdminTabReady=false;
     if(event.persisted) acquireServerLock();
   });
   window.__cetAdminBootLock=bootAdminLock;
+  // Every page-specific API call must wait for the lock handshake. Calling
+  // bootAdminLock() without awaiting it used to leave __cetAdminTabReady=false
+  // for the first network tick, so every admin page could immediately report
+  // a false "already open" error while the real lock request was still pending.
+  window.__cetAdminReadyPromise=bootAdminLock();
 })();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):''},extra)};
-if(window.__cetAdminBootLock) window.__cetAdminBootLock();
 async function cetAdminClose(){
   if(!confirm('Close the admin panel? Choose OK to log out and close this session.')) return;
   try{ await fetch('/admin/logout',{method:'POST',headers:csrfHeaders()}); }catch(_){ }
@@ -189,7 +193,7 @@ async function cetAdminClose(){
   window.location='/admin/login';
 }
 function toast(msg,type=''){const d=document.createElement('div');d.className='toast '+type;d.textContent=msg;document.querySelector('#toastbox').appendChild(d);setTimeout(()=>d.remove(),3500)}
-async function api(url,opts={}){if(!window.__cetAdminTabReady)throw new Error('Admin panel is already open in another tab.');const r=await fetch(url,opts);const raw=await r.text();let data=raw;try{data=raw?JSON.parse(raw):null}catch{}if(r.status===401){window.location='/admin/login';throw new Error('Admin session expired. Please sign in again.')}if(!r.ok)throw new Error(typeof data==='string'?data:(data?.detail||'Request failed'));return data}
+async function api(url,opts={}){const ready=window.__cetAdminReadyPromise?await window.__cetAdminReadyPromise:window.__cetAdminTabReady;if(!ready)throw new Error('Admin panel is already open in another tab.');const r=await fetch(url,opts);const raw=await r.text();let data=raw;try{data=raw?JSON.parse(raw):null}catch{}if(r.status===401){window.location='/admin/login';throw new Error('Admin session expired. Please sign in again.')}if(!r.ok)throw new Error(typeof data==='string'?data:(data?.detail||'Request failed'));return data}
 function fmtTime(v){if(!v)return '—';const d=new Date(String(v).replace(' ','T')+'Z');if(Number.isNaN(d.getTime()))return esc(v);return d.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}
 function badge(s){const x=String(s||'').toUpperCase(),c=x.includes('REVIEW')?'red':x.includes('FAIL')||x.includes('QUARANT')?'red':x.includes('PUBLISH')||x.includes('COMPLETE')||x.includes('VALID')?'green':x.includes('STAGED')||x.includes('COMMIT')?'purple':x.includes('RECEIVED')||x.includes('EXTRACT')||x.includes('NORMAL')?'blue':x.includes('WARN')?'amber':'gray';const loading=['RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING'].includes(x);const label=x==='COMMITTING'?'COMMITTED • READY TO PUBLISH':x==='CANDIDATE'?'UNVERIFIED':x.replaceAll('_',' ');return `<span class="status ${c}${loading?' loading':''}">${esc(label)}</span>`}
 function countUp(el,to){const n=Number(to)||0,from=Number(el.dataset.value||0),start=performance.now(),dur=450;function tick(t){const p=Math.min(1,(t-start)/dur),e=1-Math.pow(1-p,3);el.textContent=Math.round(from+(n-from)*e).toLocaleString();if(p<1)requestAnimationFrame(tick)}el.dataset.value=n;requestAnimationFrame(tick)}

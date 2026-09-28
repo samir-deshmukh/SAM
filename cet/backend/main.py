@@ -393,9 +393,15 @@ def _record_security_event(action: str, request: Request, username: str|None=Non
     ip=client_ip(request)
     if not _security_event_ok(ip): return
     try:
+        client_id=_admin_client_id(request)
+        payload={'ip':ip}
+        if username:
+            payload['username']=username[:64]
+        if client_id:
+            payload['client_id']=client_id
         with connect() as c:
             c.execute("INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (NULL,?,?,?,?,?,?)",
-                      (action,'SECURITY',username[:64] if username else None,None,json.dumps({'ip':ip}),None,reason or 'Admin security event'))
+                      (action,'SECURITY',None,json.dumps(payload),None,reason or 'Admin security event'))
             c.commit()
         _queue_security_notifications(action, username, ip)
     except Exception:
@@ -404,7 +410,15 @@ def _record_security_event(action: str, request: Request, username: str|None=Non
 def require(request, roles=None, csrf=False, csrf_value=None):
     current_user = user(request)
     if not current_user:
-        if request.url.path.startswith('/admin/') and request.url.path != '/admin/login':
+        # Lock heartbeats/acquire/release and the alert cursor are control-plane
+        # requests. A transient auth race during document navigation must not
+        # be classified as a hostile access attempt or create a notification
+        # that the very next admin page will display.
+        control_plane = (
+            request.url.path.startswith('/admin/api/admin-lock/')
+            or request.url.path == '/admin/api/security-alerts'
+        )
+        if request.url.path.startswith('/admin/') and request.url.path != '/admin/login' and not control_plane:
             _record_security_event('ADMIN_UNAUTHORIZED',request,reason='Admin request without a valid authenticated session')
         if request.url.path.startswith('/admin/api'):
             raise HTTPException(401, 'Authentication required')
@@ -440,9 +454,6 @@ def login(request: Request):
         "e.preventDefault();"
         "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
         "const b=f.querySelector('button');"
-        "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
-        "if(lock && Date.now()-Number(lock.ts||0)<12000){"
-        "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
         "b.disabled=true;b.textContent='Signing in…';"
         "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
@@ -619,11 +630,28 @@ def analytics_summary(request: Request, days: int = 30):
 def security_alerts_api(request: Request, after: int = 0):
     require(request)
     after=max(0,int(after or 0))
+    current_client=_admin_client_id(request)
+    relevant="('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_BLOCKED','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED')"
     with connect() as c:
-        latest=c.execute("SELECT COALESCE(MAX(id),0) AS id FROM audit_log").fetchone()['id']
+        latest=c.execute(
+            f"SELECT COALESCE(MAX(id),0) AS id FROM audit_log WHERE action IN {relevant}"
+        ).fetchone()['id']
         events=[]
         if after:
-            events=[dict(r) for r in c.execute("SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN ('ADMIN_LOGIN_ATTEMPT','ADMIN_LOGIN_BLOCKED','ADMIN_LOGIN_FAILED','ADMIN_TAB_RETRY','ADMIN_UNAUTHORIZED') ORDER BY id ASC LIMIT 20",(after,))]
+            if current_client:
+                events=[dict(r) for r in c.execute(
+                    f"""SELECT id,action,created_at
+                        FROM audit_log
+                        WHERE id>? AND action IN {relevant}
+                          AND COALESCE(after_json->>'client_id','') <> ?
+                        ORDER BY id ASC LIMIT 20""",
+                    (after,current_client)
+                )]
+            else:
+                events=[dict(r) for r in c.execute(
+                    f"SELECT id,action,created_at FROM audit_log WHERE id>? AND action IN {relevant} ORDER BY id ASC LIMIT 20",
+                    (after,)
+                )]
     return {'latest_id':int(latest or 0),'events':events}
 
 @app.post('/admin/api/admin-lock/acquire')
