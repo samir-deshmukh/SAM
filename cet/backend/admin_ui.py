@@ -84,10 +84,9 @@ window.__cetAdminTabReady=false;
       await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'X-Admin-Client-ID':tabId,'Content-Type':'application/json'},body:JSON.stringify({action})});
     }catch(_){ }
   }
-  function notifyOtherAdmin(action){
-    const labels={ADMIN_LOGIN_ATTEMPT:'Security alert: someone attempted to sign in to the Admin Panel.',ADMIN_LOGIN_BLOCKED:'Security alert: another admin login was blocked because this Admin Panel is already active.',ADMIN_LOGIN_FAILED:'Security alert: a failed Admin Panel login attempt was recorded.',ADMIN_TAB_RETRY:'Security alert: someone pressed Retry on the Admin Panel lock screen.',ADMIN_UNAUTHORIZED:'Security alert: an unauthenticated Admin Panel access attempt was blocked.'};
-    toast(labels[action]||'Security alert: an admin access attempt was detected.','err');
-  }
+  // Security events are delivered by email only. Do not surface them inside
+  // the admin panel, because the panel itself is the protected workspace.
+  function notifyOtherAdmin(action){ return; }
   // Keep the security-alert cursor for this browser tab. A normal admin
   // navigation creates a new document, so an in-memory cursor would reset to
   // zero and replay old security events as fresh alerts on every page.
