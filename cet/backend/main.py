@@ -440,9 +440,7 @@ def login(request: Request):
         "e.preventDefault();"
         "try{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);if(m)fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'Content-Type':'application/json'},body:JSON.stringify({action:'ADMIN_LOGIN_ATTEMPT'})});}catch(_){}"
         "const b=f.querySelector('button');"
-        "let lock=null;try{lock=JSON.parse(localStorage.getItem('cet-cap-admin-active-tab-v1')||'null')}catch(_){}"
-        "if(lock && Date.now()-Number(lock.ts||0)<12000){"
-        "alert('Admin panel is already open in another tab. Close the other admin tab, then sign in here.');return;}"
+
         "b.disabled=true;b.textContent='Signing in…';"
         "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
