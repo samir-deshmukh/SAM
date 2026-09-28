@@ -59,6 +59,14 @@ window.__cetAdminTabReady=false;
     tabId=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
     sessionStorage.setItem(TAB_KEY,tabId);
   }
+  // A fresh document gets a fresh lock token. This makes an old page's
+  // delayed pagehide/release or heartbeat harmless after navigation: it can
+  // only affect the exact lock generation it originally acquired.
+  const LOCK_TOKEN_KEY='cet-cap-admin-lock-token-v1';
+  let lockToken=crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);
+  function lockHeaders(){
+    return Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId,'X-Admin-Lock-Token':lockToken});
+  }
   function showBlocked(){
     window.__cetAdminTabReady=false;
     body.classList.add('admin-locked');
@@ -108,7 +116,7 @@ window.__cetAdminTabReady=false;
   }
   async function acquireServerLock(){
     try{
-      const r=await fetch('/admin/api/admin-lock/acquire',{method:'POST',headers:Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId}),cache:'no-store'});
+      const r=await fetch('/admin/api/admin-lock/acquire',{method:'POST',headers:lockHeaders(),cache:'no-store'});
       if(r.ok){showReady();return true;}
       if(r.status===409){showBlocked();return false;}
     }catch(_){ }
@@ -120,7 +128,7 @@ window.__cetAdminTabReady=false;
   window.__cetAdminTabRetry=function(){securityAlert('ADMIN_TAB_RETRY');return acquireServerLock()};
   async function serverHeartbeat(){
     try{
-      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId}),cache:'no-store'});
+      const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:lockHeaders(),cache:'no-store'});
       if(r.status===409){
         sessionStorage.removeItem(ADMIN_AUTH_KEY);
         showBlocked();
@@ -129,13 +137,12 @@ window.__cetAdminTabReady=false;
   }
   async function releaseServerLock(){
     try{
-      await fetch('/admin/api/admin-lock/release',{method:'POST',headers:Object.assign(csrfHeaders(),{'X-Admin-Client-ID':tabId}),cache:'no-store',keepalive:true});
+      await fetch('/admin/api/admin-lock/release',{method:'POST',headers:lockHeaders(),cache:'no-store',keepalive:true});
     }catch(_){ }
   }
   async function bootAdminLock(){
     const acquired=await acquireServerLock();
     if(!acquired)return;
-    securityReady=false;
     pollSecurityAlerts();
     serverHeartbeat();
     setInterval(pollSecurityAlerts,5000);
@@ -153,7 +160,13 @@ window.__cetAdminTabReady=false;
       internalNavigation=true;
     }
   },true);
-  window.addEventListener('pagehide',function(){
+  // pageswap is emitted for a cross-document navigation before the old
+  // document is unloaded. It catches browser Back/Forward and programmatic
+  // navigations that do not pass through our click handler.
+  window.addEventListener('pageswap',function(){
+    internalNavigation=true;
+  });
+  window.addEventListener('pagehide',function(event){
     if(internalNavigation)return;
     // Actual tab/window exit: release immediately. keepalive lets the request
     // continue while the document is being unloaded.

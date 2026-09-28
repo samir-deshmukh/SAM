@@ -36,9 +36,11 @@ async def lifespan(_app):
                     CREATE TABLE IF NOT EXISTS admin_active_lock (
                         user_id BIGINT PRIMARY KEY,
                         client_id TEXT NOT NULL,
+                        lock_token TEXT NOT NULL DEFAULT '',
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                c.execute("ALTER TABLE admin_active_lock ADD COLUMN IF NOT EXISTS lock_token TEXT NOT NULL DEFAULT ''")
                 c.commit()
             with connect() as c:
                 c.execute("""
@@ -495,14 +497,14 @@ def login_post(
         # take it only when the previous lease is older than 30 seconds.
         client_id = _admin_client_id(request) or secrets.token_urlsafe(24)
         lock_row = connection.execute(
-            """INSERT INTO admin_active_lock(user_id,client_id,updated_at)
-               VALUES (?,?,CURRENT_TIMESTAMP)
+            """INSERT INTO admin_active_lock(user_id,client_id,lock_token,updated_at)
+               VALUES (?,?,?,CURRENT_TIMESTAMP)
                ON CONFLICT (user_id) DO UPDATE
-               SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP
+               SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
                WHERE admin_active_lock.client_id=EXCLUDED.client_id
                   OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
                RETURNING client_id""",
-            (row['id'], client_id),
+            (row['id'], client_id, secrets.token_urlsafe(24)),
         ).fetchone()
         if not lock_row:
             connection.execute(
@@ -630,48 +632,54 @@ def admin_lock_acquire(request: Request):
     client_id = _admin_client_id(request)
     if not client_id:
         raise HTTPException(409, 'Admin tab identity missing')
+    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
+    if not lock_token or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', lock_token):
+        raise HTTPException(409, 'Admin lock generation missing')
     with connect() as c:
         row = c.execute(
-            """INSERT INTO admin_active_lock(user_id,client_id,updated_at)
-               VALUES (?,?,CURRENT_TIMESTAMP)
+            """INSERT INTO admin_active_lock(user_id,client_id,lock_token,updated_at)
+               VALUES (?,?,?,CURRENT_TIMESTAMP)
                ON CONFLICT (user_id) DO UPDATE
-               SET client_id=EXCLUDED.client_id, updated_at=CURRENT_TIMESTAMP
+               SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
                WHERE admin_active_lock.client_id=EXCLUDED.client_id
                   OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
-               RETURNING client_id""",
-            (current['uid'], client_id),
+               RETURNING client_id,lock_token""",
+            (current['uid'], client_id, lock_token),
         ).fetchone()
         if not row:
             raise HTTPException(409, 'Admin panel is active in another browser')
         c.commit()
-    return {'ok': True}
+    return {'ok': True, 'lock_token': lock_token}
 
 
 @app.post('/admin/api/admin-lock/heartbeat')
 def admin_lock_heartbeat(request: Request):
     current = require(request, csrf=True)
     client_id = _admin_client_id(request)
-    if not client_id:
+    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
+    if not client_id or not lock_token:
         raise HTTPException(409, 'Admin tab identity missing')
     with connect() as c:
         row = c.execute(
-            "SELECT client_id FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'",
+            "SELECT client_id,lock_token FROM admin_active_lock WHERE user_id=? AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'",
             (current['uid'],),
         ).fetchone()
-        if not row or row['client_id'] != client_id:
+        if not row or row['client_id'] != client_id or row['lock_token'] != lock_token:
             raise HTTPException(409, 'Admin panel is active in another browser')
-        c.execute("UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=?",
-                  (current['uid'], client_id))
+        c.execute("UPDATE admin_active_lock SET updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND client_id=? AND lock_token=?",
+                  (current['uid'], client_id, lock_token))
         c.commit()
     return {'ok': True}
+
 
 @app.post('/admin/api/admin-lock/release')
 def admin_lock_release(request: Request):
     current = require(request, csrf=True)
     client_id = _admin_client_id(request)
-    if client_id:
+    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
+    if client_id and lock_token:
         with connect() as c:
-            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
+            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=? AND lock_token=?", (current['uid'], client_id, lock_token))
             c.commit()
     return {'ok': True}
 
@@ -679,9 +687,13 @@ def admin_lock_release(request: Request):
 def logout(request: Request):
     current = require(request, csrf=True)
     client_id = _admin_client_id(request)
+    lock_token = (request.headers.get('x-admin-lock-token') or '').strip()
     if client_id:
         with connect() as c:
-            c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
+            if lock_token:
+                c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=? AND lock_token=?", (current['uid'], client_id, lock_token))
+            else:
+                c.execute("DELETE FROM admin_active_lock WHERE user_id=? AND client_id=?", (current['uid'], client_id))
             c.commit()
     resp = RedirectResponse('/admin/login', 303)
     resp.delete_cookie(_SESSION_COOKIE, path='/admin')
