@@ -491,16 +491,15 @@ def login_post(
             _queue_security_notifications('ADMIN_LOGIN_FAILED', username[:64], ip)
             return RedirectResponse('/admin/login?error=1', 303)
 
-        # Atomically acquire the global admin lock. A different client may
-        # take it only when the previous lease is older than 30 seconds.
+        # Valid credentials may reclaim the admin lock from a stale tab or
+        # another browser. Incrementing auth_version below invalidates the
+        # previous authenticated session, so only this fresh login remains valid.
         client_id = _admin_client_id(request) or secrets.token_urlsafe(24)
         lock_row = connection.execute(
             """INSERT INTO admin_active_lock(user_id,client_id,lock_token,updated_at)
                VALUES (?,?,?,CURRENT_TIMESTAMP)
                ON CONFLICT (user_id) DO UPDATE
                SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
-               WHERE admin_active_lock.client_id=EXCLUDED.client_id
-                  OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
                RETURNING client_id""",
             (row['id'], client_id, secrets.token_urlsafe(24)),
         ).fetchone()
