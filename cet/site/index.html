@@ -1139,6 +1139,15 @@ body{letter-spacing:-.01em;}
 
 .feedback-launch{position:fixed;right:24px;bottom:24px;z-index:1200;display:inline-flex;align-items:center;gap:10px;margin:0;padding:13px 18px;border:1px solid rgba(255,255,255,.28);background:var(--ink-900);color:var(--paper-50);border-radius:8px;font:700 .72rem Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.2s ease;box-shadow:0 10px 30px rgba(0,0,0,.22)}.feedback-launch:hover{background:var(--paper-50);color:var(--ink-900)}@media (max-width:640px){.feedback-launch{right:16px;bottom:16px;padding:12px 15px;font-size:.68rem}}
 .feedback-modal{position:fixed;inset:0;z-index:3000;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(11,11,15,.58);backdrop-filter:blur(5px)}.feedback-modal.open{display:flex}.feedback-card{width:min(560px,100%);background:var(--paper-50);border:1px solid var(--paper-300);border-radius:12px;padding:28px;box-shadow:0 24px 70px rgba(0,0,0,.2)}.feedback-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.feedback-card h2{font-family:Fraunces,serif;font-size:32px;margin:0 0 6px}.feedback-card p{margin:0;color:var(--paper-600);line-height:1.5}.feedback-close{border:1px solid var(--paper-300);background:transparent;width:40px;height:40px;border-radius:8px;cursor:pointer;font-size:20px}.feedback-label{display:block;margin:22px 0 8px;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.feedback-rating{display:flex;gap:10px;align-items:center}.feedback-rating button{width:46px;height:46px;border:1px solid var(--paper-300);background:transparent;border-radius:8px;cursor:pointer;font-size:25px;line-height:1;color:var(--paper-400);transition:.15s ease}.feedback-rating button:hover{color:var(--ink-900);border-color:var(--ink-900);transform:translateY(-1px)}.feedback-rating button.selected{background:var(--ink-900);color:var(--paper-50);border-color:var(--ink-900)}.feedback-message{width:100%;min-height:130px;resize:vertical;border:1px solid var(--paper-300);border-radius:8px;padding:12px;font:inherit;background:white} .feedback-actions{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:18px}.feedback-actions .feedback-close{width:auto;min-width:88px;height:44px;padding:0 18px;font-size:14px}.feedback-submit{border:0;background:var(--ink-900);color:var(--paper-50);padding:0 20px;min-width:128px;height:44px;border-radius:7px;font-weight:700;cursor:pointer;white-space:nowrap}.feedback-submit:disabled{opacity:.55;cursor:wait}.feedback-status{min-height:20px;margin-top:12px;font-size:13px}.feedback-hp{position:absolute;left:-9999px;opacity:0}
+
+/* White-led Slide 2: off-white surfaces first, beige only for structure and selection. */
+.results-bar,.table-wrap,.drawer,.drawer-head,.drawer-body,.d-section,.trend-card,.seat-card,.pdf-table-scroll{background:#FFFBF4!important}
+.results-table thead th,.pdf-table thead th{background:#FFFBF4;color:#11120D;border-bottom:1px solid #D8CFBC}
+.results-table tr,.pdf-table tr,.drawer-head,.d-section,.trend-card,.seat-card{border-color:#D8CFBC}
+.results-table tr:hover{background:rgba(216,207,188,.18)!important}
+.results-table tr.active,.pdf-table td.pdf-selected,.pdf-table th.pdf-selected,.pdf-selected-title{background:rgba(216,207,188,.42)!important;color:#11120D}
+.chip{background:#FFFBF4;border-color:#D8CFBC;color:#11120D}
+.chip.active{background:#11120D;color:#FFFBF4;border-color:#11120D}
 </style>
 </head>
 <body>
@@ -2304,6 +2313,12 @@ function showDrawer(college) {
   drawerTrends.init();
   drawerTrends.lockToCollege(college.course, college.institution_code);
 
+  /* Give the open college slide its own history entry. A browser/mouse
+     Back action should dismiss Slide 2 before leaving the page. */
+  if (!history.state || history.state.cetfindDrawer !== true) {
+    history.pushState({ ...(history.state || {}), cetfindDrawer: true }, "", location.href);
+  }
+
   /* Add .open class to trigger the CSS transition */
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
@@ -2341,7 +2356,17 @@ function closeDrawer(opts = {}) {
     openId = null;
     document.querySelectorAll("#resultsBody tr").forEach(tr => tr.classList.remove("active"));
   }
+
+  /* Keep the URL/history stack tidy when the user closes via the UI. */
+  if (!opts.fromPopState && history.state && history.state.cetfindDrawer === true) {
+    history.back();
+  }
 }
+
+/* Browser or gaming-mouse Back closes the open Slide 2 first. */
+window.addEventListener("popstate", () => {
+  if (drawer.classList.contains("open")) closeDrawer({ fromPopState: true });
+});
 
 /* ── Close the slide via: X button, clicking overlay, or Escape key ── */
 $("drawerClose").addEventListener("click", () => closeDrawer());
