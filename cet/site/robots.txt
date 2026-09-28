@@ -1,14 +1,6 @@
 User-agent: *
 Allow: /
-Allow: /index.html
-Allow: /privacy.html
-Allow: /404.html
-
-# Block direct indexing of raw data payload files — these are
-# large binary-search JavaScript blobs, not human-readable pages.
+Disallow: /admin/
+Disallow: /preview/
 Disallow: /data/
-Disallow: /data/courses/
-Disallow: /data/search_index.js
-
-# Sitemap — update with real production URL before launch
-# Sitemap: https://YOUR-DOMAIN/sitemap.xml
+Sitemap: https://cetfind.onrender.com/sitemap.xml
