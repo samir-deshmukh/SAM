@@ -1418,7 +1418,7 @@ body{letter-spacing:-.01em;}
                 <th>College</th>
                 <th style="width:130px;">Rank of College</th>
                 <th style="width:160px;">Percentile (High–Low)</th>
-                <th style="width:150px;">Chance of Admission</th>
+                <th style="width:150px;">Historical Cutoff Comparison</th>
               </tr>
             </thead>
             <tbody id="resultsBody"></tbody>
@@ -1434,7 +1434,7 @@ body{letter-spacing:-.01em;}
       <h3 class="footer-title">Data-driven.<br>Transparent. <em>Built for you.</em></h3>
       <div class="footer-grid">
         <div class="footer-col"><h5>Data Source</h5><p>State Common Entrance Test Cell,<br>Government of Maharashtra</p></div>
-        <div class="footer-col"><h5>Last Updated</h5><p>MCA CAP Round 1<br>Academic Year 2025-26</p></div>
+        <div class="footer-col"><h5>Coverage</h5><p>Academic Year 2025-26</p></div>
         <div class="footer-col"><h5>Built By</h5><p>Sanika, Vedant &amp; Sam<br>Capstone Project · Decision-Support Platform</p></div>
         
       </div>
@@ -1535,8 +1535,8 @@ const CONFIG = {
   safeBand: 1.0,
   borderlineBand: -1.0,
 
-  /* What each status is called in the UI, and its CSS dot class */
-  statusLabels: { safe: "Safe", borderline: "Borderline", reach: "Reach" },
+  /* Historical cutoff comparison labels (not admission probabilities) and CSS dot classes */
+  statusLabels: { safe: "At/above highest cutoff", borderline: "Within historical range", reach: "Below historical range" },
   statusClasses: { safe: "status-safe", borderline: "status-border", reach: "status-reach" },
 
   /* ── Default sort applied on page load: "percentile" | "name" | "seats" ── */
