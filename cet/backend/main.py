@@ -638,8 +638,6 @@ def admin_lock_acquire(request: Request):
                VALUES (?,?,?,CURRENT_TIMESTAMP)
                ON CONFLICT (user_id) DO UPDATE
                SET client_id=EXCLUDED.client_id, lock_token=EXCLUDED.lock_token, updated_at=CURRENT_TIMESTAMP
-               WHERE admin_active_lock.client_id=EXCLUDED.client_id
-                  OR admin_active_lock.updated_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
                RETURNING client_id,lock_token""",
             (current['uid'], client_id, lock_token),
         ).fetchone()
