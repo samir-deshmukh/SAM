@@ -84,35 +84,6 @@ window.__cetAdminTabReady=false;
       await fetch('/admin/api/security-event',{method:'POST',headers:{'X-CSRF-Token':decodeURIComponent(m[1]),'X-Admin-Client-ID':tabId,'Content-Type':'application/json'},body:JSON.stringify({action})});
     }catch(_){ }
   }
-  // Security events are delivered by email only. Do not surface them inside
-  // the admin panel, because the panel itself is the protected workspace.
-  function notifyOtherAdmin(action){ return; }
-  // Keep the security-alert cursor for this browser tab. A normal admin
-  // navigation creates a new document, so an in-memory cursor would reset to
-  // zero and replay old security events as fresh alerts on every page.
-  const SECURITY_CURSOR_KEY='cet-cap-admin-security-cursor-v1';
-  let securityAfter=Number(sessionStorage.getItem(SECURITY_CURSOR_KEY)||0);
-  let securityReady=securityAfter>0;
-  async function pollSecurityAlerts(){
-    try{
-      const r=await fetch('/admin/api/security-alerts?after='+securityAfter,{cache:'no-store'});
-      if(!r.ok)return;
-      const d=await r.json();
-      if(!securityReady){
-        securityAfter=Number(d.latest_id||securityAfter);
-        sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
-        securityReady=true;
-        return;
-      }
-      for(const x of (d.events||[])){
-        securityAfter=Math.max(securityAfter,Number(x.id)||0);
-        sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
-        notifyOtherAdmin(x.action);
-      }
-      securityAfter=Math.max(securityAfter,Number(d.latest_id||securityAfter));
-      sessionStorage.setItem(SECURITY_CURSOR_KEY,String(securityAfter));
-    }catch(_){ }
-  }
   async function acquireServerLock(){
     try{
       const r=await fetch('/admin/api/admin-lock/acquire',{method:'POST',headers:lockHeaders(),cache:'no-store'});
@@ -142,9 +113,7 @@ window.__cetAdminTabReady=false;
   async function bootAdminLock(){
     const acquired=await acquireServerLock();
     if(!acquired)return;
-    pollSecurityAlerts();
     serverHeartbeat();
-    setInterval(pollSecurityAlerts,5000);
     setInterval(serverHeartbeat,5000);
   }
   // Internal admin navigation keeps the same tab identity. Do not release
