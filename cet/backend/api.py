@@ -402,6 +402,32 @@ def get_college_seats(
               AND program_family = :course
             ORDER BY choice_code, allocation_lane, base_category
         """), {"institution": institution_code, "course": course}).fetchall()
+
+        # Runtime rows are derived/cache data. If a seat import exists but the
+        # derived table was not refreshed yet, build the same compact matrix
+        # directly from the authoritative seats table for this college.
+        if not rows:
+            rows = conn.execute(text("""
+                SELECT capture_year, choice_code, allocation_lane,
+                       COALESCE(base_category, 'Total') AS base_category,
+                       MAX(CASE WHEN is_ladies = FALSE AND is_total = FALSE THEN seats END) AS gender_g,
+                       MAX(CASE WHEN is_ladies = TRUE AND is_total = FALSE THEN seats END) AS gender_l,
+                       MAX(CASE WHEN is_total = TRUE OR is_ladies IS NULL THEN seats END) AS category_total,
+                       BOOL_OR(is_total) AS is_total
+                FROM seats
+                WHERE institution_code = :institution
+                  AND program_family = :course
+                  AND capture_year = (
+                      SELECT MAX(capture_year)
+                      FROM seats
+                      WHERE institution_code = :institution
+                        AND program_family = :course
+                  )
+                GROUP BY capture_year, choice_code, allocation_lane,
+                         COALESCE(base_category, 'Total')
+                ORDER BY choice_code, allocation_lane, base_category
+            """), {"institution": institution_code, "course": course}).fetchall()
+
     if not rows:
         raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
     capture_year = max(int(r[0]) for r in rows)
