@@ -1,4 +1,4 @@
-import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading,urllib.request
+import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading
 from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -360,49 +360,9 @@ def login(request: Request):
     return resp
 
 
-def _send_admin_login_alert(username: str, ip: str):
-    """Send a best-effort login alert; email failure must not affect authentication."""
-    api_key = os.getenv('RESEND_API_KEY', '').strip()
-    recipient = os.getenv('ADMIN_LOGIN_ALERT_TO', '').strip()
-    if not api_key or not recipient:
-        log.info('Admin login alert skipped: Resend credentials or recipient are not configured')
-        return
-
-    from_email = os.getenv('RESEND_FROM_EMAIL', 'onboarding@resend.dev').strip()
-    escaped_username = html.escape(username[:64])
-    escaped_ip = html.escape(ip[:64])
-    payload = {
-        'from': from_email,
-        'to': [recipient],
-        'subject': 'CETFind admin panel login',
-        'html': (
-            '<h2>Admin login notification</h2>'
-            '<p>A successful sign-in to the CETFind admin panel was recorded.</p>'
-            f'<p><strong>Username:</strong> {escaped_username}</p>'
-            f'<p><strong>IP address:</strong> {escaped_ip}</p>'
-        ),
-    }
-    try:
-        request = urllib.request.Request(
-            'https://api.resend.com/emails',
-            data=json.dumps(payload).encode('utf-8'),
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-            },
-            method='POST',
-        )
-        with urllib.request.urlopen(request, timeout=8) as response:
-            if response.status >= 300:
-                log.warning('Admin login alert provider returned HTTP %s', response.status)
-    except Exception:
-        log.exception('Admin login alert delivery failed')
-
-
 @app.post('/admin/login')
 def login_post(
     request: Request,
-    background_tasks: BackgroundTasks,
     username: str = Form(...),
     password: str = Form(...),
     csrf_token: str = Form(...),
@@ -444,9 +404,6 @@ def login_post(
         connection.commit()
         fresh_auth_version = int(row['auth_version']) + 1
 
-    # Schedule only after credentials and the single-tab lock are accepted.
-    # FastAPI sends the response before running this best-effort notification.
-    background_tasks.add_task(_send_admin_login_alert, username, ip)
     resp = RedirectResponse('/admin', 303)
     resp.set_cookie(
         _SESSION_COOKIE,
