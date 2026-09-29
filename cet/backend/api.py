@@ -459,9 +459,6 @@ def search_colleges(
         engine = get_active_engine()
     except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-    if not _db_available(engine):
-        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-
     valid_courses = sorted(PUBLIC_COURSES)
     if course not in valid_courses:
         raise HTTPException(
