@@ -116,25 +116,26 @@ def public_options(request: Request):
         engine = get_active_engine()
     except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-    if not _db_available(engine):
+    try:
+        with engine.connect() as conn:
+            city_rows = conn.execute(text("""
+                SELECT DISTINCT i.city
+                FROM institutes i
+                WHERE i.city IS NOT NULL
+                  AND btrim(i.city) <> ''
+                  AND EXISTS (
+                      SELECT 1
+                      FROM cutoffs c
+                      JOIN programs p ON p.program_id = c.program_id
+                      WHERE c.institution_code = i.institution_code
+                        AND p.program_family = 'BBA'
+                  )
+                ORDER BY i.city
+            """))
+            cities = [str(r[0]) for r in city_rows]
+        return {"cities": cities, "courses": sorted(PUBLIC_COURSES)}
+    except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-    with engine.connect() as conn:
-        city_rows = conn.execute(text("""
-            SELECT DISTINCT i.city
-            FROM institutes i
-            WHERE i.city IS NOT NULL
-              AND btrim(i.city) <> ''
-              AND EXISTS (
-                  SELECT 1
-                  FROM cutoffs c
-                  JOIN programs p ON p.program_id = c.program_id
-                  WHERE c.institution_code = i.institution_code
-                    AND p.program_family = 'BBA'
-              )
-            ORDER BY i.city
-        """))
-        cities = [str(r[0]) for r in city_rows]
-    return {"cities": cities, "courses": sorted(PUBLIC_COURSES)}
 
 
 @router.get("/stats")
@@ -143,8 +144,6 @@ def public_stats(request: Request):
     check_rate_limit(request)
     try:
         engine = get_active_engine()
-        if not _db_available(engine):
-            raise RuntimeError("database unavailable")
         with engine.connect() as conn:
             row = conn.execute(text("""
                 SELECT COUNT(DISTINCT c.institution_code) AS colleges,
