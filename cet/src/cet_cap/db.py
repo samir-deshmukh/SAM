@@ -19,4 +19,12 @@ def get_engine(db_url: str | None = None) -> Engine:
         url = "postgresql+psycopg2://" + url[len("postgresql://"):]
     if not url.startswith("postgresql+psycopg2://"):
         raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL.")
-    return create_engine(url, pool_pre_ping=True, future=True)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=25,
+        pool_timeout=15,
+        pool_recycle=1800,
+        future=True,
+    )
