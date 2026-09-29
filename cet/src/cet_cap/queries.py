@@ -115,40 +115,23 @@ def search_college_summary(
         params["city"] = f"%{city.strip()}%"
 
     query = text(f"""
-        WITH eligible AS (
-            SELECT c.institution_code, i.institution_name, i.city, i.website,
-                   c.year, c.percentile AS cutoff_percentile,
-                   c.rank_number AS cutoff_rank
-            FROM cutoffs c
-            JOIN institutes i ON i.institution_code = c.institution_code
-            JOIN programs p ON p.program_id = c.program_id
-            WHERE c.percentile <= :percentage
-              AND p.program_family = :program_family
-              AND {ZERO_CUTOFF_ARTIFACT_FILTER}
-              {city_clause}
-        ), ranked AS (
-            SELECT institution_code, cutoff_rank,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY institution_code
-                       ORDER BY cutoff_percentile ASC, cutoff_rank ASC NULLS LAST
-                   ) AS rn
-            FROM eligible
-        ), summary AS (
-            SELECT institution_code,
-                   MAX(institution_name) AS institution_name,
-                   MAX(city) AS city,
-                   MAX(website) AS website,
-                   MAX(cutoff_percentile) AS highest_cutoff,
-                   COUNT(DISTINCT year) AS years_on_record,
-                   COUNT(*) AS matching_rows
-            FROM eligible
-            GROUP BY institution_code
-        )
-        SELECT s.institution_code, s.institution_name, s.city, s.website,
-               s.highest_cutoff, s.years_on_record, s.matching_rows,
-               r.cutoff_rank AS lowest_rank
-        FROM summary s
-        JOIN ranked r ON r.institution_code = s.institution_code AND r.rn = 1
+        SELECT c.institution_code,
+               MAX(i.institution_name) AS institution_name,
+               MAX(i.city) AS city,
+               MAX(i.website) AS website,
+               MAX(c.percentile) AS highest_cutoff,
+               COUNT(DISTINCT c.year) AS years_on_record,
+               COUNT(*) AS matching_rows,
+               (array_agg(c.rank_number ORDER BY c.percentile ASC NULLS LAST,
+                          c.rank_number ASC NULLS LAST))[1] AS lowest_rank
+        FROM cutoffs c
+        JOIN institutes i ON i.institution_code = c.institution_code
+        JOIN programs p ON p.program_id = c.program_id
+        WHERE c.percentile <= :percentage
+          AND p.program_family = :program_family
+          AND {ZERO_CUTOFF_ARTIFACT_FILTER}
+          {city_clause}
+        GROUP BY c.institution_code
     """)
     with engine.connect() as conn:
         return pd.read_sql_query(query, conn, params=params)

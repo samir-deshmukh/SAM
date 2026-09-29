@@ -42,6 +42,7 @@ async def lifespan(_app):
                 """)
                 c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_created ON site_analytics_events(created_at)")
                 c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_event ON site_analytics_events(event_name,created_at)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_cutoffs_program_percentile_inst ON cutoffs(program_id, percentile, institution_code)")
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS admin_active_lock (
                         user_id BIGINT PRIMARY KEY,

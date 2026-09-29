@@ -88,6 +88,9 @@ CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_prog
 CREATE INDEX IF NOT EXISTS idx_cutoffs_percentile
     ON cutoffs(percentile DESC);
 
+CREATE INDEX IF NOT EXISTS idx_cutoffs_program_percentile_inst
+    ON cutoffs(program_id, percentile, institution_code);
+
 CREATE TABLE IF NOT EXISTS seats (
     id                  SERIAL PRIMARY KEY,
     capture_year        INTEGER NOT NULL,
