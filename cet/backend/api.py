@@ -196,6 +196,10 @@ class CollegeCard(BaseModel):
     years_on_record: int
     history: list[dict] = []
     graph_history: list[dict] = []
+    has_cutoff: bool = True
+    has_trend: bool = False
+    has_seat_matrix: bool = False
+    has_website: bool = False
     drawer: Optional[dict] = None
 
 
@@ -206,10 +210,10 @@ class SearchResponse(BaseModel):
     results: list[CollegeCard]
 
 
-def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
+def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple[dict[str, dict], dict[str, dict], dict[str, bool]]:
     """Fetch both search metadata sets in one PostgreSQL round trip."""
     if not institution_codes:
-        return {}, {}
+        return {}, {}, {}
 
     params = {"course": course}
     placeholders = []
@@ -255,7 +259,12 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
         )
         SELECT COALESCE(d.institution_code, l.institution_code) AS institution_code,
                d.rows AS drawer_rows,
-               l.rows AS legacy_rows
+               l.rows AS legacy_rows,
+               EXISTS (
+                   SELECT 1 FROM seats s
+                   WHERE s.program_family = :course
+                     AND s.institution_code = COALESCE(d.institution_code, l.institution_code)
+               ) AS has_seat_matrix
         FROM drawer d
         FULL OUTER JOIN legacy l USING (institution_code)
         """
@@ -266,10 +275,12 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
 
     drawer_meta = {}
     legacy_meta = {}
+    seat_meta = {}
     for row in rows:
         code = str(row[0])
         drawer_rows = row[1] or []
         legacy_rows = row[2] or []
+        seat_meta[code] = bool(row[3])
 
         if drawer_rows:
             record = {"y": set(), "c": {"0": {}, "1": {}}}
@@ -309,7 +320,7 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
             item["cutoff"] = best["rank"]
             legacy_meta[code] = item
 
-    return drawer_meta, legacy_meta
+    return drawer_meta, legacy_meta, seat_meta
 
 @router.get("/colleges/{institution_code}/trend-options")
 def college_trend_options(
@@ -525,7 +536,7 @@ def search_colleges(
 
     results = []
     paged_codes = [str(v) for v in paged_df["institution_code"].tolist()]
-    drawer_meta, legacy_meta = _search_metadata(engine, course, paged_codes)
+    drawer_meta, legacy_meta, seat_meta = _search_metadata(engine, course, paged_codes)
     for _, row in paged_df.iterrows():
         # Status calculation: safe if candidate percentage >= highest cutoff
         cutoff_val = float(row["highest_cutoff"])
@@ -551,6 +562,10 @@ def search_colleges(
                 years_on_record=int(row["years_on_record"]),
                 history=legacy_meta.get(str(row["institution_code"]), {}).get("history", []),
                 graph_history=legacy_meta.get(str(row["institution_code"]), {}).get("graph_history", []),
+                has_cutoff=bool(legacy_meta.get(str(row["institution_code"]), {}).get("history")),
+                has_trend=bool(legacy_meta.get(str(row["institution_code"]), {}).get("history")),
+                has_seat_matrix=seat_meta.get(str(row["institution_code"]), False),
+                has_website=bool(pd.notna(row["website"]) and str(row["website"]).strip()),
                 drawer=drawer_meta.get(str(row["institution_code"])),
             )
         )

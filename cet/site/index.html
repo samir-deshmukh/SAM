@@ -1708,16 +1708,19 @@ function buildGapChart(college, userPct) {
    Course + college aren't shown as dropdowns (they're already fixed
    by which college was clicked) but still exist as hidden <select>s
    so the shared controller logic needs no special-casing for them. */
-function renderDrawerTrendSection() {
+function renderDrawerTrendSection(college = {}) {
+  const hasTrend = college.has_trend !== false;
+  const hasSeat = college.has_seat_matrix === true;
+  if (!hasTrend && !hasSeat) return "";
   return `
     <div class="d-section">
-      <div class="d-section-title">Cutoff Trend · by Category &amp; Quota</div>
-      <p class="d-text" style="margin-bottom:16px;">This college can have dozens of cutoff lines depending on category and Home/Other-University quota — pick the ones that apply to you.</p>
+      <div class="d-section-title" ${hasTrend ? "" : "style=\"display:none;\""}>Cutoff Trend · by Category &amp; Quota</div>
+      <p class="d-text" style="margin-bottom:16px;${hasTrend ? "" : "display:none;"}">This college can have dozens of cutoff lines depending on category and Home/Other-University quota — pick the ones that apply to you.</p>
 
       <select id="dTrendCourse" style="display:none"></select>
       <select id="dTrendCollege" style="display:none"></select>
 
-      <div class="d-trend-filters d-trend-filters-drawer">
+      <div class="d-trend-filters d-trend-filters-drawer" style="${hasTrend ? "" : "display:none;"}">
         <div class="field">
           <label class="field-label">Category</label>
           <select id="dTrendCategory" disabled>
@@ -1732,7 +1735,7 @@ function renderDrawerTrendSection() {
         </div>
       </div>
 
-      <div class="trends-ladies-row">
+      <div class="trends-ladies-row" style="${hasSeat ? "" : "display:none;"}">
         <input type="checkbox" id="dTrendLadies" disabled style="display:none" aria-hidden="true">
         <button class="chip seat-matrix-toggle" id="dSeatMatrixBtn" type="button">Seat Matrix</button>
       </div>
@@ -1745,7 +1748,7 @@ function renderDrawerTrendSection() {
         <div class="trends-rounds" id="dTrendRounds"></div>
       </div>
 
-      <div class="trends-body d-trend-body">
+      <div class="trends-body d-trend-body" style="${hasTrend ? "" : "display:none;"}">
         <div class="trends-empty" id="dTrendEmpty">
           <div><strong>No data yet</strong>Loading this college's cutoff data…</div>
         </div>
@@ -1760,7 +1763,7 @@ function renderDrawerTrendSection() {
         <div class="tin-card"><span class="tin-label">Data points</span><span class="tin-value" id="dTinCount">—</span></div>
       </div>
 
-      <p class="trends-note" id="dTrendNote"></p>
+      <p class="trends-note" id="dTrendNote" style="${hasTrend ? "" : "display:none;"}"></p>
 
       <!-- Seat Matrix table — hidden until the toggle above is clicked -->
       <div id="dSeatMatrixWrap" style="display:none;">
@@ -1816,15 +1819,15 @@ function renderSlide(c, userPct) {
 
   /* Return everything as one big HTML string */
   return `
-    ${buildGapChart(c, userPct)}
-    ${renderDrawerTrendSection()}
+    ${c.has_cutoff !== false && Array.isArray(c.graph_history) && c.graph_history.length ? buildGapChart(c, userPct) : ""}
+    ${renderDrawerTrendSection(c)}
     ${about}
     ${highlights ? `<div class="d-section"><div class="d-section-title">Highlights</div><div class="d-chips">${highlights}</div></div>` : ""}
     ${placement}
     ${note}
 
     <div class="d-cta-row">
-      ${c.website ? `<a class="d-cta primary" href="${c.website}" target="_blank" rel="noopener">Visit Website ↗</a>` : ""}
+      ${c.has_website && c.website ? `<a class="d-cta primary" href="${c.website}" target="_blank" rel="noopener">Visit Website ↗</a>` : ""}
     </div>
   `;
 }
@@ -2320,13 +2323,10 @@ function showDrawer(college) {
   drawerBody.innerHTML = renderSlide(college, currentPct);
   drawerBody.scrollTop = 0;
 
-  /* Tear down the previous drawer's chart (if any) and stand up a
-     fresh one scoped to THIS college — pre-locked to its course +
-     institution code, so the person only ever picks category/quota
-     (and, for the handful of colleges with several specializations,
-     which one). See createTrendsController's lockToCollege(). */
+  /* Tear down the previous drawer controller and only create the
+     data controls that this specific college actually has. */
   if (drawerTrends) drawerTrends.destroy();
-  drawerTrends = createTrendsController({
+  drawerTrends = (college.has_trend || college.has_seat_matrix) ? createTrendsController({
     mode: "drawer",
     tCourse: "dTrendCourse", tCollege: "dTrendCollege",
     tCategory: "dTrendCategory", tQuota: "dTrendQuota", tLadies: "dTrendLadies",
@@ -2336,9 +2336,11 @@ function showDrawer(college) {
     tinLowest: "dTinLowest", tinYoy: "dTinYoy", tinCount: "dTinCount",
     trendsNote: "dTrendNote",
     seatMatrixBtn: "dSeatMatrixBtn", seatMatrixWrap: "dSeatMatrixWrap", seatMatrixBody: "dSeatMatrixBody",
-  });
-  drawerTrends.init();
-  drawerTrends.lockToCollege(college.course, college.institution_code);
+  }) : null;
+  if (drawerTrends) {
+    drawerTrends.init();
+    drawerTrends.lockToCollege(college.course, college.institution_code);
+  }
 
   /* Give the open college slide its own history entry. A browser/mouse
      Back action should dismiss Slide 2 before leaving the page. */
