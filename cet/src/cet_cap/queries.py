@@ -97,6 +97,63 @@ def search_cutoffs_for_course(
             query, conn, params={'percentage': percentage, 'program_family': program_family})
 
 
+def search_college_summary(
+    engine: Engine,
+    percentage: float,
+    program_family: str,
+    city: str | None = None,
+) -> pd.DataFrame:
+    """Return one aggregated row per eligible college directly from PostgreSQL.
+
+    City filtering and aggregation happen in SQL so the API never loads the
+    full cutoff dataset into pandas for a normal public search.
+    """
+    city_clause = ""
+    params = {"percentage": percentage, "program_family": program_family}
+    if city and city.strip():
+        city_clause = " AND i.city ILIKE :city"
+        params["city"] = f"%{city.strip()}%"
+
+    query = text(f"""
+        WITH eligible AS (
+            SELECT c.institution_code, i.institution_name, i.city, i.website,
+                   c.year, c.percentile AS cutoff_percentile,
+                   c.rank_number AS cutoff_rank
+            FROM cutoffs c
+            JOIN institutes i ON i.institution_code = c.institution_code
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE c.percentile <= :percentage
+              AND p.program_family = :program_family
+              AND {ZERO_CUTOFF_ARTIFACT_FILTER}
+              {city_clause}
+        ), ranked AS (
+            SELECT institution_code, cutoff_rank,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY institution_code
+                       ORDER BY cutoff_percentile ASC, cutoff_rank ASC NULLS LAST
+                   ) AS rn
+            FROM eligible
+        ), summary AS (
+            SELECT institution_code,
+                   MAX(institution_name) AS institution_name,
+                   MAX(city) AS city,
+                   MAX(website) AS website,
+                   MAX(cutoff_percentile) AS highest_cutoff,
+                   COUNT(DISTINCT year) AS years_on_record,
+                   COUNT(*) AS matching_rows
+            FROM eligible
+            GROUP BY institution_code
+        )
+        SELECT s.institution_code, s.institution_name, s.city, s.website,
+               s.highest_cutoff, s.years_on_record, s.matching_rows,
+               r.cutoff_rank AS lowest_rank
+        FROM summary s
+        JOIN ranked r ON r.institution_code = s.institution_code AND r.rn = 1
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql_query(query, conn, params=params)
+
+
 def seat_matrix_for_institute(
     engine: Engine,
     institution_code: str,

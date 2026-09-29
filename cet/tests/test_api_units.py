@@ -123,7 +123,17 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
     monkeypatch.setattr(api, "available_program_families", lambda engine: ["BBA"])
-    monkeypatch.setattr(api, "search_cutoffs_for_course", lambda *args, **kwargs: raw)
+    summary = pd.DataFrame([{
+        "institution_code": "01102",
+        "institution_name": "Example College",
+        "city": "Amravati",
+        "website": "https://example.edu",
+        "highest_cutoff": 80.0,
+        "years_on_record": 2,
+        "matching_rows": 2,
+        "lowest_rank": 1500,
+    }])
+    monkeypatch.setattr(api, "search_college_summary", lambda *args, **kwargs: summary)
     monkeypatch.setattr(api, "_drawer_metadata", lambda *args: {})
     monkeypatch.setattr(api, "_legacy_search_metadata", lambda *args: {"01102": {"cutoff": 1200, "percentile": 75.0, "history": [], "graph_history": []}})
     api._request_history.clear()

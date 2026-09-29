@@ -31,6 +31,7 @@ from cet_cap.db import get_engine
 from cet_cap.queries import (
     available_program_families,
     available_years,
+    search_college_summary,
     search_cutoffs_for_course,
     seat_matrix_for_institute,
 )
@@ -461,32 +462,20 @@ def search_colleges(
     if not _db_available(engine):
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
 
-    valid_courses = sorted(PUBLIC_COURSES.intersection(available_program_families(engine)))
+    valid_courses = sorted(PUBLIC_COURSES)
     if course not in valid_courses:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid course '{course}'. Must be one of: {valid_courses}",
         )
 
-    # 1. Fetch cutoffs at or below percentile
-    raw_df = search_cutoffs_for_course(engine, percentage=percentile, program_family=course)
-
-    # 2. Apply city filter if provided
-    if city and city.strip():
-        raw_df = filter_by_city(raw_df, city.strip())
-
-    # 3. Aggregate per college
-    summary_df = summarize_colleges(raw_df)
-
-    if not summary_df.empty:
-        rank_idx = raw_df.groupby("institution_code")["cutoff_percentile"].idxmin()
-        rank_map = raw_df.loc[rank_idx, ["institution_code", "cutoff_rank"]].copy()
-        rank_map["lowest_rank"] = pd.to_numeric(rank_map["cutoff_rank"], errors="coerce").fillna(10**9)
-        summary_df = summary_df.merge(
-            rank_map[["institution_code", "lowest_rank"]],
-            on="institution_code",
-            how="left",
-        )
+    # Filter and aggregate in PostgreSQL; only one row per college reaches pandas.
+    summary_df = search_college_summary(
+        engine,
+        percentage=percentile,
+        program_family=course,
+        city=city,
+    )
 
     if summary_df.empty:
         return SearchResponse(total=0, page=page, page_size=page_size, results=[])
