@@ -123,6 +123,57 @@ def refresh(engine, course_family: str | None = None) -> None:
         if min(derived_counts.values()) <= 0:
             raise RuntimeError(f"Derived-data validation failed: {dict(derived_counts)}")
 
+        # Seat matrices are derived cache data, so validate coverage against the
+        # authoritative seats table for EVERY course and EVERY institution.
+        # A partial runtime rebuild must never be published as if it were valid.
+        seat_validation = conn.execute(text("""
+            WITH latest AS (
+                SELECT institution_code, program_family, MAX(capture_year) AS capture_year
+                FROM seats
+                WHERE (:course IS NULL OR program_family = :course)
+                GROUP BY institution_code, program_family
+            ),
+            source_groups AS (
+                SELECT s.program_family, s.institution_code, s.capture_year,
+                       COUNT(DISTINCT (s.choice_code, s.allocation_lane,
+                                       COALESCE(s.base_category, 'Total'), s.is_total)) AS groups
+                FROM seats s
+                JOIN latest l
+                  ON l.institution_code = s.institution_code
+                 AND l.program_family = s.program_family
+                 AND l.capture_year = s.capture_year
+                GROUP BY s.program_family, s.institution_code, s.capture_year
+            ),
+            runtime_groups AS (
+                SELECT program_family, institution_code, capture_year,
+                       COUNT(DISTINCT (choice_code, allocation_lane, base_category, is_total)) AS groups,
+                       COUNT(*) FILTER (
+                           WHERE gender_g IS NULL AND gender_l IS NULL AND category_total IS NULL
+                       ) AS empty_rows
+                FROM seat_matrix_runtime
+                WHERE (:course IS NULL OR program_family = :course)
+                GROUP BY program_family, institution_code, capture_year
+            )
+            SELECT COUNT(*) FILTER (
+                       WHERE r.institution_code IS NULL
+                          OR r.capture_year <> s.capture_year
+                          OR r.groups < s.groups
+                          OR r.empty_rows > 0
+                   ) AS invalid_institutions,
+                   COUNT(*) AS source_institutions
+            FROM source_groups s
+            LEFT JOIN runtime_groups r
+              ON r.program_family = s.program_family
+             AND r.institution_code = s.institution_code
+             AND r.capture_year = s.capture_year
+        """), {"course": course_family}).mappings().one()
+        if int(seat_validation["invalid_institutions"] or 0) > 0:
+            raise RuntimeError(
+                "Seat-matrix validation failed: "
+                f"{seat_validation['invalid_institutions']} of "
+                f"{seat_validation['source_institutions']} institutions have incomplete runtime data"
+            )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build PostgreSQL derived data for the public Slide 2 UI.")

@@ -46,9 +46,22 @@ RATE_LIMIT_MAX_REQUESTS = 60
 RATE_LIMIT_MAX_KEYS = 5000
 _request_history: dict[str, list[float]] = {}
 
-# Current public release scope. Expand deliberately when the corresponding
-# datasets have been verified and the UI is ready for them.
-PUBLIC_COURSES = {"BBA"}
+# Public course families are data-driven. The database is authoritative;
+# never hard-code a single course here because the portal supports the full
+# imported CAP dataset.
+PUBLIC_COURSES = None
+
+
+def available_public_courses(engine) -> list[str]:
+    """Return every course family currently present in the authoritative DB."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT p.program_family
+            FROM programs p
+            WHERE p.program_family IS NOT NULL AND btrim(p.program_family) <> ''
+            ORDER BY p.program_family
+        """))
+        return [str(r[0]) for r in rows]
 
 
 def check_rate_limit(request: Request):
@@ -103,9 +116,11 @@ def _db_available(engine) -> bool:
         return False
 
 
-def _require_public_course(course: str) -> None:
-    if course not in PUBLIC_COURSES:
-        raise HTTPException(status_code=400, detail="Course is not available in the current public release.")
+def _require_public_course(course: str, engine=None) -> None:
+    if engine is None:
+        engine = get_active_engine()
+    if course not in available_public_courses(engine):
+        raise HTTPException(status_code=400, detail="Course is not available in the current database dataset.")
 
 
 @router.get("/options")
@@ -128,19 +143,19 @@ def public_options(request: Request):
                       FROM cutoffs c
                       JOIN programs p ON p.program_id = c.program_id
                       WHERE c.institution_code = i.institution_code
-                        AND p.program_family = 'BBA'
+                        AND EXISTS (SELECT 1 FROM programs p2 WHERE p2.program_id = c.program_id)
                   )
                 ORDER BY i.city
             """))
             cities = [str(r[0]) for r in city_rows]
-        return {"cities": cities, "courses": sorted(PUBLIC_COURSES)}
+        return {"cities": cities, "courses": available_public_courses(engine)}
     except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
 
 
 @router.get("/stats")
 def public_stats(request: Request):
-    """Return public-facing totals calculated directly from released BBA cutoff facts."""
+    """Return public-facing totals calculated from the full database dataset."""
     check_rate_limit(request)
     try:
         engine = get_active_engine()
@@ -152,7 +167,7 @@ def public_stats(request: Request):
                        MAX(c.year) AS latest_year
                 FROM cutoffs c
                 JOIN programs p ON p.program_id = c.program_id
-                WHERE p.program_family = 'BBA'
+                WHERE p.program_family IS NOT NULL
             """)).mappings().one()
         return {
             "colleges": int(row["colleges"] or 0),
@@ -303,8 +318,8 @@ def college_trend_options(
 ):
     """Return only the precomputed category/quota/year options for one college."""
     check_rate_limit(request)
-    _require_public_course(course)
     engine = get_active_engine()
+    _require_public_course(course, engine)
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT is_ladies, year, base_category, section_code
@@ -337,8 +352,8 @@ def college_trend(
 ):
     """Return precomputed trend points for one college/filter combination."""
     check_rate_limit(request)
-    _require_public_course(course)
     engine = get_active_engine()
+    _require_public_course(course, engine)
     if not _db_available(engine):
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
     sql = """
@@ -391,8 +406,8 @@ def get_college_seats(
 ):
     """Fetch the precomputed latest seat matrix for one college."""
     check_rate_limit(request)
-    _require_public_course(course)
     engine = get_active_engine()
+    _require_public_course(course, engine)
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT capture_year, choice_code, allocation_lane, base_category,
@@ -473,7 +488,7 @@ def search_colleges(
         engine = get_active_engine()
     except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
-    valid_courses = sorted(PUBLIC_COURSES)
+    valid_courses = available_public_courses(engine)
     if course not in valid_courses:
         raise HTTPException(
             status_code=400,

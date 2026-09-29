@@ -51,6 +51,25 @@ async def lifespan(_app):
                     )
                 """)
                 c.commit()
+
+            # One-time recovery hook used to rebuild all derived public data
+            # after schema/query optimizations. The flag is removed after the
+            # successful deployment so normal restarts never rebuild production.
+            if os.getenv('REBUILD_DERIVED_ON_START') == '1':
+                script = BASE / 'scripts' / 'refresh_derived_data.py'
+                build_env = os.environ.copy()
+                build_env['PYTHONPATH'] = str(BASE) + (
+                    os.pathsep + build_env['PYTHONPATH']
+                    if build_env.get('PYTHONPATH') else ''
+                )
+                subprocess.run(
+                    [sys.executable, str(script)],
+                    cwd=str(BASE),
+                    env=build_env,
+                    check=True,
+                    timeout=1700,
+                )
+                log.info('One-time full derived-data rebuild completed')
         except Exception:
             log.exception('Database startup maintenance failed')
             return
