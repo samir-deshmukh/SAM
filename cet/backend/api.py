@@ -312,8 +312,6 @@ def college_trend_options(
     check_rate_limit(request)
     _require_public_course(course)
     engine = get_active_engine()
-    if not _db_available(engine):
-        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT is_ladies, year, base_category, section_code
@@ -402,8 +400,6 @@ def get_college_seats(
     check_rate_limit(request)
     _require_public_course(course)
     engine = get_active_engine()
-    if not _db_available(engine):
-        raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT capture_year, choice_code, allocation_lane, base_category,
