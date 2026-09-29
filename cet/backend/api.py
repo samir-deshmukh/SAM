@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from collections import defaultdict
 from typing import Optional
 
 import pandas as pd
