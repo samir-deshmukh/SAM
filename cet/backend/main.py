@@ -33,6 +33,16 @@ async def lifespan(_app):
             ensure_part4_schema()
             with connect() as c:
                 c.execute("""
+                    CREATE TABLE IF NOT EXISTS site_analytics_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        event_name TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_created ON site_analytics_events(created_at)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_site_analytics_event ON site_analytics_events(event_name,created_at)")
+                c.execute("""
                     CREATE TABLE IF NOT EXISTS admin_active_lock (
                         user_id BIGINT PRIMARY KEY,
                         client_id TEXT NOT NULL,
@@ -245,6 +255,42 @@ async def public_feedback(request: Request):
         c.execute('INSERT INTO public_feedback(rating,message,page,user_agent) VALUES (?,?,?,?)',(rating,message,page,ua))
         c.commit()
     return {'ok': True}
+
+@app.post('/api/analytics/event')
+async def analytics_event(request: Request):
+    """Store anonymous website usage events without IPs or personal details."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, 'Invalid analytics payload')
+    if not isinstance(body, dict):
+        raise HTTPException(400, 'Invalid analytics payload')
+    event_name = str(body.get('event', '')).strip().lower()[:80]
+    session_id = re.sub(r'[^a-zA-Z0-9_-]', '', str(body.get('session_id', '')))[:80]
+    allowed = {'page_view', 'search_started', 'search_completed', 'college_opened',
+               'college_website_clicked', 'seat_matrix_opened', 'trend_opened'}
+    if event_name not in allowed or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', session_id):
+        raise HTTPException(400, 'Invalid analytics event')
+    with connect() as c:
+        c.execute('INSERT INTO site_analytics_events(session_id,event_name) VALUES (?,?)',
+                  (session_id, event_name))
+        c.commit()
+    return {'ok': True}
+
+@app.get('/admin/api/analytics/summary')
+def analytics_summary(request: Request, days: int = 30):
+    require(request)
+    days = max(1, min(int(days or 30), 90))
+    with connect() as c:
+        totals = c.execute("""
+            SELECT COUNT(DISTINCT session_id) AS visitors,
+                   COUNT(*) FILTER (WHERE event_name='search_started') AS searches,
+                   COUNT(*) FILTER (WHERE event_name='college_opened') AS college_opens,
+                   COUNT(*) FILTER (WHERE event_name='college_website_clicked') AS website_clicks
+            FROM site_analytics_events
+            WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+        """, (days,)).fetchone()
+    return {'days': days, 'totals': dict(totals) if totals else {}}
 
 # Public data files are intentionally NOT mounted. Master datasets remain server-side.
 
