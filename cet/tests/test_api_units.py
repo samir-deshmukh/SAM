@@ -134,8 +134,7 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
         "lowest_rank": 1500,
     }])
     monkeypatch.setattr(api, "search_college_summary", lambda *args, **kwargs: summary)
-    monkeypatch.setattr(api, "_drawer_metadata", lambda *args: {})
-    monkeypatch.setattr(api, "_legacy_search_metadata", lambda *args: {"01102": {"cutoff": 1200, "percentile": 75.0, "history": [], "graph_history": []}})
+    monkeypatch.setattr(api, "_search_metadata", lambda *args: ({}, {"01102": {"cutoff": 1200, "percentile": 75.0, "history": [], "graph_history": []}}))
     api._request_history.clear()
 
     result = api.search_colleges(
@@ -177,7 +176,7 @@ def test_search_rejects_unknown_course(monkeypatch):
     assert exc.value.status_code == 400
 
 
-def test_drawer_metadata_is_compact_and_bounded():
+def test_search_metadata_is_compact_and_bounded():
     class Connection:
         def __enter__(self):
             return self
@@ -188,12 +187,22 @@ def test_drawer_metadata_is_compact_and_bounded():
         def execute(self, query, params):
             assert params["course"] == "BCA"
             assert "code_0" in params and "code_1" in params
+
             class Result:
                 def fetchall(self):
                     return [
-                        ("01102", False, 2026, "OPEN", "HU"),
-                        ("01102", False, 2025, "OPEN", "OHU"),
-                        ("01102", True, 2026, "SC", "SL"),
+                        (
+                            "01102",
+                            [
+                                {"ladies": False, "year": 2026, "category": "OPEN", "section": "HU"},
+                                {"ladies": False, "year": 2025, "category": "OPEN", "section": "OHU"},
+                                {"ladies": True, "year": 2026, "category": "SC", "section": "SL"},
+                            ],
+                            [
+                                {"year": 2026, "low": 80.0, "high": 90.0, "rank": 1200},
+                                {"year": 2025, "low": 75.0, "high": 88.0, "rank": 1500},
+                            ],
+                        )
                     ]
 
             return Result()
@@ -202,9 +211,9 @@ def test_drawer_metadata_is_compact_and_bounded():
         def connect(self):
             return Connection()
 
-    result = api._drawer_metadata(Engine(), "BCA", ["01102", "01103"])
+    drawer, legacy = api._search_metadata(Engine(), "BCA", ["01102", "01103"])
 
-    assert result == {
+    assert drawer == {
         "01102": {
             "y": [2025, 2026],
             "c": {
@@ -213,3 +222,5 @@ def test_drawer_metadata_is_compact_and_bounded():
             },
         }
     }
+    assert legacy["01102"]["cutoff"] == 1500
+    assert legacy["01102"]["percentile"] == 75.0

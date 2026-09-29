@@ -190,63 +190,10 @@ class SearchResponse(BaseModel):
     results: list[CollegeCard]
 
 
-def _drawer_metadata(engine, course: str, institution_codes: list[str]) -> dict[str, dict]:
-    """Build compact category/quota metadata for the requested colleges.
-
-    The public search response needs only enough metadata to initialize the
-    college drawer. Cutoff rows themselves stay server-side and are fetched
-    by the detail endpoints. The requested code list is bounded by the
-    search page-size limit, so this query cannot become an unbounded dump.
-    """
+def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Fetch both search metadata sets in one PostgreSQL round trip."""
     if not institution_codes:
-        return {}
-
-    placeholders = {f"code_{index}": code for index, code in enumerate(institution_codes)}
-    code_sql = ", ".join(f":code_{index}" for index in range(len(institution_codes)))
-    query = text(
-        f"""
-        SELECT institution_code, is_ladies, year,
-               base_category, section_code
-        FROM cutoff_filter_options
-        WHERE program_family = :course
-          AND institution_code IN ({code_sql})
-        ORDER BY institution_code, is_ladies, year,
-                 base_category, section_code
-        """
-    )
-    params = {"course": course, **placeholders}
-
-    with engine.connect() as conn:
-        rows = conn.execute(query, params).fetchall()
-
-    metadata = {}
-    for row in rows:
-        code = str(row[0])
-        record = metadata.setdefault(
-            code,
-            {"y": set(), "c": {"0": {}, "1": {}}},
-        )
-        ladies_key = "1" if bool(row[1]) else "0"
-        record["y"].add(int(row[2]))
-        categories = record["c"][ladies_key]
-        category = str(row[3])
-        categories.setdefault(category, set()).add(str(row[4]))
-
-    for record in metadata.values():
-        record["y"] = sorted(record["y"])
-        for ladies_key, categories in record["c"].items():
-            record["c"][ladies_key] = [
-                {"v": category, "q": sorted(sections)}
-                for category, sections in sorted(categories.items())
-            ]
-
-    return metadata
-
-
-def _legacy_search_metadata(engine, course: str, institution_codes: list[str]) -> dict[str, dict]:
-    """Build the legacy result-card fields used by the public drawer."""
-    if not institution_codes:
-        return {}
+        return {}, {}
 
     params = {"course": course}
     placeholders = []
@@ -254,53 +201,99 @@ def _legacy_search_metadata(engine, course: str, institution_codes: list[str]) -
         key = f"code_{index}"
         placeholders.append(f":{key}")
         params[key] = code
+    code_sql = ", ".join(placeholders)
 
     query = text(
         f"""
-        SELECT institution_code, year, low_percentile,
-               high_percentile, low_rank
-        FROM cutoff_college_year_summary
-        WHERE program_family = :course
-          AND institution_code IN ({", ".join(placeholders)})
-        ORDER BY institution_code, year
+        WITH drawer AS (
+            SELECT institution_code,
+                   jsonb_agg(
+                       jsonb_build_object(
+                           'ladies', is_ladies,
+                           'year', year,
+                           'category', base_category,
+                           'section', section_code
+                       )
+                       ORDER BY is_ladies, year, base_category, section_code
+                   ) AS rows
+            FROM cutoff_filter_options
+            WHERE program_family = :course
+              AND institution_code IN ({code_sql})
+            GROUP BY institution_code
+        ),
+        legacy AS (
+            SELECT institution_code,
+                   jsonb_agg(
+                       jsonb_build_object(
+                           'year', year,
+                           'low', low_percentile,
+                           'high', high_percentile,
+                           'rank', low_rank
+                       )
+                       ORDER BY year
+                   ) AS rows
+            FROM cutoff_college_year_summary
+            WHERE program_family = :course
+              AND institution_code IN ({code_sql})
+            GROUP BY institution_code
+        )
+        SELECT COALESCE(d.institution_code, l.institution_code) AS institution_code,
+               d.rows AS drawer_rows,
+               l.rows AS legacy_rows
+        FROM drawer d
+        FULL OUTER JOIN legacy l USING (institution_code)
         """
     )
 
     with engine.connect() as conn:
         rows = conn.execute(query, params).fetchall()
 
-    result = {}
+    drawer_meta = {}
+    legacy_meta = {}
     for row in rows:
         code = str(row[0])
-        year = int(row[1])
-        low_pct = float(row[2])
-        high_pct = float(row[3])
-        low_rank = int(row[4]) if row[4] is not None else 0
-        item = result.setdefault(code, {"history": [], "graph_history": []})
-        item["history"].append({
-            "year": year,
-            "percentile": low_pct,
-            "low": low_pct,
-            "high": high_pct,
-            "rank": low_rank,
-        })
+        drawer_rows = row[1] or []
+        legacy_rows = row[2] or []
 
-    for item in result.values():
-        item["history"].sort(key=lambda h: h["year"])
-        item["graph_history"] = [
-            {"year": h["year"], "low": h["low"], "high": h["high"]}
-            for h in item["history"]
-        ]
-        if item["history"]:
-            best = min(item["history"], key=lambda h: h["percentile"])
+        if drawer_rows:
+            record = {"y": set(), "c": {"0": {}, "1": {}}}
+            for item in drawer_rows:
+                ladies_key = "1" if bool(item["ladies"]) else "0"
+                record["y"].add(int(item["year"]))
+                category = str(item["category"])
+                record["c"][ladies_key].setdefault(category, set()).add(str(item["section"]))
+            record["y"] = sorted(record["y"])
+            for ladies_key, categories in record["c"].items():
+                record["c"][ladies_key] = [
+                    {"v": category, "q": sorted(sections)}
+                    for category, sections in sorted(categories.items())
+                ]
+            drawer_meta[code] = record
+
+        if legacy_rows:
+            history = [
+                {
+                    "year": int(item["year"]),
+                    "percentile": float(item["low"]),
+                    "low": float(item["low"]),
+                    "high": float(item["high"]),
+                    "rank": int(item["rank"]) if item["rank"] is not None else 0,
+                }
+                for item in legacy_rows
+            ]
+            item = {
+                "history": history,
+                "graph_history": [
+                    {"year": h["year"], "low": h["low"], "high": h["high"]}
+                    for h in history
+                ],
+            }
+            best = min(history, key=lambda h: h["percentile"])
             item["percentile"] = best["percentile"]
             item["cutoff"] = best["rank"]
-        else:
-            item["percentile"] = 0.0
-            item["cutoff"] = 0
+            legacy_meta[code] = item
 
-    return result
-
+    return drawer_meta, legacy_meta
 
 @router.get("/colleges/{institution_code}/trend-options")
 def college_trend_options(
@@ -490,8 +483,7 @@ def search_colleges(
 
     results = []
     paged_codes = [str(v) for v in paged_df["institution_code"].tolist()]
-    drawer_meta = _drawer_metadata(engine, course, paged_codes)
-    legacy_meta = _legacy_search_metadata(engine, course, paged_codes)
+    drawer_meta, legacy_meta = _search_metadata(engine, course, paged_codes)
     for _, row in paged_df.iterrows():
         # Status calculation: safe if candidate percentage >= highest cutoff
         cutoff_val = float(row["highest_cutoff"])
