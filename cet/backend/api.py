@@ -124,6 +124,16 @@ def _require_public_course(course: str, engine=None) -> None:
         raise HTTPException(status_code=400, detail="Course is not available in the current database dataset.")
 
 
+@router.get("/_debug_ip")
+def debug_ip(request: Request):
+    """TEMPORARY diagnostic route - remove once Render's proxy IP/header
+    behavior is confirmed. Not linked from the UI."""
+    return {
+        "peer": request.client.host if request.client else None,
+        "x_forwarded_for": request.headers.get("x-forwarded-for"),
+    }
+
+
 @router.get("/options")
 def public_options(request: Request):
     """Return the bounded city/course lists needed to initialize the search UI."""
