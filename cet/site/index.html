@@ -3442,7 +3442,7 @@ function createTrendsController(ids) {
       rebuildDrawerCategories();
       populateSelect(els.tQuota, [], "Select category first");
       els.trendsLoading.style.display = "none";
-      showEmpty("<strong>Pick a category and quota/type</strong>The full cutoff tables for this college will be loaded only when needed; your selection is highlighted.");
+      showEmpty("<strong>Pick a category and quota/type</strong>The full cutoff tables for this college will be loaded; your selection is highlighted.");
       if (years.length) {
         state.selectedYear = years[years.length - 1];
         loadCollegeYear(course, collegeCode, state.selectedYear)
