@@ -67,6 +67,8 @@ def available_public_courses(engine) -> list[str]:
 
 def check_rate_limit(request: Request):
     """Enforce bounded, per-process request limits per client IP."""
+    if os.getenv("LOAD_TEST_MODE", "").lower() == "true":
+        return
     ip = client_ip(request)
     now = time.monotonic()
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
