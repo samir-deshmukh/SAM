@@ -174,6 +174,21 @@ def refresh(engine, course_family: str | None = None) -> None:
                 f"{seat_validation['source_institutions']} institutions have incomplete runtime data"
             )
 
+        # Refresh planner statistics after rebuilding read-mostly runtime tables.
+        # The public search planner depends on current distributions for course,
+        # percentile and institution predicates. ANALYZE is intentionally done
+        # after validation so a failed rebuild never publishes new statistics.
+        for table in (
+            "cutoffs",
+            "programs",
+            "institutes",
+            "cutoff_college_year_summary",
+            "cutoff_filter_options",
+            "cutoff_trend_points",
+            "seat_matrix_runtime",
+        ):
+            conn.execute(text(f"ANALYZE {table}"))
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build PostgreSQL derived data for the public Slide 2 UI.")
