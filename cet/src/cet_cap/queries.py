@@ -137,6 +137,65 @@ def search_college_summary(
         return pd.read_sql_query(query, conn, params=params)
 
 
+def search_college_summary_page(
+    engine: Engine,
+    percentage: float,
+    program_family: str,
+    city: str | None = None,
+    sort: str = "comp",
+    page: int = 1,
+    page_size: int = 25,
+) -> tuple[pd.DataFrame, int]:
+    """Aggregate, sort, count and paginate in PostgreSQL.
+
+    Only the requested page reaches pandas, keeping public search CPU and
+    memory bounded as the cutoff dataset grows.
+    """
+    city_clause = ""
+    params = {"percentage": percentage, "program_family": program_family,
+              "limit": page_size, "offset": (page - 1) * page_size}
+    if city and city.strip():
+        city_clause = " AND i.city ILIKE :city"
+        params["city"] = f"%{city.strip()}%"
+    order = {
+        "alpha": "institution_name ASC, institution_code ASC",
+        "city": "city ASC NULLS LAST, highest_cutoff DESC, institution_code ASC",
+        "rank": "lowest_rank ASC NULLS LAST, institution_name ASC, institution_code ASC",
+        "comp": "highest_cutoff DESC, institution_name ASC, institution_code ASC",
+    }.get(sort, "highest_cutoff DESC, institution_name ASC, institution_code ASC")
+    query = text(f"""
+        WITH summary AS (
+            SELECT c.institution_code,
+                   MAX(i.institution_name) AS institution_name,
+                   MAX(i.city) AS city,
+                   MAX(i.website) AS website,
+                   MAX(c.percentile) AS highest_cutoff,
+                   COUNT(DISTINCT c.year) AS years_on_record,
+                   COUNT(*) AS matching_rows,
+                   (array_agg(c.rank_number ORDER BY c.percentile ASC NULLS LAST,
+                              c.rank_number ASC NULLS LAST))[1] AS lowest_rank
+            FROM cutoffs c
+            JOIN institutes i ON i.institution_code = c.institution_code
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE c.percentile <= :percentage
+              AND p.program_family = :program_family
+              AND {ZERO_CUTOFF_ARTIFACT_FILTER}
+              {city_clause}
+            GROUP BY c.institution_code
+        )
+        SELECT *, COUNT(*) OVER () AS total_count
+        FROM summary
+        ORDER BY {order}
+        LIMIT :limit OFFSET :offset
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+    total = int(df["total_count"].iloc[0]) if not df.empty else 0
+    if not df.empty:
+        df = df.drop(columns=["total_count"])
+    return df, total
+
+
 def seat_matrix_for_institute(
     engine: Engine,
     institution_code: str,

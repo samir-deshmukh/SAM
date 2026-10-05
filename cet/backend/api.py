@@ -33,6 +33,7 @@ from cet_cap.queries import (
     available_program_families,
     available_years,
     search_college_summary,
+    search_college_summary_page,
     search_cutoffs_for_course,
     seat_matrix_for_institute,
 )
@@ -51,10 +52,16 @@ _request_history: dict[str, list[float]] = {}
 # never hard-code a single course here because the portal supports the full
 # imported CAP dataset.
 PUBLIC_COURSES = None
+_PUBLIC_COURSES_AT = 0.0
+_PUBLIC_COURSES_TTL = 30.0
 
 
 def available_public_courses(engine) -> list[str]:
-    """Return every course family currently present in the authoritative DB."""
+    """Return cached course families; refresh periodically for new imports."""
+    global PUBLIC_COURSES, _PUBLIC_COURSES_AT
+    now = time.monotonic()
+    if PUBLIC_COURSES is not None and now - _PUBLIC_COURSES_AT < _PUBLIC_COURSES_TTL:
+        return list(PUBLIC_COURSES)
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT DISTINCT p.program_family
@@ -62,7 +69,9 @@ def available_public_courses(engine) -> list[str]:
             WHERE p.program_family IS NOT NULL AND btrim(p.program_family) <> ''
             ORDER BY p.program_family
         """))
-        return [str(r[0]) for r in rows]
+        PUBLIC_COURSES = [str(r[0]) for r in rows]
+        _PUBLIC_COURSES_AT = now
+    return list(PUBLIC_COURSES)
 
 
 def check_rate_limit(request: Request):
@@ -261,9 +270,9 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
                d.rows AS drawer_rows,
                l.rows AS legacy_rows,
                EXISTS (
-                   SELECT 1 FROM seats s
-                   WHERE s.program_family = :course
-                     AND s.institution_code = COALESCE(d.institution_code, l.institution_code)
+                   SELECT 1 FROM seat_matrix_runtime sm
+                   WHERE sm.program_family = :course
+                     AND sm.institution_code = COALESCE(d.institution_code, l.institution_code)
                ) AS has_seat_matrix
         FROM drawer d
         FULL OUTER JOIN legacy l USING (institution_code)
@@ -507,32 +516,21 @@ def search_colleges(
             detail=f"Invalid course '{course}'. Must be one of: {valid_courses}",
         )
 
-    # Filter and aggregate in PostgreSQL; only one row per college reaches pandas.
-    summary_df = search_college_summary(
+    # Aggregate, sort and paginate in PostgreSQL; only one page reaches pandas.
+    paged_df, total_count = search_college_summary_page(
         engine,
         percentage=percentile,
         program_family=course,
         city=city,
+        sort=sort,
+        page=page,
+        page_size=page_size,
     )
 
-    if summary_df.empty:
-        return SearchResponse(total=0, page=page, page_size=page_size, results=[])
+    if paged_df.empty:
+        return SearchResponse(total=total_count, page=page, page_size=page_size, results=[])
 
-    # 4. Apply sorting
-    if sort == "alpha":
-        summary_df = summary_df.sort_values(by="institution_name", ascending=True)
-    elif sort == "city":
-        summary_df = summary_df.sort_values(by=["city", "highest_cutoff"], ascending=[True, False])
-    elif sort == "rank":
-        summary_df = summary_df.sort_values(by="lowest_rank", ascending=True)
-    else:  # default 'comp' (most competitive first)
-        summary_df = summary_df.sort_values(by="highest_cutoff", ascending=False)
-
-    total_count = len(summary_df)
-
-    # 5. Paginate
-    start_idx = (page - 1) * page_size
-    paged_df = summary_df.iloc[start_idx : start_idx + page_size]
+    # 4. Page metadata is already bounded to the requested page.
 
     results = []
     paged_codes = [str(v) for v in paged_df["institution_code"].tolist()]

@@ -133,7 +133,7 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
         "matching_rows": 2,
         "lowest_rank": 1500,
     }])
-    monkeypatch.setattr(api, "search_college_summary", lambda *args, **kwargs: summary)
+    monkeypatch.setattr(api, "search_college_summary_page", lambda *args, **kwargs: (summary, 1))
     monkeypatch.setattr(api, "_search_metadata", lambda *args: ({}, {"01102": {"cutoff": 1200, "percentile": 75.0, "history": [], "graph_history": []}}))
     api._request_history.clear()
 
