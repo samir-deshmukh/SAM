@@ -123,6 +123,17 @@ def refresh(engine, course_family: str | None = None) -> None:
         if min(derived_counts.values()) <= 0:
             raise RuntimeError(f"Derived-data validation failed: {dict(derived_counts)}")
 
+        # Bulk rebuilds change row distributions substantially. Refresh planner
+        # statistics before the new runtime data is served so PostgreSQL can
+        # choose plans using the new cardinalities.
+        analyze_tables = (
+            "cutoffs", "seats", "cutoff_trend_points",
+            "cutoff_college_year_summary", "cutoff_filter_options",
+            "seat_matrix_runtime",
+        )
+        for table in analyze_tables:
+            conn.execute(text(f"ANALYZE {table}"))
+
         # Seat matrices are derived cache data, so validate coverage against the
         # authoritative seats table for EVERY course and EVERY institution.
         # A partial runtime rebuild must never be published as if it were valid.
