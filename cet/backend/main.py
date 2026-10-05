@@ -31,33 +31,6 @@ async def lifespan(_app):
         try:
             init_admin_schema()
             ensure_part4_schema()
-            if os.getenv('RUN_DB_EXPLAIN') == '1':
-                explain_sql = """EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-WITH eligible AS (
- SELECT c.institution_code,c.percentile,c.rank_number
- FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
- WHERE c.percentile <= 80 AND p.program_family='BBA'
- AND NOT (c.rank_number=0 AND c.percentile=0.0)
-), summary AS (
- SELECT e.institution_code, MAX(e.percentile) AS highest_cutoff,
- (array_agg(e.rank_number ORDER BY e.percentile ASC NULLS LAST,e.rank_number ASC NULLS LAST))[1] AS lowest_rank
- FROM eligible e GROUP BY e.institution_code
-), years AS (
- SELECT institution_code, COUNT(*) FILTER (WHERE low_percentile <= 80) AS years_on_record
- FROM cutoff_college_year_summary WHERE program_family='BBA' GROUP BY institution_code
-), final_summary AS (
- SELECT s.institution_code,i.institution_name,i.city,i.website,s.highest_cutoff,
- COALESCE(y.years_on_record,0) AS years_on_record,s.lowest_rank
- FROM summary s JOIN institutes i ON i.institution_code=s.institution_code
- LEFT JOIN years y ON y.institution_code=s.institution_code
-)
-SELECT *, COUNT(*) OVER () AS total_count
-FROM final_summary ORDER BY highest_cutoff DESC NULLS LAST, institution_name ASC
-LIMIT 50 OFFSET 0"""
-                with connect() as c:
-                    for row in c.execute(explain_sql):
-                        log.info('DB_EXPLAIN %s', row['QUERY PLAN'])
-                log.info('DB_EXPLAIN completed')
 
             with connect() as c:
                 c.execute("""
