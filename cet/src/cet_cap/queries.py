@@ -166,28 +166,23 @@ def search_college_summary_page(
         "comp": "highest_cutoff DESC, institution_name ASC, institution_code ASC",
     }.get(sort, "highest_cutoff DESC, institution_name ASC, institution_code ASC")
     query = text(f"""
-        WITH eligible_high AS (
-            SELECT DISTINCT ON (c.institution_code)
-                   c.institution_code,
-                   c.percentile AS highest_cutoff
+        WITH eligible AS (
+            SELECT c.institution_code,
+                   c.percentile,
+                   c.rank_number
             FROM cutoffs c
             JOIN programs p ON p.program_id = c.program_id
             WHERE c.percentile <= :percentage
               AND p.program_family = :program_family
               AND {ZERO_CUTOFF_ARTIFACT_FILTER}
-            ORDER BY c.institution_code, c.percentile DESC
         ),
-        eligible_low AS (
-            SELECT DISTINCT ON (c.institution_code)
-                   c.institution_code,
-                   c.rank_number AS lowest_rank
-            FROM cutoffs c
-            JOIN programs p ON p.program_id = c.program_id
-            WHERE c.percentile <= :percentage
-              AND p.program_family = :program_family
-              AND {ZERO_CUTOFF_ARTIFACT_FILTER}
-            ORDER BY c.institution_code, c.percentile ASC NULLS LAST,
-                     c.rank_number ASC NULLS LAST
+        summary AS (
+            SELECT e.institution_code,
+                   MAX(e.percentile) AS highest_cutoff,
+                   (array_agg(e.rank_number ORDER BY e.percentile ASC NULLS LAST,
+                              e.rank_number ASC NULLS LAST))[1] AS lowest_rank
+            FROM eligible e
+            GROUP BY e.institution_code
         ),
         years AS (
             SELECT institution_code,
@@ -196,23 +191,22 @@ def search_college_summary_page(
             WHERE program_family = :program_family
             GROUP BY institution_code
         ),
-        summary AS (
-            SELECT h.institution_code,
+        final_summary AS (
+            SELECT s.institution_code,
                    i.institution_name,
                    i.city,
                    i.website,
-                   h.highest_cutoff,
+                   s.highest_cutoff,
                    COALESCE(y.years_on_record, 0) AS years_on_record,
-                   l.lowest_rank
-            FROM eligible_high h
-            JOIN eligible_low l ON l.institution_code = h.institution_code
-            JOIN institutes i ON i.institution_code = h.institution_code
-            LEFT JOIN years y ON y.institution_code = h.institution_code
+                   s.lowest_rank
+            FROM summary s
+            JOIN institutes i ON i.institution_code = s.institution_code
+            LEFT JOIN years y ON y.institution_code = s.institution_code
             WHERE 1=1
               {city_clause}
         )
         SELECT *, COUNT(*) OVER () AS total_count
-        FROM summary
+        FROM final_summary
         ORDER BY {order}
         LIMIT :limit OFFSET :offset
     """)
