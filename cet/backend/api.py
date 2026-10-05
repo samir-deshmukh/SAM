@@ -517,6 +517,7 @@ def search_colleges(
         )
 
     # Aggregate, sort and paginate in PostgreSQL; only one page reaches pandas.
+    search_started = time.perf_counter()
     paged_df, total_count = search_college_summary_page(
         engine,
         percentage=percentile,
@@ -526,6 +527,7 @@ def search_colleges(
         page=page,
         page_size=page_size,
     )
+    search_query_ms = (time.perf_counter() - search_started) * 1000
 
     if paged_df.empty:
         return SearchResponse(total=total_count, page=page, page_size=page_size, results=[])
@@ -534,7 +536,11 @@ def search_colleges(
 
     results = []
     paged_codes = [str(v) for v in paged_df["institution_code"].tolist()]
+    metadata_started = time.perf_counter()
     drawer_meta, legacy_meta, seat_meta = _search_metadata(engine, course, paged_codes)
+    metadata_ms = (time.perf_counter() - metadata_started) * 1000
+    if os.getenv("CET_PERF_DEBUG") == "1":
+        print(f"PERF search_api query_path={search_query_ms:.1f}ms metadata={metadata_ms:.1f}ms page_rows={len(paged_df)}", flush=True)
     for _, row in paged_df.iterrows():
         # Status calculation: safe if candidate percentage >= highest cutoff
         cutoff_val = float(row["highest_cutoff"])

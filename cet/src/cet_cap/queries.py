@@ -30,6 +30,8 @@ than a silent filter in every query.
 
 from __future__ import annotations
 
+import os
+import time
 import pandas as pd
 from sqlalchemy import Engine, text
 
@@ -188,8 +190,14 @@ def search_college_summary_page(
         ORDER BY {order}
         LIMIT :limit OFFSET :offset
     """)
+    t0 = time.perf_counter()
     with engine.connect() as conn:
+        t_connect = time.perf_counter() - t0
+        t1 = time.perf_counter()
         df = pd.read_sql_query(query, conn, params=params)
+        t_query = time.perf_counter() - t1
+    if os.getenv("CET_PERF_DEBUG") == "1":
+        print(f"PERF search_college_summary_page connect={t_connect*1000:.1f}ms query_fetch={t_query*1000:.1f}ms rows={len(df)}", flush=True)
     if not df.empty:
         total = int(df["total_count"].iloc[0])
         df = df.drop(columns=["total_count"])
