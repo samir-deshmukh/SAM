@@ -220,7 +220,11 @@ class SearchResponse(BaseModel):
 
 
 def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple[dict[str, dict], dict[str, dict], dict[str, bool]]:
-    """Fetch both search metadata sets in one PostgreSQL round trip."""
+    """Fetch only metadata required by search cards in one PostgreSQL round trip.
+
+    Drawer filter options are loaded lazily by the drawer's trend-options
+    endpoint, so aggregating them for every search result is unnecessary work.
+    """
     if not institution_codes:
         return {}, {}, {}
 
@@ -234,23 +238,7 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
 
     query = text(
         f"""
-        WITH drawer AS (
-            SELECT institution_code,
-                   jsonb_agg(
-                       jsonb_build_object(
-                           'ladies', is_ladies,
-                           'year', year,
-                           'category', base_category,
-                           'section', section_code
-                       )
-                       ORDER BY is_ladies, year, base_category, section_code
-                   ) AS rows
-            FROM cutoff_filter_options
-            WHERE program_family = :course
-              AND institution_code IN ({code_sql})
-            GROUP BY institution_code
-        ),
-        legacy AS (
+        WITH legacy AS (
             SELECT institution_code,
                    jsonb_agg(
                        jsonb_build_object(
@@ -266,16 +254,14 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
               AND institution_code IN ({code_sql})
             GROUP BY institution_code
         )
-        SELECT COALESCE(d.institution_code, l.institution_code) AS institution_code,
-               d.rows AS drawer_rows,
+        SELECT l.institution_code,
                l.rows AS legacy_rows,
                EXISTS (
                    SELECT 1 FROM seat_matrix_runtime sm
                    WHERE sm.program_family = :course
-                     AND sm.institution_code = COALESCE(d.institution_code, l.institution_code)
+                     AND sm.institution_code = l.institution_code
                ) AS has_seat_matrix
-        FROM drawer d
-        FULL OUTER JOIN legacy l USING (institution_code)
+        FROM legacy l
         """
     )
 
@@ -287,24 +273,8 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
     seat_meta = {}
     for row in rows:
         code = str(row[0])
-        drawer_rows = row[1] or []
-        legacy_rows = row[2] or []
-        seat_meta[code] = bool(row[3])
-
-        if drawer_rows:
-            record = {"y": set(), "c": {"0": {}, "1": {}}}
-            for item in drawer_rows:
-                ladies_key = "1" if bool(item["ladies"]) else "0"
-                record["y"].add(int(item["year"]))
-                category = str(item["category"])
-                record["c"][ladies_key].setdefault(category, set()).add(str(item["section"]))
-            record["y"] = sorted(record["y"])
-            for ladies_key, categories in record["c"].items():
-                record["c"][ladies_key] = [
-                    {"v": category, "q": sorted(sections)}
-                    for category, sections in sorted(categories.items())
-                ]
-            drawer_meta[code] = record
+        legacy_rows = row[1] or []
+        seat_meta[code] = bool(row[2])
 
         if legacy_rows:
             history = [
