@@ -67,8 +67,6 @@ def available_public_courses(engine) -> list[str]:
 
 def check_rate_limit(request: Request):
     """Enforce bounded, per-process request limits per client IP."""
-    if os.getenv("LOAD_TEST_MODE", "").lower() == "true":
-        return
     ip = client_ip(request)
     now = time.monotonic()
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
@@ -124,16 +122,6 @@ def _require_public_course(course: str, engine=None) -> None:
         engine = get_active_engine()
     if course not in available_public_courses(engine):
         raise HTTPException(status_code=400, detail="Course is not available in the current database dataset.")
-
-
-@router.get("/_debug_ip")
-def debug_ip(request: Request):
-    """TEMPORARY diagnostic route - remove once Render's proxy IP/header
-    behavior is confirmed. Not linked from the UI."""
-    return {
-        "peer": request.client.host if request.client else None,
-        "x_forwarded_for": request.headers.get("x-forwarded-for"),
-    }
 
 
 @router.get("/options")
