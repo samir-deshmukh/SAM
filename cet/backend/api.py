@@ -54,6 +54,8 @@ _request_history: dict[str, list[float]] = {}
 PUBLIC_COURSES = None
 _PUBLIC_COURSES_AT = 0.0
 _PUBLIC_COURSES_TTL = 30.0
+_SEARCH_METADATA_CACHE: dict[str, tuple[float, dict[str, dict], dict[str, dict]]] = {}
+_SEARCH_METADATA_TTL = 30.0
 
 
 def available_public_courses(engine) -> list[str]:
@@ -228,6 +230,16 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
     if not institution_codes:
         return {}, {}, {}
 
+    now = time.monotonic()
+    cached = _SEARCH_METADATA_CACHE.get(course)
+    if cached and now - cached[0] < _SEARCH_METADATA_TTL:
+        _, cached_legacy, cached_seat = cached
+        return (
+            {},
+            {code: cached_legacy[code] for code in institution_codes if code in cached_legacy},
+            {code: cached_seat.get(code, False) for code in institution_codes},
+        )
+
     params = {"course": course}
     placeholders = []
     for index, code in enumerate(institution_codes):
@@ -299,6 +311,7 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
             item["cutoff"] = best["rank"]
             legacy_meta[code] = item
 
+    _SEARCH_METADATA_CACHE[course] = (now, legacy_meta, seat_meta)
     return drawer_meta, legacy_meta, seat_meta
 
 @router.get("/colleges/{institution_code}/trend-options")
