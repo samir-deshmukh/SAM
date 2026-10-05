@@ -16,7 +16,7 @@
 <meta name="theme-color" content="#0B0B0F">
 
 <!-- Google Fonts: Fraunces (serif headings), Inter (body), JetBrains Mono (numbers/code) -->
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- Local/system fonts: avoid an external render-time font dependency. -->
 
 
 <!-- Public data is fetched from the PostgreSQL-backed API. No cutoff/seat dataset is embedded in this page. -->
@@ -49,7 +49,7 @@
 html { scroll-behavior: smooth; }  /* smooth scroll when clicking #anchors */
 
 body {
-  font-family: 'Inter', -apple-system, sans-serif;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--paper-100);
   color: var(--paper-800);
   line-height: 1.55;
@@ -190,7 +190,7 @@ body.no-scroll { overflow: hidden; }
 }
 
 .hero h1 {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Times New Roman', serif;
   font-size: clamp(40px, 8vw, 108px);  /* grows between 40px and 108px */
   font-weight: 600; line-height: 0.98; letter-spacing: -0.035em;
   margin-bottom: 28px; color: var(--ink-900);
@@ -246,7 +246,7 @@ body.no-scroll { overflow: hidden; }
 }
 .hero-stat { padding: 24px; background: rgba(253,253,253,0.7); backdrop-filter: blur(12px); }
 .hero-stat-num {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Times New Roman', serif;
   font-size: clamp(28px, 4vw, 44px); font-weight: 600;
   line-height: 1; letter-spacing: -0.03em;
   display: block; margin-bottom: 6px;
@@ -280,7 +280,7 @@ body.no-scroll { overflow: hidden; }
   content: ''; width: 24px; height: 1px; background: currentColor;
 }
 .section-title {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Times New Roman', serif;
   font-size: clamp(28px, 5vw, 60px); font-weight: 600;
   line-height: 1.05; letter-spacing: -0.03em;
   color: var(--ink-900); max-width: 720px;
@@ -329,7 +329,7 @@ body.no-scroll { overflow: hidden; }
 
 /* ─── The big typable percentile number ─── */
 .percentile-value {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Times New Roman', serif;
   font-size: clamp(56px, 9vw, 96px);
   font-weight: 600; line-height: 1;
   letter-spacing: -0.05em;
@@ -489,7 +489,7 @@ select.ssel-native { display: none; }
   border-bottom: none;             /* the table below provides the bottom border */
   flex-wrap: wrap; gap: 16px;
 }
-.results-count strong { font-family: 'Fraunces', serif; font-size: 28px; font-weight: 600; color: var(--ink-900); margin-right: 8px; }
+.results-count strong { font-family: Georgia, 'Times New Roman', serif; font-size: 28px; font-weight: 600; color: var(--ink-900); margin-right: 8px; }
 .results-count span { color: var(--paper-700); font-size: 13.5px; font-weight: 500; }
 
 .chip-group { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -546,9 +546,9 @@ tbody tr.active td:first-child { box-shadow: inset 3px 0 0 var(--ink-900); }  /*
 tbody tr:last-child td { border-bottom: none; }
 
 /* Small monospace number styles for rank / cutoff / percentile */
-.rank-num { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--paper-600); }
-.cutoff-num { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: var(--ink-900); }
-.pct-num { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: var(--ink-900); }
+.rank-num { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 13px; color: var(--paper-600); }
+.cutoff-num { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 15px; font-weight: 600; color: var(--ink-900); }
+.pct-num { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 15px; font-weight: 600; color: var(--ink-900); }
 
 /* College name + meta line ("VJTI · Mumbai · MCA") */
 .college-name { font-weight: 600; color: var(--ink-900); font-size: 14px; display: block; margin-bottom: 3px; }
@@ -567,7 +567,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 
 /* Shown when filters return zero colleges */
 .empty-state { padding: 80px 24px; text-align: center; }
-.empty-state h4 { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 600; color: var(--ink-900); margin-bottom: 8px; }
+.empty-state h4 { font-family: Georgia, 'Times New Roman', serif; font-size: 22px; font-weight: 600; color: var(--ink-900); margin-bottom: 8px; }
 .empty-state p { font-size: 14px; color: var(--paper-600); }
 
 
@@ -640,13 +640,13 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
   min-width: 52px; height: 52px; padding: 0 12px;
   background: var(--ink-900); color: var(--paper-50);
   border-radius: 14px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 14px; font-weight: 600; letter-spacing: -0.02em;
   flex-shrink: 0;
 }
 .drawer-headtext { flex: 1; min-width: 0; }
 .drawer-eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--paper-600); margin-bottom: 8px; }
-.drawer-title { font-family: 'Fraunces', serif; font-size: clamp(24px, 3vw, 38px); font-weight: 600; line-height: 1.12; letter-spacing: -0.025em; color: var(--ink-900); }
+.drawer-title { font-family: Georgia, 'Times New Roman', serif; font-size: clamp(24px, 3vw, 38px); font-weight: 600; line-height: 1.12; letter-spacing: -0.025em; color: var(--ink-900); }
 
 /* The X close button */
 .drawer-close {
@@ -713,7 +713,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 }
 .d-stat { background: var(--paper-50); padding: 22px 24px; }
 .d-stat-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--paper-600); margin-bottom: 8px; }
-.d-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 600; color: var(--ink-900); letter-spacing: -0.02em; }
+.d-stat-value { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 22px; font-weight: 600; color: var(--ink-900); letter-spacing: -0.02em; }
 .d-stat-value small { font-size: 13px; font-weight: 500; color: var(--paper-600); margin-left: 3px; }
 
 /* ─── Generic slide sections: title + content ─── */
@@ -737,7 +737,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 .d-bar-row { display: grid; grid-template-columns: 130px 1fr 100px; align-items: center; gap: 18px; font-size: 13px; }
 .d-bar-track { height: 10px; background: var(--paper-200); border-radius: 100px; overflow: hidden; }
 .d-bar-fill { height: 100%; background: var(--ink-900); border-radius: 100px; width: 0; transition: width .9s cubic-bezier(0.16,1,0.3,1); }
-.d-bar-row .val { font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--ink-900); text-align: right; }
+.d-bar-row .val { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-weight: 600; color: var(--ink-900); text-align: right; }
 .d-bar-row .lbl { color: var(--paper-600); font-weight: 500; }
 
 
@@ -775,7 +775,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
   left: 0; top: 32px; bottom: 0;
   width: 28px;
   display: flex; flex-direction: column; justify-content: space-between;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 10px; color: var(--paper-500);
   text-align: right;
 }
@@ -805,7 +805,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 .d-gap-bar .d-gap-val {
   position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
   margin-bottom: 5px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 11px; font-weight: 700; white-space: nowrap;
   color: var(--ink-900);
 }
@@ -818,7 +818,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 
 /* Highest/lowest overall summary shown above the chart. */
 .d-gap-summary { display: flex; gap: 24px; margin: 10px 0 16px; flex-wrap: wrap; font-size: 13px; color: var(--paper-700); font-weight: 500; }
-.d-gap-summary strong { color: var(--ink-900); font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.d-gap-summary strong { color: var(--ink-900); font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; }
 
 /* ═══════════════════════════════════════════════════════════════════
    ██  SECTION 10: FOOTER
@@ -826,7 +826,7 @@ tbody tr:hover .row-arrow { transform: translateX(4px); color: var(--ink-900); }
 
 footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px 48px; position: relative; z-index: 10; }
 .footer-inner { max-width: 1240px; margin: 0 auto; }
-.footer-title { font-family: 'Fraunces', serif; font-size: clamp(32px, 6vw, 80px); font-weight: 600; line-height: 1.05; letter-spacing: -0.035em; margin-bottom: 60px; max-width: 900px; }
+.footer-title { font-family: Georgia, 'Times New Roman', serif; font-size: clamp(32px, 6vw, 80px); font-weight: 600; line-height: 1.05; letter-spacing: -0.035em; margin-bottom: 60px; max-width: 900px; }
 .footer-title em { font-style: italic; font-weight: 400; color: rgba(255,255,255,0.5); }
 .footer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 40px; padding-top: 48px; border-top: 1px solid rgba(255,255,255,0.1); }
 .footer-col h5 { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.88); margin-bottom: 14px; }
@@ -877,7 +877,7 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
   display: flex; align-items: center; gap: 10px;
 }
 .trends-eyebrow::before { content: ''; width: 28px; height: 1px; background: var(--paper-500); }
-.trends-title { font-family: 'Fraunces', serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 8px; }
+.trends-title { font-family: Georgia, 'Times New Roman', serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 8px; }
 .trends-title em { font-style: italic; font-weight: 400; color: var(--paper-600); }
 .trends-desc { font-size: 14px; color: var(--paper-700); max-width: 640px; line-height: 1.6; }
 
@@ -921,7 +921,7 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
   min-width: 88px; padding: 11px 16px; border-radius: 14px;
   border: 1px solid var(--paper-300);
   background: var(--paper-50); color: var(--ink-900);
-  font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   cursor: pointer; transition: transform .18s, background .18s, border-color .18s;
   display: flex; align-items: center; justify-content: center; gap: 8px;
 }
@@ -981,7 +981,7 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
   text-align: center; padding: 40px;
   color: var(--paper-600); font-size: 14px; line-height: 1.6;
 }
-.trends-empty strong { display: block; color: var(--ink-900); font-family: 'Fraunces', serif; font-size: 19px; font-weight: 600; margin-bottom: 8px; }
+.trends-empty strong { display: block; color: var(--ink-900); font-family: Georgia, 'Times New Roman', serif; font-size: 19px; font-weight: 600; margin-bottom: 8px; }
 
 /* ── Insight badges under the chart ── */
 .trends-insights {
@@ -994,7 +994,7 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
   border-radius: 14px; padding: 18px 20px;
 }
 .tin-label { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--paper-600); margin-bottom: 8px; }
-.tin-value { display: block; font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 600; color: var(--ink-900); }
+.tin-value { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 17px; font-weight: 600; color: var(--ink-900); }
 .tin-value.up { color: #2E7D4F; }
 .tin-value.down { color: #B23A3A; }
 
@@ -1533,7 +1533,7 @@ const API_BASE = "https://cetfind-backend.onrender.com";
       });
       fetch(API_BASE + "/api/analytics/event", {
         method: "POST",
-        headers: {"Content-Type":"application/json","Accept":"application/json"},
+        headers: {"Content-Type":"text/plain;charset=UTF-8"},
         body: JSON.stringify({event, session_id: ANALYTICS_SESSION_ID, data: safe}),
         keepalive: true
       }).catch(() => {});

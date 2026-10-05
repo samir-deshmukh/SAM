@@ -286,7 +286,8 @@ async def public_feedback(request: Request):
 async def analytics_event(request: Request):
     """Store anonymous website usage events without IPs or personal details."""
     try:
-        body = await request.json()
+        raw = await request.body()
+        body = json.loads(raw.decode('utf-8'))
     except Exception:
         raise HTTPException(400, 'Invalid analytics payload')
     if not isinstance(body, dict):
