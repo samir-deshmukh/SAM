@@ -56,7 +56,7 @@ FROM final_summary ORDER BY highest_cutoff DESC NULLS LAST, institution_name ASC
 LIMIT 50 OFFSET 0"""
                 with connect() as c:
                     for row in c.execute(explain_sql):
-                        log.info('DB_EXPLAIN %s', row[0])
+                        log.info('DB_EXPLAIN %s', row._mapping['QUERY PLAN'])
                 log.info('DB_EXPLAIN completed')
 
             with connect() as c:
