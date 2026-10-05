@@ -190,9 +190,29 @@ def search_college_summary_page(
     """)
     with engine.connect() as conn:
         df = pd.read_sql_query(query, conn, params=params)
-    total = int(df["total_count"].iloc[0]) if not df.empty else 0
     if not df.empty:
+        total = int(df["total_count"].iloc[0])
         df = df.drop(columns=["total_count"])
+        return df, total
+
+    # An out-of-range page has no rows, so COUNT(*) OVER() cannot report
+    # the total. Run the bounded aggregate again only in this edge case.
+    count_query = text(f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT c.institution_code
+            FROM cutoffs c
+            JOIN institutes i ON i.institution_code = c.institution_code
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE c.percentile <= :percentage
+              AND p.program_family = :program_family
+              AND {ZERO_CUTOFF_ARTIFACT_FILTER}
+              {city_clause}
+            GROUP BY c.institution_code
+        ) AS summary_count
+    """)
+    with engine.connect() as conn:
+        total = int(pd.read_sql_query(count_query, conn, params=params).iloc[0, 0])
     return df, total
 
 
