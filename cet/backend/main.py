@@ -91,6 +91,12 @@ async def lifespan(_app):
     yield
 
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.get('/healthz', include_in_schema=False)
+def healthz():
+    """Cheap liveness endpoint for the hosting platform."""
+    return {'ok': True}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://cetfind.onrender.com"],
