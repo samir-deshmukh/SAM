@@ -4,16 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
 <title>CETFind — Maharashtra CET CAP College Finder</title>
-<meta name="description" content="CETFind helps Maharashtra CET candidates explore historical CAP cutoff and seat-matrix data across BCA, BBA, MBA and MCA and compare colleges by percentile and city.">
+<meta name="description" content="CETFind helps Maharashtra CET candidates explore historical Maharashtra CET CAP cutoff and seat-matrix data, with a public BBA college directory and comparison tools by percentile and city.">
 <meta name="robots" content="index, follow, max-image-preview:large">
 <link rel="canonical" href="https://cetfind.onrender.com/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="CETFind — Maharashtra CET CAP College Finder">
-<meta property="og:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data across BCA, BBA, MBA and MCA.">
+<meta property="og:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data with CETFind's public BBA college directory.">
 <meta property="og:url" content="https://cetfind.onrender.com/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="CETFind — Maharashtra CET CAP College Finder">
-<meta name="twitter:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data across BCA, BBA, MBA and MCA.">
+<meta name="twitter:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data with CETFind's public BBA college directory.">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="theme-color" content="#0B0B0F">
 <script type="application/ld+json">
@@ -224,6 +224,18 @@ body.no-scroll { overflow: hidden; }
 .hero-actions { display: flex; gap: 12px; margin-bottom: 64px; flex-wrap: wrap; }
 .hero-actions .knowledge-link { color: var(--ink-900); text-decoration: none; display: inline-flex; align-items: center; padding: 16px 6px; font-size: 14.5px; font-weight: 600; }
 .hero-actions .knowledge-link:hover { color: var(--ink-700); text-decoration: underline; text-underline-offset: 4px; }
+.seo-directory { padding: 34px 0 72px; }
+.seo-directory-inner { max-width: 1240px; margin: 0 auto; padding: 0 48px; }
+.seo-directory-card { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 30px 34px; border: 1px solid var(--paper-300); background: var(--paper-50); border-radius: 18px; }
+.seo-directory-copy h2 { margin: 0 0 8px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(25px, 3vw, 38px); font-weight: 600; letter-spacing: -0.025em; }
+.seo-directory-copy p { margin: 0; max-width: 720px; color: var(--ink-700); line-height: 1.65; font-size: 14px; }
+.seo-directory-link { flex: 0 0 auto; display: inline-flex; align-items: center; padding: 13px 18px; border-radius: 999px; background: var(--ink-900); color: var(--paper-50) !important; text-decoration: none; font-size: 13px; font-weight: 700; }
+.seo-directory-link:hover { opacity: .86; }
+@media (max-width: 760px) {
+  .seo-directory-inner { padding: 0 20px; }
+  .seo-directory-card { align-items: flex-start; flex-direction: column; padding: 24px; }
+}
+
 
 /* ─── Two button styles: solid black + frosted white ─── */
 .btn-primary {
@@ -1365,6 +1377,19 @@ body{letter-spacing:-.01em;}
         <div class="hero-stat"><span class="hero-stat-num" data-stat="cutoff_records" data-target="0">—</span><span class="hero-stat-label">Cutoff Records</span></div>
         <div class="hero-stat"><span class="hero-stat-num" data-stat="cap_rounds" data-target="0">—</span><span class="hero-stat-label">CAP Rounds</span></div>
         <div class="hero-stat"><span class="hero-stat-num" data-stat="latest_year" data-target="0">—</span><span class="hero-stat-label">Latest Year</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Public, crawlable directory entry point -->
+  <section class="seo-directory" aria-labelledby="directory-title">
+    <div class="seo-directory-inner">
+      <div class="seo-directory-card">
+        <div class="seo-directory-copy">
+          <h2 id="directory-title">Explore the public BBA directory.</h2>
+          <p>Browse the currently published BBA college records by city, then open individual college pages for historical CAP data. These pages are built from CETFind's public dataset and are separate from the interactive search below.</p>
+        </div>
+        <a class="seo-directory-link" href="seo/courses/bba.html">Browse BBA colleges →</a>
       </div>
     </div>
   </section>
