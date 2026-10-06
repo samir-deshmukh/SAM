@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from starlette.requests import Request
 
 import backend.api as api
@@ -86,10 +86,11 @@ def test_public_options_uses_database_values(monkeypatch):
 
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
-    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BBA"])
+    monkeypatch.setattr(api, "available_public_courses", lambda engine: ["BBA"])
     api._request_history.clear()
+    api._PUBLIC_CACHE.clear()
 
-    result = api.public_options(request_for("10.0.0.2"))
+    result = api.public_options(request_for("10.0.0.2"), Response())
 
     assert result == {"cities": ["Amravati", "Pune"], "courses": ["BBA"]}
 
@@ -159,8 +160,9 @@ def test_search_rejects_unknown_course(monkeypatch):
 
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
-    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BCA"])
+    monkeypatch.setattr(api, "available_public_courses", lambda engine: ["BCA"])
     api._request_history.clear()
+    api._PUBLIC_CACHE.clear()
 
     with pytest.raises(HTTPException) as exc:
         api.search_colleges(
@@ -224,3 +226,63 @@ def test_search_metadata_is_compact_and_bounded():
     }
     assert legacy["01102"]["cutoff"] == 1500
     assert legacy["01102"]["percentile"] == 75.0
+
+
+def test_ttl_cache_computes_once_and_does_not_cache_errors():
+    cache = api._TTLCache()
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return {"ok": True}
+
+    assert cache.get_or_set("k", 60, factory) == {"ok": True}
+    assert cache.get_or_set("k", 60, factory) == {"ok": True}
+    assert len(calls) == 1
+
+    def boom():
+        raise RuntimeError("db down")
+
+    with pytest.raises(RuntimeError):
+        cache.get_or_set("bad", 60, boom)
+    assert cache.get_or_set("bad", 60, lambda: 5) == 5
+
+
+def test_ttl_cache_expires_entries():
+    cache = api._TTLCache()
+    calls = []
+    cache.get_or_set("k", 0, lambda: calls.append(1) or 1)
+    cache.get_or_set("k", 0, lambda: calls.append(1) or 1)
+    assert len(calls) == 2
+
+
+def test_search_metadata_cache_serves_every_college_not_just_the_first_page():
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query, params):
+            codes = [v for k, v in params.items() if k.startswith("code_")]
+
+            class Result:
+                def fetchall(self_inner):
+                    return [
+                        (c, [{"year": 2026, "low": 70.0, "high": 80.0, "rank": 100}], True)
+                        for c in codes
+                    ]
+
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    api._SEARCH_METADATA_CACHE.clear()
+    _, legacy1, seat1 = api._search_metadata(Engine(), "BCA", ["A1"])
+    _, legacy2, seat2 = api._search_metadata(Engine(), "BCA", ["B2", "A1"])
+    assert set(legacy1) == {"A1"}
+    assert set(legacy2) == {"A1", "B2"}
+    assert seat2 == {"B2": True, "A1": True}

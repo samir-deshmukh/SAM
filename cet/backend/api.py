@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -54,8 +55,55 @@ _request_history: dict[str, list[float]] = {}
 PUBLIC_COURSES = None
 _PUBLIC_COURSES_AT = 0.0
 _PUBLIC_COURSES_TTL = 30.0
-_SEARCH_METADATA_CACHE: dict[str, tuple[float, dict[str, dict], dict[str, dict]]] = {}
+_SEARCH_METADATA_CACHE: dict[str, tuple[float, dict[str, dict], dict[str, dict], set]] = {}
 _SEARCH_METADATA_TTL = 30.0
+
+
+class _TTLCache:
+    """Small thread-safe TTL cache with single-flight computation.
+
+    Public data only changes when an admin publishes a release, so identical
+    requests (page-load options/stats, popular searches) can be answered from
+    memory. Concurrent misses for the same key compute once instead of
+    stampeding the database on the small free-tier instance. Exceptions are
+    never cached.
+    """
+
+    def __init__(self, max_items: int = 512):
+        self._max = max_items
+        self._data: dict = {}
+        self._locks: dict = {}
+        self._guard = threading.Lock()
+
+    def get_or_set(self, key, ttl: float, factory):
+        now = time.monotonic()
+        hit = self._data.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        with self._guard:
+            lock = self._locks.setdefault(key, threading.Lock())
+        with lock:
+            hit = self._data.get(key)
+            if hit and time.monotonic() - hit[0] < ttl:
+                return hit[1]
+            value = factory()
+            with self._guard:
+                if len(self._data) >= self._max:
+                    oldest = min(self._data, key=lambda k: self._data[k][0])
+                    self._data.pop(oldest, None)
+                    self._locks.pop(oldest, None)
+                self._data[key] = (time.monotonic(), value)
+            return value
+
+    def clear(self):
+        with self._guard:
+            self._data.clear()
+
+
+_PUBLIC_CACHE = _TTLCache()
+_OPTIONS_TTL = 300.0
+_STATS_TTL = 300.0
+_SEARCH_TTL = 60.0
 
 
 def available_public_courses(engine) -> list[str]:
@@ -136,9 +184,14 @@ def _require_public_course(course: str, engine=None) -> None:
 
 
 @router.get("/options")
-def public_options(request: Request):
+def public_options(request: Request, response: Response):
     """Return the bounded city/course lists needed to initialize the search UI."""
     check_rate_limit(request)
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return _PUBLIC_CACHE.get_or_set("options", _OPTIONS_TTL, _build_public_options)
+
+
+def _build_public_options():
     try:
         engine = get_active_engine()
     except Exception:
@@ -166,9 +219,14 @@ def public_options(request: Request):
 
 
 @router.get("/stats")
-def public_stats(request: Request):
+def public_stats(request: Request, response: Response):
     """Return public-facing totals calculated from the full database dataset."""
     check_rate_limit(request)
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return _PUBLIC_CACHE.get_or_set("stats", _STATS_TTL, _build_public_stats)
+
+
+def _build_public_stats():
     try:
         engine = get_active_engine()
         with engine.connect() as conn:
@@ -233,16 +291,21 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
     now = time.monotonic()
     cached = _SEARCH_METADATA_CACHE.get(course)
     if cached and now - cached[0] < _SEARCH_METADATA_TTL:
-        _, cached_legacy, cached_seat = cached
-        return (
-            {},
-            {code: cached_legacy[code] for code in institution_codes if code in cached_legacy},
-            {code: cached_seat.get(code, False) for code in institution_codes},
-        )
+        cache_at, cached_legacy, cached_seat, queried = cached
+        to_query = [code for code in institution_codes if code not in queried]
+        if not to_query:
+            return (
+                {},
+                {code: cached_legacy[code] for code in institution_codes if code in cached_legacy},
+                {code: cached_seat.get(code, False) for code in institution_codes},
+            )
+    else:
+        cache_at, cached_legacy, cached_seat, queried = now, {}, {}, set()
+        to_query = list(institution_codes)
 
     params = {"course": course}
     placeholders = []
-    for index, code in enumerate(institution_codes):
+    for index, code in enumerate(to_query):
         key = f"code_{index}"
         placeholders.append(f":{key}")
         params[key] = code
@@ -311,8 +374,18 @@ def _search_metadata(engine, course: str, institution_codes: list[str]) -> tuple
             item["cutoff"] = best["rank"]
             legacy_meta[code] = item
 
-    _SEARCH_METADATA_CACHE[course] = (now, legacy_meta, seat_meta)
-    return drawer_meta, legacy_meta, seat_meta
+    # Merge into the per-course cache so later pages/filters (different
+    # institution codes) are served correctly instead of from a snapshot that
+    # only contained the first request's colleges.
+    cached_legacy.update(legacy_meta)
+    cached_seat.update(seat_meta)
+    queried.update(to_query)
+    _SEARCH_METADATA_CACHE[course] = (cache_at, cached_legacy, cached_seat, queried)
+    return (
+        drawer_meta,
+        {code: cached_legacy[code] for code in institution_codes if code in cached_legacy},
+        {code: cached_seat.get(code, False) for code in institution_codes},
+    )
 
 @router.get("/colleges/{institution_code}/trend-options")
 def college_trend_options(
@@ -488,6 +561,14 @@ def search_colleges(
     - Bounded page_size (max 50) prevents excessive memory usage or bulk dumping
     """
     check_rate_limit(request)
+    key = ("search", course, percentile, (city or "").strip().lower(), sort, page, page_size)
+    return _PUBLIC_CACHE.get_or_set(
+        key, _SEARCH_TTL,
+        lambda: _search_colleges_uncached(course, percentile, city, sort, page, page_size),
+    )
+
+
+def _search_colleges_uncached(course, percentile, city, sort, page, page_size) -> SearchResponse:
     try:
         engine = get_active_engine()
     except Exception:
