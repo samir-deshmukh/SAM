@@ -219,3 +219,14 @@ def test_options_and_stats_cached_once_and_set_cache_header(monkeypatch):
     s1, s2 = api.public_stats(req(), Response()), api.public_stats(req(), Response())
     assert s1 == s2 and s1["colleges"] == 1
     assert n["conn"] == 2  # one DB hit for options + one for stats, not four
+
+
+
+def test_rate_limit_default_is_60_without_env():
+    import subprocess, sys
+    out = subprocess.run(
+        [sys.executable, "-c", "import backend.api as a; print(a.RATE_LIMIT_MAX_REQUESTS)"],
+        capture_output=True, text=True, env={k: v for k, v in __import__("os").environ.items()
+                                             if k != "CET_RATE_LIMIT_MAX_REQUESTS"},
+    )
+    assert out.stdout.strip().splitlines()[-1] == "60", out.stderr

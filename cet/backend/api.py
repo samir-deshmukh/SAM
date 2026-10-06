@@ -45,7 +45,11 @@ router = APIRouter(prefix="/api", tags=["Public Portal API"])
 
 # Rate limiting state: client_ip -> list of monotonic timestamps
 RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_MAX_REQUESTS = 60
+# Default 60/min/IP is unchanged. CET_RATE_LIMIT_MAX_REQUESTS exists ONLY so an
+# isolated load-test service can raise it (all test traffic comes from one IP).
+# Never set it on the production service.
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("CET_RATE_LIMIT_MAX_REQUESTS", "60"))
+_DIAG_IP_REMAINING = 300  # bounded: log only the first requests when CET_DIAG_IP=1
 RATE_LIMIT_MAX_KEYS = 5000
 _request_history: dict[str, list[float]] = {}
 
@@ -143,6 +147,19 @@ def available_public_courses(engine) -> list[str]:
 def check_rate_limit(request: Request):
     """Enforce bounded, per-process request limits per client IP."""
     ip = client_ip(request)
+    global _DIAG_IP_REMAINING
+    if _DIAG_IP_REMAINING > 0 and os.getenv("CET_DIAG_IP") == "1":
+        # TEMPORARY test-service diagnostic: shows which address the rate
+        # limiter buckets on versus what the proxy chain forwards.
+        _DIAG_IP_REMAINING -= 1
+        h = request.headers
+        print(
+            "DIAG_IP peer=%s bucket=%s xff=%r cf_connecting_ip=%r true_client_ip=%r x_real_ip=%r"
+            % (request.client.host if request.client else None, ip,
+               h.get("x-forwarded-for"), h.get("cf-connecting-ip"),
+               h.get("true-client-ip"), h.get("x-real-ip")),
+            flush=True,
+        )
     now = time.monotonic()
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
 
