@@ -69,7 +69,7 @@ class _TTLCache:
     never cached.
     """
 
-    def __init__(self, max_items: int = 512):
+    def __init__(self, max_items: int = 256):
         self._max = max_items
         self._data: dict = {}
         self._locks: dict = {}
@@ -82,18 +82,25 @@ class _TTLCache:
             return hit[1]
         with self._guard:
             lock = self._locks.setdefault(key, threading.Lock())
-        with lock:
-            hit = self._data.get(key)
-            if hit and time.monotonic() - hit[0] < ttl:
-                return hit[1]
-            value = factory()
+        try:
+            with lock:
+                hit = self._data.get(key)
+                if hit and time.monotonic() - hit[0] < ttl:
+                    return hit[1]
+                value = factory()
+                with self._guard:
+                    if len(self._data) >= self._max:
+                        oldest = min(self._data, key=lambda k: self._data[k][0])
+                        self._data.pop(oldest, None)
+                    self._data[key] = (time.monotonic(), value)
+                return value
+        finally:
+            # Never keep a lock per distinct key forever (keys include user
+            # input such as city or an invalid course). Dropping it can at
+            # worst let two racing misses compute twice; it cannot return
+            # wrong data.
             with self._guard:
-                if len(self._data) >= self._max:
-                    oldest = min(self._data, key=lambda k: self._data[k][0])
-                    self._data.pop(oldest, None)
-                    self._locks.pop(oldest, None)
-                self._data[key] = (time.monotonic(), value)
-            return value
+                self._locks.pop(key, None)
 
     def clear(self):
         with self._guard:
@@ -101,6 +108,15 @@ class _TTLCache:
 
 
 _PUBLIC_CACHE = _TTLCache()
+
+
+def invalidate_public_caches() -> None:
+    """Drop every cached public answer (call after approve/publish/rollback)."""
+    global PUBLIC_COURSES, _PUBLIC_COURSES_AT
+    _PUBLIC_CACHE.clear()
+    _SEARCH_METADATA_CACHE.clear()
+    PUBLIC_COURSES = None
+    _PUBLIC_COURSES_AT = 0.0
 _OPTIONS_TTL = 300.0
 _STATS_TTL = 300.0
 _SEARCH_TTL = 60.0

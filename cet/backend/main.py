@@ -16,7 +16,7 @@ from .admin_ui import dashboard, import_center, review_center, releases_page, he
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
                               resolve_import_job)
-from .api import router as public_api_router
+from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
 IMPORTS = BASE / 'data' / 'imports'
@@ -1096,6 +1096,7 @@ async def approve(request: Request, job_id: int, background_tasks: BackgroundTas
     with connect() as c:
         try:
             result = approve_import(c,job_id,u['uid'],notes)
+            invalidate_public_caches()
             background_tasks.add_task(_resolve_one_import_background, job_id)
             return result
         except ValueError as e: raise HTTPException(409,str(e))
@@ -1129,7 +1130,10 @@ async def rollback(request: Request, release_id: int):
     reason=str(body.get('reason','')).strip()[:4000]
     if not reason: raise HTTPException(400,'Rollback reason is required')
     with connect() as c:
-        try: return rollback_release(c,release_id,u['uid'],reason)
+        try:
+            result = rollback_release(c,release_id,u['uid'],reason)
+            invalidate_public_caches()
+            return result
         except ValueError as e: raise HTTPException(409,str(e))
 
 
@@ -1139,7 +1143,9 @@ def delete_rolled_back_release(request: Request, release_id: int):
     u=require(request, {'SUPER_ADMIN'}, csrf=True)
     with connect() as c:
         try:
-            return purge_rolled_back_release(c,release_id,u['uid'])
+            result = purge_rolled_back_release(c,release_id,u['uid'])
+            invalidate_public_caches()
+            return result
         except ValueError as e:
             raise HTTPException(409,str(e))
 
@@ -1151,7 +1157,10 @@ def publish(request: Request, release_id: int):
         rel=c.execute('SELECT * FROM data_releases WHERE id=?',(release_id,)).fetchone()
         if not rel: raise HTTPException(404,'Release not found')
         if rel['approved_by'] != u['uid'] and u['role'] != 'SUPER_ADMIN': raise HTTPException(403,'Only the approving admin or a super admin can publish this release')
-        try: return publish_release(c, int(rel['source_job_id']), release_id)
+        try:
+            result = publish_release(c, int(rel['source_job_id']), release_id)
+            invalidate_public_caches()
+            return result
         except ValueError as e: raise HTTPException(409,str(e))
         except Exception:
             log.exception('Release publish failed: release_id=%s', release_id)

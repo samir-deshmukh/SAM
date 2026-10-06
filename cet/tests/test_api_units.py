@@ -123,7 +123,8 @@ def test_search_colleges_builds_bounded_cards(monkeypatch):
     )
     monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
     monkeypatch.setattr(api, "_db_available", lambda engine: True)
-    monkeypatch.setattr(api, "available_program_families", lambda engine: ["BBA"])
+    monkeypatch.setattr(api, "available_public_courses", lambda engine: ["BBA"])
+    api._PUBLIC_CACHE.clear()
     summary = pd.DataFrame([{
         "institution_code": "01102",
         "institution_name": "Example College",
@@ -196,14 +197,10 @@ def test_search_metadata_is_compact_and_bounded():
                         (
                             "01102",
                             [
-                                {"ladies": False, "year": 2026, "category": "OPEN", "section": "HU"},
-                                {"ladies": False, "year": 2025, "category": "OPEN", "section": "OHU"},
-                                {"ladies": True, "year": 2026, "category": "SC", "section": "SL"},
-                            ],
-                            [
                                 {"year": 2026, "low": 80.0, "high": 90.0, "rank": 1200},
                                 {"year": 2025, "low": 75.0, "high": 88.0, "rank": 1500},
                             ],
+                            True,
                         )
                     ]
 
@@ -213,19 +210,15 @@ def test_search_metadata_is_compact_and_bounded():
         def connect(self):
             return Connection()
 
-    drawer, legacy = api._search_metadata(Engine(), "BCA", ["01102", "01103"])
+    api._SEARCH_METADATA_CACHE.clear()
+    drawer, legacy, seat = api._search_metadata(Engine(), "BCA", ["01102", "01103"])
 
-    assert drawer == {
-        "01102": {
-            "y": [2025, 2026],
-            "c": {
-                "0": [{"v": "OPEN", "q": ["HU", "OHU"]}],
-                "1": [{"v": "SC", "q": ["SL"]}],
-            },
-        }
-    }
+    # Drawer filter options are loaded lazily by /trend-options.
+    assert drawer == {}
     assert legacy["01102"]["cutoff"] == 1500
     assert legacy["01102"]["percentile"] == 75.0
+    assert "01103" not in legacy
+    assert seat == {"01102": True, "01103": False}
 
 
 def test_ttl_cache_computes_once_and_does_not_cache_errors():
