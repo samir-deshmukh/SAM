@@ -279,3 +279,26 @@ def test_search_metadata_cache_serves_every_college_not_just_the_first_page():
     assert set(legacy1) == {"A1"}
     assert set(legacy2) == {"A1", "B2"}
     assert seat2 == {"B2": True, "A1": True}
+
+
+def test_db_pool_defaults_are_bounded(monkeypatch):
+    from src.cet_cap import db
+    for key in ("CET_DB_POOL_SIZE", "CET_DB_MAX_OVERFLOW", "CET_DB_POOL_TIMEOUT"):
+        monkeypatch.delenv(key, raising=False)
+    engine = db.get_engine("postgresql://user:pass@localhost/db")
+    assert engine.pool.size() == 5
+    assert engine.pool._max_overflow == 5
+    assert engine.pool._timeout == 5.0
+    engine.dispose()
+
+
+def test_db_pool_settings_are_configurable(monkeypatch):
+    from src.cet_cap import db
+    monkeypatch.setenv("CET_DB_POOL_SIZE", "2")
+    monkeypatch.setenv("CET_DB_MAX_OVERFLOW", "3")
+    monkeypatch.setenv("CET_DB_POOL_TIMEOUT", "7")
+    engine = db.get_engine("postgresql://user:pass@localhost/db")
+    assert engine.pool.size() == 2
+    assert engine.pool._max_overflow == 3
+    assert engine.pool._timeout == 7.0
+    engine.dispose()
