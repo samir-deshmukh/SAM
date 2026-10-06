@@ -46,6 +46,7 @@ router = APIRouter(prefix="/api", tags=["Public Portal API"])
 # Rate limiting state: client_ip -> list of monotonic timestamps
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 60
+RATE_LIMIT_DISABLED = os.getenv("CET_DISABLE_RATE_LIMIT", "0") == "1"
 RATE_LIMIT_MAX_KEYS = 5000
 _request_history: dict[str, list[float]] = {}
 
@@ -141,6 +142,8 @@ def available_public_courses(engine) -> list[str]:
 
 
 def check_rate_limit(request: Request):
+    if RATE_LIMIT_DISABLED:
+        return
     """Enforce bounded, per-process request limits per client IP."""
     ip = client_ip(request)
     now = time.monotonic()
