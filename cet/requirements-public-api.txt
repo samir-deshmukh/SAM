@@ -1,0 +1,7 @@
+# Minimal runtime dependencies for the isolated candidate-facing CETFind API.
+# Keep admin/import/PDF/Streamlit dependencies out of this service.
+fastapi==0.141.1
+uvicorn[standard]==0.34.0
+pandas==2.2.3
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
