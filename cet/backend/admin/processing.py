@@ -130,14 +130,30 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                 elif last_values[field]:
                     normalized[field] = last_values[field]
             missing = [field for field in required_fields if not str(normalized.get(field, "")).strip()]
-            row_valid = valid and not missing
-            if not row_valid:
+            row_errors = []
+            if missing:
+                row_errors.append("Missing required field(s): " + ", ".join(missing))
+            # A file-level validator failure must not turn every otherwise
+            # well-formed row into a separate row error. For cutoff rows, run
+            # the same category/section/stage resolver used by commit so only
+            # rows with an actual row-level problem are marked REVIEW. The
+            # import result remains REVIEW_REQUIRED, so a failed file gate
+            # still cannot be committed accidentally.
+            if result_type == "CUTOFFS" and not missing:
+                try:
+                    _resolve_cutoff_dimensions(normalized)
+                except (ValueError, KeyError) as exc:
+                    row_errors.append(str(exc))
+            if row_errors:
                 quarantined += 1
-            message = None
-            if not valid:
-                message = validation_message[-4000:]
-            elif missing:
-                message = "Missing required field(s): " + ", ".join(missing)
+                row_status = "REVIEW"
+                message = "; ".join(row_errors)
+            elif not valid:
+                row_status = "FILE_REVIEW"
+                message = "File-level validation failed; inspect the validation report before approval."
+            else:
+                row_status = "VALID"
+                message = None
             conn.execute(
                 """INSERT INTO import_staging_records
                    (job_id,result_type,source_file,source_page,raw_json,
@@ -146,7 +162,7 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                 (job_id, result_type, path.name, _page_from(normalized),
                  json.dumps(raw, ensure_ascii=False),
                  json.dumps(normalized, ensure_ascii=False),
-                 "VALID" if row_valid else "REVIEW",
+                 row_status,
                  message)
             )
             rows += 1

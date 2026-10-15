@@ -51,6 +51,8 @@ def test_cutoff_stage_split_and_priority():
         ("LSCS", ("SC", True, "SL")),
         ("PWDROBCH", ("PWDROBC", False, "HU")),
         ("MI", ("MI", False, "SL")),
+        ("MI-MH", ("MI", False, "SL")),
+        ("MH", ("MI", False, "SL")),
         ("", (None, None, None)),
     ],
 )

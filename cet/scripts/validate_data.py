@@ -138,7 +138,10 @@ def parse_category(raw: str):
         return None, None, None
     raw = raw.strip().upper()
 
-    if raw in ('MI', 'MI-MH'):
+    # Some CAP PDF extractions lose the `MI-` prefix from the official
+    # `MI-MH` seat type. The existing canonical model already maps MI-MH to
+    # MI, so accept the extracted tail `MH` as the same canonical category.
+    if raw in ('MI', 'MI-MH', 'MH'):
         return 'MI', False, 'SL'
     if raw in ('EWS', 'TFWS'):
         return raw, False, 'SL'

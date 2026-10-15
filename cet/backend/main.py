@@ -1779,12 +1779,48 @@ def review_list(request: Request):
         rows=c.execute("""
             SELECT j.*,
                    (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id) AS staging_row_count,
-                   (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id AND UPPER(COALESCE(r.validation_status,'')) <> 'VALID') AS validation_issue_count
+                   (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id AND UPPER(COALESCE(r.validation_status,'')) = 'REVIEW') AS validation_issue_count
             FROM import_jobs j
             WHERE j.status IN ('REVIEW_REQUIRED','COMMITTING')
             ORDER BY j.id DESC
         """).fetchall()
-        return [dict(r) for r in rows]
+        response = [dict(r) for r in rows]
+        # Older imports stored the complete file-level validator output on
+        # every row. Count the affected category records from that report
+        # rather than presenting every staged record as an individual error.
+        for item in response:
+            if not item.get("validation_issue_count"):
+                continue
+            repeated = c.execute(
+                "SELECT validation_message FROM import_staging_records WHERE job_id=? "
+                "AND validation_status='REVIEW' LIMIT 1", (item["id"],)
+            ).fetchone()
+            message = str(repeated["validation_message"] or "") if repeated else ""
+            if "Total issues:" not in message:
+                continue
+            result = c.execute(
+                "SELECT summary_json FROM import_results WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (item["id"],)
+            ).fetchone()
+            try:
+                summary = json.loads(result["summary_json"] or "{}") if result else {}
+                report = str(summary.get("validation", ""))
+                unknown_categories = set(re.findall(r"\[([^\]]+)\]\s*:\s*\d+", report))
+                if unknown_categories:
+                    staged = c.execute(
+                        "SELECT normalized_json FROM import_staging_records WHERE job_id=?",
+                        (item["id"],)
+                    ).fetchall()
+                    item["validation_issue_count"] = sum(
+                        1 for staged_row in staged
+                        if str(json.loads(staged_row["normalized_json"] or "{}").get("category", "")).strip().upper() in unknown_categories
+                    )
+                else:
+                    item["validation_issue_count"] = 0
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # Preserve the conservative count if an old report is malformed.
+                pass
+        return response
 
 @app.get('/admin/api/imports/{job_id}/review')
 def review_detail(request: Request, job_id: int):
