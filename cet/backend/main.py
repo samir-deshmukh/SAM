@@ -525,7 +525,9 @@ def require(request, roles=None, csrf=False, csrf_value=None, check_tab=True):
 def login(request: Request):
     token = _csrf_value(request)
     error = ('<p style="color:#b42333;font-weight:600">Invalid username or password.</p>' if request.query_params.get('error') == '1' else
-             '<p style="color:#b42333;font-weight:600">Admin panel is already active in another tab. Close it or wait for its lock to expire.</p>' if request.query_params.get('locked') == '1' else '')
+             '<p style="color:#b42333;font-weight:600">Admin panel is already active in another tab. Close it or wait for its lock to expire.</p>' if request.query_params.get('locked') == '1' else
+             '<p style="color:#b42333;font-weight:600">The server/database is temporarily unavailable. Wait a minute and try again; your password may be correct.</p>' if request.query_params.get('server') == '1' else
+             '<p style="color:#b42333;font-weight:600">Too many login attempts. Wait 60 seconds before trying again.</p>' if request.query_params.get('throttled') == '1' else '')
     resp = HTMLResponse(
         f'<h1>CET CAP Admin</h1>{error}<form method="post">'
         f'<input type="hidden" name="csrf_token" value="{token}">'
@@ -543,8 +545,11 @@ def login(request: Request):
         "try{const r=await fetch('/admin/login',{method:'POST',headers:{'X-Admin-Client-ID':tabId},body:new FormData(f),redirect:'follow'});"
         "if(r.ok && new URL(r.url).pathname==='/admin'){"
         "sessionStorage.setItem('cet-cap-admin-auth-v1','1');window.location.replace('/admin');return;}"
-        "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
-        "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?error=1')}"
+        "sessionStorage.removeItem('cet-cap-admin-auth-v1');const u=new URL(r.url);"
+        "if(r.status===429){window.location.replace('/admin/login?throttled=1');return;}"
+        "if(r.status>=500){window.location.replace('/admin/login?server=1');return;}"
+        "window.location.replace(u.searchParams.get('locked')==='1'?'/admin/login?locked=1':'/admin/login?error=1');"
+        "}catch(_){sessionStorage.removeItem('cet-cap-admin-auth-v1');window.location.replace('/admin/login?server=1')}"
         "});"
         "</script>"
     )

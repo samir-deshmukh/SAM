@@ -84,11 +84,15 @@ class Connection:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type:
-            self.rollback()
-        else:
-            self.commit()
-        self._conn.close()
+        # Always return the SQLAlchemy connection to the pool, even when
+        # commit/rollback itself raises (for example during a DB outage).
+        try:
+            if exc_type:
+                self.rollback()
+            else:
+                self.commit()
+        finally:
+            self._conn.close()
 
     def execute(self, sql: str, params=()):
         sql = sql.replace("BEGIN IMMEDIATE", "BEGIN")
