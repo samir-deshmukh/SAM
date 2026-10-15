@@ -536,6 +536,117 @@ def _require_clean_stage(conn, job_id: int, result_type: str):
     return result
 
 
+
+def revalidate_legacy_mh_staging(conn, job_id: int, actor_user_id: int):
+    """Repair only the known legacy BCA 2026 CAP-2 MH validator mismatch.
+
+    The source PDF can be unavailable on ephemeral hosting, so this path
+    revalidates the already-staged rows against current canonical rules. It is
+    intentionally restricted to one known filename and the exact historical
+    validator signature; it never commits production data.
+    """
+    import re
+    import csv
+
+    job = conn.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        raise ValueError("Import not found")
+    if (
+        job.get("original_filename") != "2026BCA_CAP2_MH_CutOff.pdf"
+        or str(job.get("course_family") or "").upper() != "BCA"
+        or int(job.get("year") or 0) != 2026
+        or str(job.get("round") or "").upper() not in {"C2", "2", "ROUND 2"}
+        or job.get("data_type") != "CUTOFFS"
+    ):
+        raise ValueError("This repair is restricted to the known 2026 BCA CAP-2 MH import")
+    if job.get("status") != JobStatus.REVIEW_REQUIRED.value:
+        raise ValueError(f"Import is not awaiting review: {job.get('status')}")
+
+    result = conn.execute(
+        "SELECT * FROM import_results WHERE job_id=? AND result_type='CUTOFFS' ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if not result or result.get("validation_status") != "REVIEW_REQUIRED":
+        raise ValueError("The expected legacy validation result was not found")
+    try:
+        summary = json.loads(result.get("summary_json") or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Stored validation summary is unreadable") from exc
+    report = str(summary.get("validation") or "")
+
+    # Do not waive any issue other than the four obsolete MH category reports.
+    required_report_checks = (
+        re.search(r"Total issues:\\s*4\\b", report),
+        re.search(r"=== UNKNOWN CATEGORIES \\(1\\) ===", report),
+        re.search(r"^\\s*\\[MH\\]\\s*:\\s*4\\s*$", report, re.MULTILINE),
+        re.search(r"=== UNKNOWN STAGES \\(0\\) ===", report),
+        re.search(r"=== UNKNOWN SECTIONS \\(0\\) ===", report),
+        re.search(r"=== UNKNOWN PROGRAM NAMES \\(0\\) ===", report),
+        re.search(r"Exact duplicate rows detected:\\s*0\\b", report),
+    )
+    if not all(required_report_checks) or "=== FILE ERRORS ===" in report:
+        raise ValueError("Stored report does not match the narrowly approved MH-only legacy issue; no changes made")
+
+    alias_path = BASE / "data" / "reference" / "program_aliases.csv"
+    with alias_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        valid_programs = {str(row.get("raw_name", "")).strip() for row in csv.DictReader(handle)}
+    rows = conn.execute(
+        "SELECT id,result_type,normalized_json,validation_status FROM import_staging_records WHERE job_id=? ORDER BY id",
+        (job_id,),
+    ).fetchall()
+    if len(rows) != 327 or any(row.get("result_type") != "CUTOFFS" for row in rows):
+        raise ValueError(f"Expected exactly 327 cutoff staging rows; found {len(rows)}. No changes made")
+
+    # Validate every staged row before changing any record.
+    repaired_ids = []
+    for row in rows:
+        try:
+            normalized = json.loads(row.get("normalized_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Staged row {row['id']} contains invalid JSON; no changes made") from exc
+        for field in ("institution_code", "program_name", "category", "percentage"):
+            if not str(normalized.get(field, "")).strip():
+                raise ValueError(f"Staged row {row['id']} is missing {field}; no changes made")
+        if str(normalized.get("program_name", "")).strip() not in valid_programs:
+            raise ValueError(f"Staged row {row['id']} has an unrecognized program; no changes made")
+        try:
+            _resolve_cutoff_dimensions(normalized)
+            float(normalized["percentage"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"Staged row {row['id']} still fails current validation: {exc}; no changes made") from exc
+        repaired_ids.append(int(row["id"]))
+
+    # All checks passed: repair staging metadata only. Production remains untouched.
+    for row_id in repaired_ids:
+        conn.execute(
+            "UPDATE import_staging_records SET validation_status='VALID',validation_message=NULL WHERE id=? AND job_id=?",
+            (row_id, job_id),
+        )
+    summary["legacy_revalidation"] = {
+        "rule": "MH -> MI canonical category mapping",
+        "reason": "Historical validator flagged four MH labels that current canonical parsing accepts as MI",
+        "rows_revalidated": len(repaired_ids),
+        "source_pdf_reextracted": False,
+        "production_committed": False,
+    }
+    conn.execute(
+        "UPDATE import_results SET validation_status='PASS',rows_validated=?,summary_json=? WHERE id=?",
+        (len(repaired_ids), json.dumps(summary, ensure_ascii=False), result["id"]),
+    )
+    event(conn, job_id, "LEGACY_REVALIDATION",
+          f"Revalidated {len(repaired_ids)} existing cutoff rows against current rules; no production changes made", 100)
+    conn.execute(
+        """INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason)
+           VALUES (?,?,?,?,?,?,?)""",
+        (actor_user_id, "REVALIDATE_STAGED_IMPORT", "IMPORT", str(job_id),
+         json.dumps({"validation_status": result["validation_status"]}),
+         json.dumps({"validation_status": "PASS", "rows_revalidated": len(repaired_ids)}),
+         "Narrow MH-to-MI legacy validation repair; original PDF was not re-extracted"),
+    )
+    conn.commit()
+    return {"ok": True, "job_id": job_id, "rows_revalidated": len(repaired_ids),
+            "status": JobStatus.REVIEW_REQUIRED.value, "production_committed": False}
+
 def _insert_cutoff_from_json(conn, raw, job, source_pdf):
     import sys
     sys.path.insert(0, str(SCRIPTS))
