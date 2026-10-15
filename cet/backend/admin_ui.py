@@ -60,10 +60,38 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   const message=document.getElementById('adminTabLockMessage');
   const retry=document.getElementById('adminTabLockRetry');
   const hint=document.getElementById('adminTabLockHint');
+  const newId=()=>crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)+'-'+Math.random().toString(36).slice(2);
+  const instanceId=newId(); // unique to this live document; never copied with sessionStorage
   let tabId=sessionStorage.getItem(TAB_KEY);
-  if(!tabId){tabId=crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);sessionStorage.setItem(TAB_KEY,tabId);}
+  if(!tabId){tabId=newId();sessionStorage.setItem(TAB_KEY,tabId);}
   function csrf(){const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return m?decodeURIComponent(m[1]):'';}
   function readLock(){try{return JSON.parse(localStorage.getItem(LOCK_KEY)||'null')}catch(_){return null}}
+  function rotateTabId(){tabId=newId();sessionStorage.setItem(TAB_KEY,tabId);}
+  async function resolveClonedTabIdentity(){
+    const existing=readLock();
+    const fresh=existing&&existing.id===tabId&&Number(existing.ts)>Date.now()-TTL;
+    const owner=fresh?(existing.instanceId||null):null;
+    if(!('BroadcastChannel' in window)){
+      if(owner&&owner!==instanceId)rotateTabId();
+      return;
+    }
+    const peers=new Set();
+    const channel=new BroadcastChannel('cet-cap-admin-tab-identity-v1');
+    channel.onmessage=event=>{
+      const data=event.data||{};
+      if(data.tabId!==tabId||data.instanceId===instanceId)return;
+      if(data.type==='probe')channel.postMessage({type:'peer',tabId,instanceId});
+      if(data.type==='peer')peers.add(data.instanceId);
+    };
+    channel.postMessage({type:'probe',tabId,instanceId});
+    await new Promise(resolve=>setTimeout(resolve,180));
+    channel.close();
+    // If a live tab owns this copied ID, only the copy rotates. A stale lock
+    // without a live peer is retained so the same tab can recover after reload.
+    if(owner&&owner!==instanceId&&peers.has(owner)){rotateTabId();return;}
+    // Simultaneously opened duplicate tabs elect one deterministic owner.
+    if(!owner&&peers.size&&[instanceId,...peers].sort()[0]!==instanceId)rotateTabId();
+  }
   function showBlocked(kind='connection'){
     window.__cetAdminTabReady=false;
     body.classList.add('admin-locked');gate.classList.add('show');
@@ -89,12 +117,12 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
       if(r.status===401){window.location.replace('/admin/login');return false;}
       if(r.status===409){showBlocked('other-tab');return false;}
       if(!r.ok){showBlocked('connection');return false;}
-      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));}catch(_){}
+      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now(),instanceId}));}catch(_){}
       body.classList.remove('admin-locked');gate.classList.remove('show');window.__cetAdminTabReady=true;window.__cetAdminLockMessage='';return true;
     }catch(_){showBlocked('connection');return false;}
   }
   window.__cetAdminTabRetry=acquire;
-  window.__cetAdminLockPromise=acquire();
+  window.__cetAdminLockPromise=resolveClonedTabIdentity().then(acquire);
   setInterval(async function(){
     if(!window.__cetAdminTabReady)return;
     try{
@@ -102,7 +130,7 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
       if(r.status===401){window.location.replace('/admin/login');return;}
       if(r.status===409){await acquire();return;}
       if(!r.ok){showBlocked('connection');return;}
-      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now()}));}catch(_){}
+      try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now(),instanceId}));}catch(_){}
     }catch(_){showBlocked('connection');}
   },5000);
   // Do not block on storage events: a stale write from a previous page can
@@ -110,8 +138,10 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   // will enforce the single-tab lock using the authoritative database row.
   // Release promptly when the page is leaving; server TTL remains the crash/offline fallback.
   window.addEventListener('pagehide',function(){
-    try{const x=readLock();if(x&&x.id===tabId)localStorage.removeItem(LOCK_KEY);}catch(_){}
-    try{fetch('/admin/api/admin-lock/release',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store',keepalive:true});}catch(_){}
+    const x=readLock();
+    const ownsLock=x&&x.id===tabId&&(!x.instanceId||x.instanceId===instanceId);
+    if(ownsLock){try{localStorage.removeItem(LOCK_KEY);}catch(_){}}
+    if(ownsLock){try{fetch('/admin/api/admin-lock/release',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store',keepalive:true});}catch(_){}}
   });
 })();
 window.__cetAdminPollBusy=false;
