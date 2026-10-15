@@ -1,4 +1,4 @@
-import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading
+import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading,hashlib,csv
 from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -692,6 +692,342 @@ def derived_data_status(request: Request):
     }
 
 
+LOCAL_ARTIFACT_MAX_BYTES = 150 * 1024 * 1024
+LOCAL_WORKER_FAMILIES = {'BCA', 'BBA', 'MBA', 'MCA'}
+LOCAL_WORKER_ROUNDS = {'C1', 'C2', 'C3', 'C4'}
+
+
+def _local_worker_token(request: Request, job_id: int):
+    """Validate a one-job capability token without exposing it via admin APIs."""
+    header = (request.headers.get('authorization') or '').strip()
+    scheme, _, token = header.partition(' ')
+    if scheme.lower() != 'bearer' or not token or len(token) > 256:
+        raise HTTPException(401, 'Local worker authorization required')
+    digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT token_hash FROM local_worker_tokens WHERE job_id=? AND expires_at>CURRENT_TIMESTAMP",
+            (job_id,),
+        ).fetchone()
+    if not row or not secrets.compare_digest(str(row['token_hash']), digest):
+        raise HTTPException(401, 'Local worker token is invalid or expired')
+    return token
+
+
+def _local_worker_fail(job_id: int, message: str):
+    message = str(message or 'Local extraction failed')[:4000]
+    with connect() as connection:
+        job = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            return
+        if job['status'] in {'STAGED', 'REVIEW_REQUIRED', 'COMPLETED', 'CANCELLED', 'QUARANTINED'}:
+            return
+        connection.execute(
+            "UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (message, job_id),
+        )
+        event(connection, job_id, 'ERROR', message[:1000], None)
+        connection.commit()
+
+
+def _process_local_import_background(job_id: int, artifact_path: str,
+                                     data_type: str, family: str, year: int,
+                                     round_name: str | None, summary: dict):
+    """Validate/stage a locally extracted artifact using the existing pipeline."""
+    with _IMPORT_PROCESS_LOCK:
+        with connect() as connection:
+            job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+            if not job:
+                return
+            try:
+                result = process_import(
+                    connection, job_id, Path(job['original_filename']),
+                    data_type=data_type, family=family, year=year,
+                    round_name=round_name or '', claimed=True,
+                    pre_extracted_path=Path(artifact_path), extraction_summary=summary,
+                )
+                if not result.get('ok'):
+                    log.error('Local-artifact import failed: job_id=%s error=%s', job_id, result.get('error'))
+                if result.get('status') not in {'FAILED', 'CANCELLED'}:
+                    connection.execute('DELETE FROM local_worker_tokens WHERE job_id=?', (job_id,))
+                    connection.commit()
+            except Exception as exc:
+                log.exception('Unexpected local-artifact processing failure: job_id=%s', job_id)
+                connection.rollback()
+                connection.execute(
+                    "UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (str(exc)[:4000], job_id),
+                )
+                event(connection, job_id, 'ERROR', str(exc)[:1000], None)
+                connection.commit()
+
+
+@app.post('/admin/api/local-imports')
+def create_local_import(request: Request, payload: dict):
+    current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    filename = Path(str(payload.get('filename') or '')).name
+    size_bytes = payload.get('size_bytes')
+    sha256 = str(payload.get('sha256') or '').lower()
+    if not filename.lower().endswith('.pdf'):
+        raise HTTPException(400, 'Only PDF files are accepted')
+    if not isinstance(size_bytes, int) or size_bytes < 5 or size_bytes > MAX_PDF_BYTES:
+        raise HTTPException(413, 'PDF size is invalid or exceeds 50 MiB')
+    if not re.fullmatch(r'[a-f0-9]{64}', sha256):
+        raise HTTPException(400, 'A valid SHA-256 fingerprint is required')
+
+    job_key = 'LOCAL-' + uuid.uuid4().hex[:12].upper()
+    upload_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(upload_token.encode('utf-8')).hexdigest()
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO import_jobs(job_key,original_filename,stored_path,sha256,size_bytes,status,created_by) VALUES (?,?,?,?,?,?,?)",
+            (job_key, filename, 'local://pending', sha256, size_bytes, 'RECEIVED', current_user['uid']),
+        )
+        row = connection.execute('SELECT id FROM import_jobs WHERE job_key=?', (job_key,)).fetchone()
+        if not row:
+            raise RuntimeError('Local import job could not be created')
+        job_id = int(row['id'])
+        connection.execute('UPDATE import_jobs SET stored_path=? WHERE id=?', (f'local://job_{job_id}', job_id))
+        connection.execute(
+            "INSERT INTO local_worker_tokens(job_id,token_hash,expires_at) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '30 days')",
+            (job_id, token_hash),
+        )
+        event(connection, job_id, 'LOCAL_QUEUED', 'Waiting for the local extraction worker on this PC', 0)
+        connection.commit()
+    return JSONResponse(status_code=201, content={
+        'ok': True, 'job_id': job_id, 'job_key': job_key,
+        'status': 'RECEIVED', 'upload_token': upload_token,
+    })
+
+
+@app.post('/admin/api/local-imports/{job_id}/progress')
+def local_import_progress(request: Request, job_id: int, payload: dict):
+    _local_worker_token(request, job_id)
+    page = max(0, min(100000, int(payload.get('page') or 0)))
+    total = max(0, min(100000, int(payload.get('total') or 0)))
+    state = str(payload.get('state') or 'RUNNING').upper()
+    if state not in {'RUNNING', 'PAUSED'}:
+        state = 'RUNNING'
+    with connect() as connection:
+        job = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if job['status'] in {'FAILED', 'CANCELLED', 'STAGED', 'REVIEW_REQUIRED', 'COMPLETED'}:
+            return {'ok': True, 'status': job['status']}
+        progress = 40 if total <= 0 else min(58, 40 + int(18 * min(page, total) / total))
+        message = f'Local extraction {state.lower()} at page {page}' + (f' of {total}' if total else '')
+        next_status = 'PAUSED' if state == 'PAUSED' else 'EXTRACTING'
+        connection.execute(
+            "UPDATE import_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (next_status, job_id),
+        )
+        event(connection, job_id, 'LOCAL_EXTRACT', message, progress)
+        connection.commit()
+    return {'ok': True, 'status': next_status, 'progress': progress}
+
+
+@app.post('/admin/api/local-imports/{job_id}/fail')
+def local_import_fail(request: Request, job_id: int, payload: dict):
+    _local_worker_token(request, job_id)
+    message = str(payload.get('error') or 'Local extraction failed')[:4000]
+    _local_worker_fail(job_id, message)
+    return {'ok': True, 'job_id': job_id}
+
+
+@app.post('/admin/api/local-imports/{job_id}/cancel')
+def local_import_cancel(request: Request, job_id: int):
+    _local_worker_token(request, job_id)
+    marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    with connect() as connection:
+        job = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if job['status'] not in {'RECEIVED', 'IDENTIFIED', 'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING', 'PAUSED', 'FAILED', 'CANCELLED'}:
+            raise HTTPException(409, f"Import cannot be cancelled while in {job['status']}")
+        connection.execute(
+            "UPDATE import_jobs SET status='CANCELLED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (job_id,),
+        )
+        event(connection, job_id, 'CANCELLED', 'Local worker cancellation requested', None)
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'status': 'CANCELLED'}
+
+
+@app.post('/admin/api/local-imports/{job_id}/restart')
+def local_import_restart(request: Request, job_id: int):
+    _local_worker_token(request, job_id)
+    marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
+    if marker.exists():
+        marker.unlink()
+    with connect() as connection:
+        job = connection.execute('SELECT status,stored_path FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if not str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'This is not a local-worker import')
+        if job['status'] not in {'FAILED', 'CANCELLED'}:
+            raise HTTPException(409, f"Import cannot be restarted while in {job['status']}")
+        connection.execute('DELETE FROM local_worker_receipts WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+        connection.execute(
+            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (job_id,),
+        )
+        event(connection, job_id, 'LOCAL_RETRY', 'Local extraction retry queued', 0)
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'status': 'EXTRACTING'}
+
+
+@app.get('/admin/api/local-imports/{job_id}/status')
+def local_import_status(request: Request, job_id: int):
+    _local_worker_token(request, job_id)
+    with connect() as connection:
+        job = connection.execute('SELECT id,status,error_message,updated_at FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        latest = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (job_id,)).fetchone()
+        return {'job_id': job_id, 'status': job['status'], 'error': job['error_message'],
+                'progress': latest['progress'] if latest else 0,
+                'message': latest['message'] if latest else '', 'updated_at': job['updated_at']}
+
+
+@app.post('/admin/api/local-imports/{job_id}/revalidate')
+def revalidate_local_import(request: Request, job_id: int, background_tasks: BackgroundTasks):
+    _local_worker_token(request, job_id)
+    with connect() as connection:
+        job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if not str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'This is not a local-worker import')
+        if job['status'] not in {'FAILED', 'CANCELLED'}:
+            raise HTTPException(409, f"Import cannot be revalidated while in {job['status']}")
+        receipt = connection.execute('SELECT artifact_sha256 FROM local_worker_receipts WHERE job_id=?', (job_id,)).fetchone()
+        if not receipt or not job['data_type'] or not job['course_family'] or not job['year']:
+            raise HTTPException(409, 'No complete extracted artifact is available; rerun local extraction instead')
+        suffix = '_cutoffs.csv' if job['data_type'] == 'CUTOFFS' else '_seats_long.csv'
+        artifact = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}' / f"{Path(job['original_filename']).stem}{suffix}"
+        if not artifact.is_file():
+            raise HTTPException(404, 'Saved extracted artifact is missing; rerun local extraction')
+        connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+        connection.execute(
+            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (job_id,),
+        )
+        event(connection, job_id, 'LOCAL_REVALIDATE', 'Revalidating the previously extracted CSV artifact', 60)
+        connection.commit()
+    background_tasks.add_task(
+        _process_local_import_background, job_id, str(artifact),
+        job['data_type'], job['course_family'], int(job['year']), job['round'] or '',
+        {},
+    )
+    return {'ok': True, 'job_id': job_id, 'status': 'EXTRACTING'}
+
+
+@app.post('/admin/api/local-imports/{job_id}/artifact')
+def receive_local_artifact(
+    request: Request, job_id: int, background_tasks: BackgroundTasks,
+    file: UploadFile = File(...), data_type: str = Form(...),
+    family: str = Form(...), year: int = Form(...),
+    round_name: str = Form(''), source_sha256: str = Form(...),
+    summary_json: str = Form('{}'),
+):
+    _local_worker_token(request, job_id)
+    data_type = str(data_type).upper().strip()
+    family = str(family).upper().strip()
+    round_name = str(round_name).upper().strip() or None
+    if data_type not in {'CUTOFFS', 'SEATS'} or family not in LOCAL_WORKER_FAMILIES or not 2000 <= year <= 2100:
+        raise HTTPException(400, 'Local worker returned invalid source metadata')
+    if data_type == 'CUTOFFS' and round_name not in LOCAL_WORKER_ROUNDS:
+        raise HTTPException(400, 'Cutoff PDF must identify CAP round C1-C4')
+    if not re.fullmatch(r'[a-fA-F0-9]{64}', source_sha256):
+        raise HTTPException(400, 'Invalid source fingerprint')
+    try:
+        summary = json.loads(summary_json)
+    except Exception:
+        raise HTTPException(400, 'Invalid extraction summary JSON')
+    if not isinstance(summary, dict):
+        raise HTTPException(400, 'Extraction summary must be an object')
+
+    with connect() as connection:
+        job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if not secrets.compare_digest(str(job['sha256']).lower(), source_sha256.lower()):
+            raise HTTPException(400, 'The local PDF fingerprint does not match the queued import')
+        if job['status'] in {'STAGED', 'REVIEW_REQUIRED'}:
+            return {'ok': True, 'job_id': job_id, 'status': job['status'], 'duplicate': True}
+        receipt = connection.execute('SELECT artifact_sha256 FROM local_worker_receipts WHERE job_id=?', (job_id,)).fetchone()
+        if receipt and job['status'] not in {'FAILED', 'CANCELLED'}:
+            return {'ok': True, 'job_id': job_id, 'status': job['status'], 'duplicate': True}
+
+    expected_header = (
+        {'source_pdf', 'page', 'institution_code', 'program_name', 'category', 'percentage'}
+        if data_type == 'CUTOFFS'
+        else {'source_pdf', 'page', 'institution_code', 'choice_code', 'allocation_type', 'category', 'seats'}
+    )
+    suffix = '_cutoffs.csv' if data_type == 'CUTOFFS' else '_seats_long.csv'
+    stem = Path(str(job['original_filename'])).stem
+    artifact_dir = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}'
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / f'{stem}{suffix}'
+    temp_path = artifact_dir / (artifact_path.name + '.upload')
+    total = 0
+    digest = hashlib.sha256()
+    try:
+        with temp_path.open('wb') as output:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > LOCAL_ARTIFACT_MAX_BYTES:
+                    raise HTTPException(413, 'Extracted CSV exceeds 150 MiB limit')
+                digest.update(chunk)
+                output.write(chunk)
+        if total == 0:
+            raise HTTPException(400, 'Extracted artifact is empty')
+        with temp_path.open('r', encoding='utf-8-sig', newline='') as check_file:
+            header = set(next(csv.reader(check_file), []))
+        if not expected_header.issubset(header):
+            raise HTTPException(400, 'Extracted artifact columns do not match the expected CAP schema')
+        temp_path.replace(artifact_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+    with connect() as connection:
+        current = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not current:
+            raise HTTPException(404, 'Import not found')
+        if current['status'] == 'CANCELLED':
+            raise HTTPException(409, 'Import was cancelled before artifact receipt')
+        connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM local_worker_receipts WHERE job_id=?', (job_id,))
+        connection.execute(
+            "UPDATE import_jobs SET data_type=?,course_family=?,year=?,round=?,status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (data_type, family, year, round_name, job_id),
+        )
+        connection.execute(
+            'INSERT INTO local_worker_receipts(job_id,artifact_sha256) VALUES (?,?)',
+            (job_id, digest.hexdigest()),
+        )
+        event(connection, job_id, 'LOCAL_ARTIFACT_RECEIVED',
+              f'Received {total:,} bytes of locally extracted {data_type.lower()} records', 60)
+        connection.commit()
+    background_tasks.add_task(
+        _process_local_import_background, job_id, str(artifact_path),
+        data_type, family, year, round_name, summary,
+    )
+    return JSONResponse(status_code=202, content={'ok': True, 'job_id': job_id, 'status': 'EXTRACTING'})
+
+
 @app.post('/admin/api/imports')
 def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
@@ -888,6 +1224,8 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
             if marker.exists():
                 raise HTTPException(409, 'Stop request is still being finalized; wait a moment before retrying')
+        if str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'This import runs on the local worker. Retry it from Import Center while that worker is running.')
         path = BASE / job['stored_path']
         if not path.exists():
             raise HTTPException(404, 'Stored source PDF is missing')
@@ -949,6 +1287,8 @@ def cancel_import(request: Request, job_id: int):
             JobStatus.EXTRACTING.value, JobStatus.NORMALIZING.value,
             JobStatus.VALIDATING.value, JobStatus.COMPARING.value,
         }
+        if str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'Use the local worker controls in Import Center to pause or cancel this extraction.')
         if job['status'] not in active:
             raise HTTPException(409, f"Import cannot be stopped while in {job['status']}")
         marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
@@ -1008,9 +1348,14 @@ def delete_import(request: Request, job_id: int):
              None, 'Import deleted before production commit'),
         )
         c.commit()
-    stored = BASE / job['stored_path']
-    if stored.exists():
+    stored_value = str(job['stored_path'] or '')
+    stored = BASE / stored_value if not stored_value.startswith('local://') else None
+    if stored is not None and stored.exists():
         stored.unlink()
+    local_artifacts = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}'
+    if local_artifacts.exists():
+        import shutil
+        shutil.rmtree(local_artifacts, ignore_errors=True)
     for directory in (
         BASE / 'data' / 'work' / f"job_{job_id}",
         BASE / 'data' / 'staging' / f"job_{job_id}",

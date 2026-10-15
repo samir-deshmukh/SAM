@@ -235,7 +235,9 @@ def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
             "new_candidates":len(df)-duplicates}
 
 def process_import(conn, job_id: int, pdf_path: Path, *,
-                   data_type: str, family: str, year: int, round_name: str, claimed: bool=False):
+                   data_type: str, family: str, year: int, round_name: str,
+                   claimed: bool=False, pre_extracted_path: Path | None=None,
+                   extraction_summary: dict | None=None):
     """Run extraction/normalization/validation and stop at STAGED/REVIEW_REQUIRED."""
     work = WORK_ROOT / f"job_{job_id}_{uuid.uuid4().hex[:8]}"
     raw = work / "raw"
@@ -255,11 +257,15 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
         _raise_if_cancelled(conn, job_id)
 
         if data_type == "CUTOFFS":
-            mod = _load_module(SCRIPTS / "cutoff_extractor.py", "cet_cutoff_extractor")
-            summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
-                                             dpi=300, lang="eng", use_camelot=False)
+            if pre_extracted_path is None:
+                mod = _load_module(SCRIPTS / "cutoff_extractor.py", "cet_cutoff_extractor")
+                summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
+                                                 dpi=300, lang="eng", use_camelot=False)
+                extracted_path = raw / f"{pdf_path.stem}_cutoffs.csv"
+            else:
+                extracted_path = Path(pre_extracted_path)
+                summary = dict(extraction_summary or {})
             _raise_if_cancelled(conn, job_id)
-            extracted_path = raw / f"{pdf_path.stem}_cutoffs.csv"
             if not extracted_path.exists():
                 raise RuntimeError("Cutoff extractor produced no CSV artifact")
             canonical = normalized / _canonical_cutoff_name(family, year, round_name)
@@ -315,57 +321,62 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                            valid, int(summary.get("merged_records", rows)), rows - row_quarantine,
                            quarantine + row_quarantine, {"extractor": summary, "validation": validation[-12000:]})
         else:
-            # Seat matrices can be hundreds of pages and are substantially more
-            # memory-intensive than cutoff PDFs. Run the extractor in a child
-            # process so pdfplumber/Pillow/Tesseract allocations are released by
-            # the OS when extraction finishes instead of accumulating in the
-            # FastAPI web process. The extractor writes the same artifacts as before.
-            env = os.environ.copy()
-            env.setdefault("PYTHONIOENCODING", "utf-8")
-            env.setdefault("PYTHONUTF8", "1")
-            env.setdefault("OMP_THREAD_LIMIT", "1")
-            env.setdefault("OPENBLAS_NUM_THREADS", "1")
-            env.setdefault("MKL_NUM_THREADS", "1")
-            log_path = work / "seat_extractor.log"
-            with log_path.open("w", encoding="utf-8") as log:
-                p = subprocess.Popen(
-                    [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
-                     str(pdf_path), "--out", str(raw), "--dpi", "200"],
-                    cwd=str(BASE), stdout=log, stderr=subprocess.STDOUT, text=True, env=env,
-                )
-                started = time.monotonic()
-                while p.poll() is None:
-                    if _cancel_requested(job_id):
-                        p.terminate()
-                        try:
-                            p.wait(timeout=8)
-                        except subprocess.TimeoutExpired:
+            if pre_extracted_path is not None:
+                extracted_path = Path(pre_extracted_path)
+                summary = dict(extraction_summary or {})
+            else:
+                # Seat matrices can be hundreds of pages and are substantially more
+                # memory-intensive than cutoff PDFs. Run the extractor in a child
+                # process so pdfplumber/Pillow/Tesseract allocations are released by
+                # the OS when extraction finishes instead of accumulating in the
+                # FastAPI web process. The extractor writes the same artifacts as before.
+                env = os.environ.copy()
+                env.setdefault("PYTHONIOENCODING", "utf-8")
+                env.setdefault("PYTHONUTF8", "1")
+                env.setdefault("OMP_THREAD_LIMIT", "1")
+                env.setdefault("OPENBLAS_NUM_THREADS", "1")
+                env.setdefault("MKL_NUM_THREADS", "1")
+                log_path = work / "seat_extractor.log"
+                with log_path.open("w", encoding="utf-8") as log:
+                    p = subprocess.Popen(
+                        [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
+                         str(pdf_path), "--out", str(raw), "--dpi", "200"],
+                        cwd=str(BASE), stdout=log, stderr=subprocess.STDOUT, text=True, env=env,
+                    )
+                    started = time.monotonic()
+                    while p.poll() is None:
+                        if _cancel_requested(job_id):
+                            p.terminate()
+                            try:
+                                p.wait(timeout=8)
+                            except subprocess.TimeoutExpired:
+                                p.kill()
+                                p.wait(timeout=3)
+                            _raise_if_cancelled(conn, job_id)
+                        if time.monotonic() - started > 1800:
                             p.kill()
-                            p.wait(timeout=3)
-                        _raise_if_cancelled(conn, job_id)
-                    if time.monotonic() - started > 1800:
-                        p.kill()
-                        p.wait(timeout=5)
-                        raise RuntimeError("Seat-matrix extractor timed out after 30 minutes")
-                    time.sleep(0.25)
-            extractor_output = log_path.read_text(encoding="utf-8", errors="replace")
-            _raise_if_cancelled(conn, job_id)
-            if p.returncode != 0:
-                raise RuntimeError("Seat-matrix extractor failed: " + extractor_output[-6000:])
-            summary = {}
-            # CLI prints a final JSON summary. Parse the last JSON object rather
-            # than depending on incidental progress output.
-            for line in reversed([x.strip() for x in extractor_output.splitlines()]):
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        summary = json.loads(line)
-                        break
-                    except json.JSONDecodeError:
-                        pass
-            extracted_path = raw / f"{pdf_path.stem}_seats_long.csv"
-            if not extracted_path.exists():
-                raise RuntimeError("Seat extractor produced no long-seat CSV artifact")
+                            p.wait(timeout=5)
+                            raise RuntimeError("Seat-matrix extractor timed out after 30 minutes")
+                        time.sleep(0.25)
+                extractor_output = log_path.read_text(encoding="utf-8", errors="replace")
+                _raise_if_cancelled(conn, job_id)
+                if p.returncode != 0:
+                    raise RuntimeError("Seat-matrix extractor failed: " + extractor_output[-6000:])
+                summary = {}
+                # CLI prints a final JSON summary. Parse the last JSON object rather
+                # than depending on incidental progress output.
+                for line in reversed([x.strip() for x in extractor_output.splitlines()]):
+                    if line.startswith("{") and line.endswith("}"):
+                        try:
+                            summary = json.loads(line)
+                            break
+                        except json.JSONDecodeError:
+                            pass
+                extracted_path = raw / f"{pdf_path.stem}_seats_long.csv"
+                if not extracted_path.exists():
+                    raise RuntimeError("Seat extractor produced no long-seat CSV artifact")
             canonical = normalized / _canonical_seat_name(family)
+
             shutil.copy2(extracted_path, canonical)
             event(conn, job_id, "EXTRACT", f"Extracted {summary.get('seat_rows_extracted', 0)} seat rows", 60)
             update_status(conn, job_id, JobStatus.NORMALIZING.value, "Canonicalizing seat-matrix artifact")

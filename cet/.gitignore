@@ -37,3 +37,8 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Machine-local CAPFind extraction worker state (source PDFs must not be committed)
+.venv-local-worker/
+data/local_worker/
+data/local_import_artifacts/

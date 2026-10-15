@@ -4,6 +4,18 @@ def ensure_part4_schema():
     # The PostgreSQL schema is created idempotently at startup. This function
     # remains as a compatibility hook for existing admin publish code.
     with connect() as c:
+        # Local-worker upload tokens are stored separately from import_jobs so
+        # SELECT j.* responses can never expose bearer-token hashes to browsers.
+        c.execute("""CREATE TABLE IF NOT EXISTS local_worker_tokens (
+            job_id INTEGER PRIMARY KEY REFERENCES import_jobs(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS local_worker_receipts (
+            job_id INTEGER PRIMARY KEY REFERENCES import_jobs(id) ON DELETE CASCADE,
+            artifact_sha256 TEXT NOT NULL,
+            received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS published_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS manifest_json TEXT")

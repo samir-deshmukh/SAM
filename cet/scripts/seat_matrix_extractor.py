@@ -56,6 +56,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
+try:
+    from scripts.worker_control import checkpoint as _worker_checkpoint
+except ImportError:
+    from worker_control import checkpoint as _worker_checkpoint
 
 try:
     import pytesseract
@@ -486,6 +490,7 @@ def process_single_pdf(
         n_pages = len(pdf.pages)
         print(f"  pages: {n_pages}")
         for pnum in range(1, n_pages + 1):
+            _worker_checkpoint(pnum, n_pages)
             page = pdf.pages[pnum - 1]
             text = page.extract_text() or ""
             university, institution_code, institution_name = get_institute_header(

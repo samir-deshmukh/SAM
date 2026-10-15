@@ -64,6 +64,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import fitz
 try:
+    from scripts.worker_control import checkpoint as _worker_checkpoint
+except ImportError:
+    from worker_control import checkpoint as _worker_checkpoint
+try:
     from scripts import fitz_pdfium as fitz_pdfium
 except ImportError:
     import fitz_pdfium
@@ -82,7 +86,10 @@ tesseract_path = shutil.which("tesseract")
 if tesseract_path and pytesseract is not None:
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
 elif pytesseract is not None:
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
+    windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+    if windows_tesseract.is_file():
+        pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
 
 
 # ----------------------------------------------------------------------
@@ -578,6 +585,7 @@ def process_single_pdf(
     camelot_all_tables: List[Dict] = []
 
     for pnum in range(1, len(native_doc) + 1):
+        _worker_checkpoint(pnum, len(native_doc))
         native_page = native_doc[pnum - 1]
         native_text = native_page.get_text("text") or ""
         native_lines = merge_split_rank_lines(normalize_lines(native_text))
