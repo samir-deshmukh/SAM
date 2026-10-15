@@ -1917,18 +1917,21 @@ def delete_rolled_back_release(request: Request, release_id: int):
 @app.post('/admin/api/releases/{release_id}/publish')
 def publish(request: Request, release_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN'},csrf=True)
+    # Read authorization metadata in a short transaction; publishing performs
+    # filesystem work and must not keep this request's database connection open.
     with connect() as c:
         rel=c.execute('SELECT * FROM data_releases WHERE id=?',(release_id,)).fetchone()
         if not rel: raise HTTPException(404,'Release not found')
         if rel['approved_by'] != u['uid'] and u['role'] != 'SUPER_ADMIN': raise HTTPException(403,'Only the approving admin or a super admin can publish this release')
-        try:
-            result = publish_release(c, int(rel['source_job_id']), release_id)
-            invalidate_public_caches()
-            return result
-        except ValueError as e: raise HTTPException(409,str(e))
-        except Exception:
-            log.exception('Release publish failed: release_id=%s', release_id)
-            raise HTTPException(500,'Release publication failed; check the release timeline or server logs')
+        job_id=int(rel['source_job_id'])
+    try:
+        result = publish_release(job_id, release_id)
+        invalidate_public_caches()
+        return result
+    except ValueError as e: raise HTTPException(409,str(e))
+    except Exception:
+        log.exception('Release publish failed: release_id=%s', release_id)
+        raise HTTPException(500,'Release publication failed; check the release timeline or server logs')
 
 @app.get('/admin/releases', response_class=HTMLResponse)
 def releases_page_route(request: Request):
