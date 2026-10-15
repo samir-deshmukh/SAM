@@ -6,11 +6,42 @@ would allow an approved import to be invisible to the public site.
 """
 from __future__ import annotations
 
+import logging
 import re
+import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event as sqlalchemy_event, text
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
+
+log = logging.getLogger("cet-cap-db")
+_CHECKOUT_LOCK = threading.Lock()
+_CHECKED_OUT_TRACES: dict[int, str] = {}
+
+
+def _track_checkout(dbapi_connection, connection_record, connection_proxy):
+    with _CHECKOUT_LOCK:
+        _CHECKED_OUT_TRACES[id(connection_record)] = "".join(traceback.format_stack(limit=18))
+
+
+def _track_checkin(dbapi_connection, connection_record):
+    with _CHECKOUT_LOCK:
+        _CHECKED_OUT_TRACES.pop(id(connection_record), None)
+
+
+def _log_pool_exhaustion(engine):
+    with _CHECKOUT_LOCK:
+        traces = list(_CHECKED_OUT_TRACES.values())
+    log.error(
+        "ADMIN_DB_POOL_EXHAUSTED checked_out=%s pool=%s outstanding_checkout_traces=%s",
+        engine.pool.checkedout(),
+        engine.pool.status(),
+        len(traces),
+    )
+    for index, trace in enumerate(traces, 1):
+        log.error("ADMIN_DB_OUTSTANDING_CHECKOUT_%s\\n%s", index, trace)
 
 BASE = Path(__file__).resolve().parents[2]
 SCHEMA = BASE / "db" / "admin_schema_postgres.sql"
@@ -34,6 +65,8 @@ def _engine():
     if not url.startswith("postgresql+psycopg2://"):
         raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL.")
     _ENGINE = create_engine(url, pool_pre_ping=True, future=True)
+    sqlalchemy_event.listen(_ENGINE, "checkout", _track_checkout)
+    sqlalchemy_event.listen(_ENGINE, "checkin", _track_checkin)
     return _ENGINE
 
 
@@ -77,7 +110,12 @@ class Result:
 
 class Connection:
     def __init__(self):
-        self._conn = _engine().connect()
+        engine = _engine()
+        try:
+            self._conn = engine.connect()
+        except SQLAlchemyPoolTimeout:
+            _log_pool_exhaustion(engine)
+            raise
         self._tx = None
 
     def __enter__(self):
