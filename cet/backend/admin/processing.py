@@ -577,11 +577,11 @@ def revalidate_legacy_mh_staging(conn, job_id: int, actor_user_id: int):
     # Do not waive any issue other than the four obsolete MH category reports.
     required_report_checks = (
         re.search(r"Total issues:\s*4\b", report),
-        re.search(r"=== UNKNOWN CATEGORIES \\(1\\) ===", report),
+        re.search(r"=== UNKNOWN CATEGORIES \(1\) ===", report),
         re.search(r"^\s*\[MH\]\s*:\s*4\s*$", report, re.MULTILINE),
-        re.search(r"=== UNKNOWN STAGES \\(0\\) ===", report),
-        re.search(r"=== UNKNOWN SECTIONS \\(0\\) ===", report),
-        re.search(r"=== UNKNOWN PROGRAM NAMES \\(0\\) ===", report),
+        re.search(r"=== UNKNOWN STAGES \(0\) ===", report),
+        re.search(r"=== UNKNOWN SECTIONS \(0\) ===", report),
+        re.search(r"=== UNKNOWN PROGRAM NAMES \(0\) ===", report),
         re.search(r"Exact duplicate rows detected:\s*0\b", report),
     )
     if not all(required_report_checks) or "=== FILE ERRORS ===" in report:
