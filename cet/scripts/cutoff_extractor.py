@@ -567,18 +567,23 @@ def process_single_pdf(
     dpi: int,
     lang: str,
     use_camelot: bool,
+    use_pdfium: bool = True,
 ) -> Dict[str, Any]:
     doc = fitz.open(pdf_path)
     print(f"  pages: {len(doc)}")
-    technique = "hybrid"
+    technique = "hybrid" if use_pdfium else "native_only"
     scores = {"native": 0, "pdfium": 0, "ocr": 0}
-    print("  extraction technique: PDFium + PyMuPDF per-page; OCR only as final fallback")
+    if use_pdfium:
+        print("  extraction technique: PDFium + PyMuPDF per-page; OCR only as final fallback")
+    else:
+        print("  extraction technique: PyMuPDF native text only; OCR only as final fallback")
     native_doc = doc
-    try:
-        pdfium_doc = fitz_pdfium.open(pdf_path)
-    except Exception as exc:
-        pdfium_doc = None
-        print(f"  PDFium open failed; using PyMuPDF: {exc}")
+    pdfium_doc = None
+    if use_pdfium:
+        try:
+            pdfium_doc = fitz_pdfium.open(pdf_path)
+        except Exception as exc:
+            print(f"  PDFium open failed; using PyMuPDF: {exc}")
 
     all_records_raw: List[Dict[str, Any]] = []
     page_audits: List[Dict[str, Any]] = []
@@ -765,6 +770,8 @@ def main() -> int:
     parser.add_argument("--lang", default="eng")
     parser.add_argument("--camelot", action="store_true",
                         help="Enable Camelot (usually adds nothing on these PDFs)")
+    parser.add_argument("--native-only", action="store_true",
+                        help="Skip PDFium and use PyMuPDF native text; lowers peak memory on large PDFs")
     args = parser.parse_args()
 
     if args.input.is_file() and args.input.suffix.lower() == ".pdf":
@@ -792,6 +799,7 @@ def main() -> int:
                 dpi=args.dpi,
                 lang=args.lang,
                 use_camelot=args.camelot,
+                use_pdfium=not args.native_only,
             ))
         except Exception as e:
             print(f"  ERROR: {e}", file=sys.stderr)

@@ -16,6 +16,15 @@ def ensure_part4_schema():
             artifact_sha256 TEXT NOT NULL,
             received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS worker_lease_until TIMESTAMPTZ")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER NOT NULL DEFAULT 0")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS total_pages INTEGER NOT NULL DEFAULT 0")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_chunk INTEGER NOT NULL DEFAULT 0")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS total_chunks INTEGER NOT NULL DEFAULT 0")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted BOOLEAN NOT NULL DEFAULT FALSE")
+        c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted_at TIMESTAMPTZ")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_import_jobs_queue ON import_jobs(status,created_at)")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS published_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS manifest_json TEXT")

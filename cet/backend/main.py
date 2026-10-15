@@ -1,4 +1,4 @@
-import os,uuid,json,time,re,secrets,logging,html,sys,subprocess,threading,hashlib,csv
+import os,uuid,json,time,re,secrets,logging,sys,subprocess,threading,hashlib,csv
 from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +7,8 @@ from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileRes
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session,hash_password
 from .admin.network import client_ip
-from .admin.pipeline import run_preflight,MAX_PDF_BYTES
+from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file
+from .admin.source_storage import store_source_pdf, materialize_source, delete_source, storage_backend, StorageNotConfigured
 from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
@@ -21,6 +22,107 @@ BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
 IMPORTS = BASE / 'data' / 'imports'
 IMPORTS.mkdir(parents=True, exist_ok=True)
+def _recover_interrupted_imports():
+    """Requeue jobs whose database lease expired; never steal a live worker's job."""
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT id,stored_path FROM import_jobs WHERE status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') AND (worker_lease_until IS NULL OR worker_lease_until < CURRENT_TIMESTAMP) ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            job_id = int(row['id'])
+            source = str(row['stored_path'] or '')
+            source_exists = source.startswith('s3://') or (
+                not source.startswith('local://') and (BASE / source).is_file()
+            )
+            connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+            if source_exists:
+                connection.execute(
+                    "UPDATE import_jobs SET status='QUEUED',worker_id=NULL,worker_lease_until=NULL,current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (job_id,),
+                )
+                event(connection, job_id, 'RECOVERED', 'Worker lease expired; requeued from retained source PDF', 0)
+            else:
+                connection.execute(
+                    "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    ('Worker stopped and the source PDF is missing. Re-upload the original PDF.', job_id),
+                )
+                event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing after worker lease expired; upload again', None)
+        connection.commit()
+
+
+def _heartbeat_import_job(job_id: int, stop: threading.Event):
+    """Renew the DB lease so another server cannot claim a live extraction."""
+    while not stop.wait(20):
+        try:
+            with connect() as connection:
+                connection.execute(
+                    "UPDATE import_jobs SET worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes' WHERE id=? AND worker_id=? AND status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING','CANCELLED')",
+                    (job_id, _WORKER_ID),
+                )
+                connection.commit()
+        except Exception:
+            log.exception('Could not renew import worker lease: job_id=%s', job_id)
+
+
+def _import_queue_loop():
+    """Poll the durable PostgreSQL queue; a browser request does not own the job."""
+    global _ACTIVE_IMPORT_JOB_ID, _LAST_QUEUE_RECOVERY
+    while True:
+        job_id = None
+        heartbeat_stop = None
+        heartbeat_thread = None
+        try:
+            if time.monotonic() - _LAST_QUEUE_RECOVERY > 30:
+                _recover_interrupted_imports()
+                _LAST_QUEUE_RECOVERY = time.monotonic()
+            with connect() as connection:
+                row = connection.execute(
+                    "SELECT id FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                ).fetchone()
+                if row:
+                    candidate = int(row['id'])
+                    claimed = connection.execute(
+                        "UPDATE import_jobs SET status='EXTRACTING',worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED'",
+                        (_WORKER_ID, candidate),
+                    ).rowcount
+                    if claimed:
+                        job_id = candidate
+                        event(connection, job_id, 'WORKER_CLAIMED', 'Server worker claimed the queued PDF', 42)
+                connection.commit()
+            if job_id is None:
+                time.sleep(2)
+                continue
+            _ACTIVE_IMPORT_JOB_ID = job_id
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat_import_job, args=(job_id, heartbeat_stop),
+                daemon=True, name=f'import-heartbeat-{job_id}',
+            )
+            heartbeat_thread.start()
+            with _IMPORT_PROCESS_LOCK:
+                _process_import_background_locked(job_id)
+        except Exception:
+            log.exception('Import queue worker iteration failed')
+            time.sleep(3)
+        finally:
+            if heartbeat_stop:
+                heartbeat_stop.set()
+            if heartbeat_thread:
+                heartbeat_thread.join(timeout=2)
+            if job_id is not None:
+                try:
+                    with connect() as connection:
+                        connection.execute(
+                            'UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=? AND worker_id=?',
+                            (job_id, _WORKER_ID),
+                        )
+                        connection.commit()
+                except Exception:
+                    log.exception('Could not release import worker lease: job_id=%s', job_id)
+                _ACTIVE_IMPORT_JOB_ID = None
+
+
 @asynccontextmanager
 async def lifespan(_app):
     # Do database migrations/recovery in the background. During a rolling
@@ -87,6 +189,14 @@ async def lifespan(_app):
         except Exception:
             log.exception('Startup resolver sync failed')
 
+        try:
+            _recover_interrupted_imports()
+            threading.Thread(target=_import_queue_loop, daemon=True,
+                             name='durable-import-queue').start()
+            log.info('Durable import queue worker started')
+        except Exception:
+            log.exception('Import queue recovery/startup failed')
+
     threading.Thread(target=_startup_database_maintenance, daemon=True,
                      name='database-startup-maintenance').start()
     yield
@@ -111,6 +221,9 @@ log=logging.getLogger('cet-cap-admin')
 # Keep a single import processor active at a time even if multiple upload
 # requests or background tasks arrive together.
 _IMPORT_PROCESS_LOCK = threading.Lock()
+_ACTIVE_IMPORT_JOB_ID = None
+_WORKER_ID = f"{os.getenv('HOSTNAME', 'capfind')}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+_LAST_QUEUE_RECOVERY = 0.0
 _PRODUCTION=os.getenv('CET_ENV','production').lower() == 'production'
 _COOKIE_SECURE=os.getenv('CET_ADMIN_COOKIE_SECURE','1' if _PRODUCTION else '0') == '1'
 _CSRF_COOKIE='cet_admin_csrf'
@@ -1034,11 +1147,18 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
     name = Path(file.filename or '').name
     if not name.lower().endswith('.pdf'):
         raise HTTPException(400, 'Only PDF files are accepted')
+    try:
+        backend = storage_backend()
+        if backend == 's3':
+            pass  # Optional private durable storage; local mode is the no-card fallback.
+    except StorageNotConfigured as exc:
+        raise HTTPException(503, str(exc)) from exc
 
     job_key = 'IMPORT-' + uuid.uuid4().hex[:12].upper()
     tmp = IMPORTS / (job_key + '.upload')
-    stored = None
+    stored_value = None
     total = 0
+    digest = hashlib.sha256()
     try:
         with open(tmp, 'wb') as output:
             while True:
@@ -1048,49 +1168,68 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
                 total += len(chunk)
                 if total > MAX_PDF_BYTES:
                     raise HTTPException(413, 'PDF exceeds 50 MiB limit')
+                digest.update(chunk)
                 output.write(chunk)
+        if total < 5:
+            raise HTTPException(400, 'PDF upload is empty or too small')
+        fingerprint = digest.hexdigest()
+        try:
+            stored_value = store_source_pdf(tmp, f'imports/{job_key}.pdf', fingerprint)
+        except StorageNotConfigured as exc:
+            raise HTTPException(503, str(exc)) from exc
 
-        stored = IMPORTS / (job_key + '.pdf')
-        tmp.replace(stored)
         with connect() as connection:
-            cursor = connection.execute(
+            connection.execute(
                 'INSERT INTO import_jobs(job_key,original_filename,stored_path,sha256,size_bytes,status,created_by) VALUES (?,?,?,?,?,?,?)',
-                (
-                    job_key,
-                    name,
-                    str(stored.relative_to(BASE)),
-                    '',
-                    total,
-                    'RECEIVED',
-                    current_user['uid'],
-                ),
+                (job_key, name, stored_value, fingerprint, total, 'RECEIVED', current_user['uid']),
             )
-            # PostgreSQL does not provide SQLite-style cursor.lastrowid.
-            # Resolve the generated SERIAL id from the unique job_key on the
-            # same transaction/connection before recording the event.
             job_row = connection.execute(
-                'SELECT id FROM import_jobs WHERE job_key=?',
-                (job_key,),
+                'SELECT id FROM import_jobs WHERE job_key=?', (job_key,)
             ).fetchone()
             if not job_row:
-                raise RuntimeError('Import job was inserted but its id could not be resolved')
+                raise RuntimeError('Import job could not be created')
             job_id = int(job_row['id'])
-            event(connection, job_id, 'RECEIVED', 'File received', 0)
+            event(connection, job_id, 'RECEIVED', 'PDF uploaded to private source storage', 0)
             connection.commit()
-            ok = run_preflight(connection, job_id, stored, name)
+            with materialize_source(stored_value) as source_path:
+                ok = run_preflight(connection, job_id, source_path, name)
             if ok:
                 connection.execute(
-                    "UPDATE import_jobs SET status='EXTRACTING',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
+                    "UPDATE import_jobs SET status='QUEUED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
                     (job_id,),
                 )
+                event(connection, job_id, 'QUEUED', 'Waiting for the server extraction worker', 40)
                 connection.commit()
-                background_tasks.add_task(_process_import_background, job_id)
-        return JSONResponse({'ok': True, 'id': job_id, 'job_key': job_key, 'status': 'EXTRACTING'})
+            current = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+            current_status = str(current['status']) if current else 'FAILED'
+        return JSONResponse(status_code=202 if current_status == 'QUEUED' else 400,
+                            content={'ok': current_status == 'QUEUED', 'id': job_id,
+                                     'job_key': job_key, 'status': current_status})
+    except HTTPException:
+        if tmp.exists():
+            tmp.unlink()
+        # Once the DB job exists, retain its source for admin inspection. Before
+        # that point, remove an orphaned upload object if creation failed.
+        if stored_value:
+            try:
+                with connect() as c:
+                    exists = c.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?', (job_key,)).fetchone()
+                if not exists:
+                    delete_source(stored_value)
+            except Exception:
+                log.exception('Could not clean unreferenced source upload %s', job_key)
+        raise
     except Exception:
         if tmp.exists():
             tmp.unlink()
-        if stored is not None and stored.exists():
-            stored.unlink()
+        if stored_value:
+            try:
+                with connect() as c:
+                    exists = c.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?', (job_key,)).fetchone()
+                if not exists:
+                    delete_source(stored_value)
+            except Exception:
+                log.exception('Could not clean unreferenced source upload %s', job_key)
         raise
 
 
@@ -1182,21 +1321,29 @@ def _process_import_background_locked(job_id: int):
         if not job:
             return
         try:
-            result = process_import(
-                connection,
-                job_id,
-                BASE / job['stored_path'],
-                data_type=job['data_type'],
-                family=job['course_family'],
-                year=int(job['year']),
-                round_name=job['round'],
-                claimed=True,
-            )
+            with materialize_source(job['stored_path']) as source_path:
+                expected_hash = str(job.get('sha256') or '').strip().lower()
+                if expected_hash and sha256_file(source_path).lower() != expected_hash:
+                    raise RuntimeError('Retained source PDF fingerprint does not match the upload record')
+                result = process_import(
+                    connection,
+                    job_id,
+                    source_path,
+                    data_type=job['data_type'],
+                    family=job['course_family'],
+                    year=int(job['year']),
+                    round_name=job['round'],
+                    claimed=True,
+                    source_filename=job['original_filename'],
+                    worker_id=job.get('worker_id'),
+                )
             if not result.get('ok'):
                 log.error('Background import processing failed: job_id=%s error=%s', job_id, result.get('error'))
             elif result.get('status') == JobStatus.STAGED.value:
-                # Successful validation is not administrator approval. Keep the
-                # import staged so a reviewer can inspect and explicitly approve it.
+                # The final combined artifacts remain available for review/publish;
+                # per-chunk intermediate files are no longer needed after staging.
+                import shutil
+                shutil.rmtree(BASE / 'data' / 'import_work' / f'job_{job_id}' / 'raw' / '.chunk_work', ignore_errors=True)
                 log.info('Import is staged and awaiting explicit admin approval: job_id=%s', job_id)
         except Exception:
             log.exception('Unexpected background import processing failure: job_id=%s', job_id)
@@ -1213,27 +1360,36 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
         job = connection.execute(
-            'SELECT * FROM import_jobs WHERE id=?',
+            'SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?',
             (job_id,),
         ).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
+        if job.get('source_deleted'):
+            raise HTTPException(409, 'The source PDF was manually deleted. Re-upload it to retry extraction.')
         if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
             raise HTTPException(409, f'Import is not ready for processing: {job["status"]}')
         if job['status'] == JobStatus.CANCELLED.value:
+            if job.get('worker_alive') or _ACTIVE_IMPORT_JOB_ID == job_id:
+                raise HTTPException(409, 'Cancellation is still stopping the worker; wait a moment before retrying')
             marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
             if marker.exists():
-                raise HTTPException(409, 'Stop request is still being finalized; wait a moment before retrying')
+                marker.unlink()
         if str(job['stored_path'] or '').startswith('local://'):
             raise HTTPException(409, 'This import runs on the local worker. Retry it from Import Center while that worker is running.')
-        path = BASE / job['stored_path']
-        if not path.exists():
-            raise HTTPException(404, 'Stored source PDF is missing')
+        try:
+            with materialize_source(job['stored_path']) as path:
+                # Re-run preflight on every retry. A previous run may have classified
+                preflight_ok = run_preflight(connection, job_id, path, job['original_filename'])
+        except FileNotFoundError as exc:
+            raise HTTPException(404, 'Stored source PDF is missing') from exc
+        except StorageNotConfigured as exc:
+            raise HTTPException(503, str(exc)) from exc
 
         # Re-run preflight on every retry. A previous run may have classified
         # a generic filename incorrectly (especially a seat matrix named like
         # `BBA 26 C1.pdf`), and retrying stale metadata would repeat the error.
-        if not run_preflight(connection, job_id, path, job['original_filename']):
+        if not preflight_ok:
             raise HTTPException(409, 'PDF preflight failed; inspect the import error before retrying')
         job = connection.execute(
             'SELECT * FROM import_jobs WHERE id=?',
@@ -1257,22 +1413,178 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             )
 
         claimed = connection.execute(
-            "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('REVIEW_REQUIRED','FAILED','CANCELLED')",
+            "UPDATE import_jobs SET status='QUEUED',current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
             (job_id,),
         ).rowcount
         if not claimed:
             raise HTTPException(409, 'Import is already being processed')
-        connection.commit()
 
         # A retry clears any previous stop marker before starting a fresh run.
         cancel_marker = BASE / 'data' / 'import_staging' / f'job_{job_id}' / 'CANCEL'
         if cancel_marker.exists():
             cancel_marker.unlink()
-        background_tasks.add_task(_process_import_background, job_id)
+        (cancel_marker.parent / 'PAUSE').unlink(missing_ok=True)
+        connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+        connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+        event(connection, job_id, 'QUEUED', 'Retry queued for the server extraction worker', 0)
+        connection.commit()
         return JSONResponse(
             status_code=202,
-            content={"ok": True, "job_id": job_id, "status": "EXTRACTING"},
+            content={"ok": True, "job_id": job_id, "status": "QUEUED"},
         )
+
+
+@app.post('/admin/api/imports/{job_id}/pause')
+def pause_import(request: Request, job_id: int):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute('SELECT status,stored_path FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'This legacy import belongs to the local worker')
+        if job['status'] not in {'QUEUED', 'EXTRACTING', 'PAUSED'}:
+            raise HTTPException(409, f'Only a queued or extracting import can be paused (current status: {job["status"]})')
+        control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
+        control.mkdir(parents=True, exist_ok=True)
+        (control / 'PAUSE').touch()
+        connection.execute("UPDATE import_jobs SET status='PAUSED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','EXTRACTING','PAUSED')", (job_id,))
+        event(connection, job_id, 'PAUSE_REQUESTED', 'Pause requested; extraction will stop at a safe page checkpoint', None)
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'status': 'PAUSE_REQUESTED'}
+
+
+@app.post('/admin/api/imports/{job_id}/resume')
+def resume_import(request: Request, job_id: int):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute('SELECT status,stored_path,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if str(job['stored_path'] or '').startswith('local://'):
+            raise HTTPException(409, 'This legacy import belongs to the local worker')
+        if job['status'] not in {'EXTRACTING', 'PAUSED'}:
+            raise HTTPException(409, f'Only an extracting import can be resumed (current status: {job["status"]})')
+        control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
+        (control / 'PAUSE').unlink(missing_ok=True)
+        next_status = 'EXTRACTING' if job.get('worker_id') and job.get('worker_alive') else 'QUEUED'
+        connection.execute("UPDATE import_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='PAUSED'", (next_status, job_id))
+        event(connection, job_id, 'RESUME_REQUESTED', 'Pause marker removed; extraction will continue', None)
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'status': next_status}
+
+
+@app.get('/admin/api/runtime')
+def runtime_metrics(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN', 'REVIEWER', 'READ_ONLY'})
+    import shutil
+    def read_int(path):
+        try:
+            raw = Path(path).read_text(encoding='utf-8').strip()
+            return None if raw in {'max', ''} else int(raw)
+        except (OSError, ValueError):
+            return None
+
+    mem_used = read_int('/sys/fs/cgroup/memory.current')
+    mem_limit = read_int('/sys/fs/cgroup/memory.max')
+    if mem_limit is None:
+        mem_limit = read_int('/sys/fs/cgroup/memory/memory.limit_in_bytes')
+    if mem_used is None:
+        mem_used = read_int('/sys/fs/cgroup/memory/memory.usage_in_bytes')
+    cpu_quota = None
+    cpu_period = None
+    try:
+        quota_raw, period_raw = Path('/sys/fs/cgroup/cpu.max').read_text().split()
+        if quota_raw != 'max':
+            cpu_quota, cpu_period = int(quota_raw), int(period_raw)
+    except (OSError, ValueError):
+        try:
+            cpu_quota = read_int('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')
+            cpu_period = read_int('/sys/fs/cgroup/cpu/cpu.cfs_period_us')
+        except Exception:
+            pass
+
+    # Calculate usage from cgroup cumulative CPU time between dashboard polls.
+    cpu_percent = None
+    try:
+        values = {}
+        for line in Path('/sys/fs/cgroup/cpu.stat').read_text().splitlines():
+            key, value = line.split()
+            values[key] = int(value)
+        usage_usec = values.get('usage_usec')
+        if usage_usec is not None:
+            now = time.monotonic()
+            previous = getattr(runtime_metrics, '_cpu_previous', None)
+            if previous:
+                elapsed = max(0.001, now - previous[0])
+                capacity = ((cpu_quota / cpu_period) if cpu_quota and cpu_period else 1.0)
+                cpu_percent = round(max(0.0, (usage_usec - previous[1]) / 1_000_000 / elapsed / capacity * 100), 1)
+            runtime_metrics._cpu_previous = (now, usage_usec)
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+
+    def tree_bytes(path):
+        total = 0
+        try:
+            for item in Path(path).rglob('*'):
+                if item.is_file():
+                    try:
+                        total += item.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    with connect() as connection:
+        storage = connection.execute('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS bytes FROM import_jobs WHERE source_deleted=FALSE AND stored_path NOT LIKE ?',
+                                     ('local://%',)).fetchone()
+        active = connection.execute("SELECT id,status,original_filename,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']
+    job_progress = None
+    if active:
+        control = BASE / 'data' / 'import_staging' / f"job_{active['id']}"
+        progress_path = control / 'progress.json'
+        manifest_path = BASE / 'data' / 'import_work' / f"job_{active['id']}" / 'raw' / '.chunk_work' / 'manifest.json'
+        progress = {}
+        manifest = {}
+        try:
+            progress = json.loads(progress_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            pass
+        if manifest_path:
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                pass
+        total_pages = int(active.get('total_pages') or progress.get('total') or manifest.get('total_pages') or 0)
+        current_page = int(active.get('current_page') or progress.get('page') or 0)
+        chunk_size = max(1, int(manifest.get('chunk_pages') or 100))
+        pause_requested = (control / 'PAUSE').exists()
+        job_progress = {
+            'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
+            'page': current_page, 'total_pages': total_pages,
+            'percent': round(min(100, current_page / total_pages * 100), 1) if total_pages else 0,
+            'chunk_count': int(active.get('current_chunk') or len([x for x in manifest.get('parts', []) if x.get('status') == 'COMPLETED'])),
+            'total_chunks': int(active.get('total_chunks') or (((total_pages + chunk_size - 1) // chunk_size) if total_pages else 0)),
+            'pause_requested': pause_requested,
+            'paused_at_checkpoint': active['status'] == 'PAUSED' or progress.get('state') == 'PAUSED',
+        }
+    disk = shutil.disk_usage(BASE)
+    return {
+        'ok': True,
+        'memory': {'used_bytes': mem_used, 'limit_bytes': mem_limit,
+                   'used_percent': round(mem_used / mem_limit * 100, 1) if mem_used is not None and mem_limit else None},
+        'cpu': {'percent_of_available_capacity': cpu_percent,
+                'quota_cores': round(cpu_quota / cpu_period, 2) if cpu_quota and cpu_period else None},
+        'disk': {'total_bytes': disk.total, 'free_bytes': disk.free,
+                 'used_percent': round((disk.total - disk.free) / disk.total * 100, 1) if disk.total else None,
+                 'temporary_files_bytes': tree_bytes(BASE / 'data' / 'import_work') + tree_bytes(BASE / 'data' / 'import_staging')},
+        'source_pdfs': {'tracked_files': int(storage['n']), 'tracked_bytes': int(storage['bytes'])},
+        'queued_jobs': int(queued_count),
+        'storage': {'backend': storage_backend(), 'durable_configured': all(os.getenv(k, '').strip() for k in ('CET_S3_ENDPOINT_URL', 'CET_S3_BUCKET', 'CET_S3_ACCESS_KEY_ID', 'CET_S3_SECRET_ACCESS_KEY')) if storage_backend() == 's3' else False},
+        'active_job': job_progress,
+    }
 
 
 @app.post('/admin/api/imports/{job_id}/cancel')
@@ -1284,6 +1596,7 @@ def cancel_import(request: Request, job_id: int):
             raise HTTPException(404, 'Import not found')
         active = {
             JobStatus.RECEIVED.value, JobStatus.IDENTIFIED.value,
+            JobStatus.QUEUED.value, 'PAUSED',
             JobStatus.EXTRACTING.value, JobStatus.NORMALIZING.value,
             JobStatus.VALIDATING.value, JobStatus.COMPARING.value,
         }
@@ -1295,7 +1608,7 @@ def cancel_import(request: Request, job_id: int):
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
         connection.execute(
-            "UPDATE import_jobs SET status='CANCELLED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('RECEIVED','IDENTIFIED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING')",
+            "UPDATE import_jobs SET status='CANCELLED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('RECEIVED','IDENTIFIED','QUEUED','PAUSED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING')",
             (job_id,),
         )
         event(connection, job_id, 'CANCELLED', 'Processing stop requested by admin', None)
@@ -1303,22 +1616,63 @@ def cancel_import(request: Request, job_id: int):
     return {'ok': True, 'job_id': job_id, 'status': 'CANCELLED'}
 
 
+@app.delete('/admin/api/imports/{job_id}/source')
+def delete_import_source(request: Request, job_id: int):
+    user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    with connect() as connection:
+        job = connection.execute(
+            'SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?',
+            (job_id,),
+        ).fetchone()
+        if not job:
+            raise HTTPException(404, 'Import not found')
+        if _ACTIVE_IMPORT_JOB_ID == job_id or job.get('worker_alive') or job['status'] in {'QUEUED','EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING'}:
+            raise HTTPException(409, 'Cannot delete the source while the job is queued or a worker may still be using it.')
+        if job.get('source_deleted'):
+            return {'ok': True, 'job_id': job_id, 'source_deleted': True, 'already_deleted': True}
+        if str(job.get('stored_path') or '').startswith('local://'):
+            raise HTTPException(409, 'This legacy local-worker source is not stored on the server.')
+        if str(job.get('stored_path') or '').startswith('gdrive://'):
+            raise HTTPException(409, 'CAPFind has read-only access to Google Drive. Delete the original file directly in Drive; this action does not delete Drive files.')
+        try:
+            delete_source(str(job.get('stored_path') or ''))
+        except Exception as exc:
+            log.exception('Manual source-PDF deletion failed: job_id=%s', job_id)
+            raise HTTPException(503, 'Source PDF deletion failed; no database records were removed.') from exc
+        connection.execute(
+            'UPDATE import_jobs SET source_deleted=TRUE,source_deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (job_id,),
+        )
+        event(connection, job_id, 'SOURCE_PDF_DELETED', 'Admin manually deleted the stored source PDF; import results and audit metadata were retained', None)
+        connection.execute(
+            "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",
+            (user['uid'], 'DELETE_SOURCE_PDF', 'IMPORT', str(job_id),
+             json.dumps({'job_key': job['job_key'], 'source_deleted': False}),
+             json.dumps({'source_deleted': True}), 'Source PDF manually deleted; import metadata retained'),
+        )
+        connection.commit()
+    return {'ok': True, 'job_id': job_id, 'source_deleted': True}
+
+
 @app.delete('/admin/api/imports/{job_id}')
 def delete_import(request: Request, job_id: int):
     u = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as c:
-        job = c.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = c.execute('SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
+        if _ACTIVE_IMPORT_JOB_ID == job_id or job.get('worker_alive') or job['status'] in {'QUEUED','EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING'}:
+            raise HTTPException(409, 'This job is queued or still has a live worker. Cancel it and wait until processing stops before deleting.')
         deletable = {
             JobStatus.RECEIVED.value,
             JobStatus.IDENTIFIED.value,
+            JobStatus.QUEUED.value,
+            'PAUSED',
             JobStatus.REVIEW_REQUIRED.value,
             JobStatus.STAGED.value,
             JobStatus.FAILED.value,
             JobStatus.CANCELLED.value,
             JobStatus.QUARANTINED.value,
-            JobStatus.CANCELLED.value,
         }
         if job['status'] not in deletable:
             raise HTTPException(409, f"Import cannot be deleted while in {job['status']}")
@@ -1336,6 +1690,14 @@ def delete_import(request: Request, job_id: int):
                 f"Import is referenced by release {release['release_key']} ({release['status']}) and cannot be deleted; keep it for audit history.",
             )
 
+        stored_value = str(job['stored_path'] or '')
+        try:
+            if not job.get('source_deleted'):
+                delete_source(stored_value)
+        except Exception as exc:
+            log.exception('Source PDF deletion failed; retaining import metadata: job_id=%s', job_id)
+            raise HTTPException(503, 'Source PDF could not be deleted; the import record was retained. Check storage configuration and retry.') from exc
+
         c.execute('DELETE FROM import_events WHERE job_id=?', (job_id,))
         c.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
         c.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
@@ -1348,15 +1710,13 @@ def delete_import(request: Request, job_id: int):
              None, 'Import deleted before production commit'),
         )
         c.commit()
-    stored_value = str(job['stored_path'] or '')
-    stored = BASE / stored_value if not stored_value.startswith('local://') else None
-    if stored is not None and stored.exists():
-        stored.unlink()
     local_artifacts = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}'
     if local_artifacts.exists():
         import shutil
         shutil.rmtree(local_artifacts, ignore_errors=True)
     for directory in (
+        BASE / 'data' / 'import_work' / f"job_{job_id}",
+        BASE / 'data' / 'import_staging' / f"job_{job_id}",
         BASE / 'data' / 'work' / f"job_{job_id}",
         BASE / 'data' / 'staging' / f"job_{job_id}",
     ):

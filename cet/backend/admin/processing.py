@@ -6,7 +6,7 @@ validation gates rather than reimplementing their parsing rules. Production
 fact tables are NOT modified here.
 """
 from __future__ import annotations
-import csv, importlib.util, json, shutil, subprocess, sys, uuid, os, time
+import csv, importlib.util, json, shutil, subprocess, sys, os, time
 from pathlib import Path
 from .db import event, update_status
 from .state import JobStatus, can_transition
@@ -26,7 +26,8 @@ def _cancel_requested(job_id: int) -> bool:
     return _cancel_marker(job_id).exists()
 
 def _raise_if_cancelled(conn, job_id: int) -> None:
-    if not _cancel_requested(job_id):
+    row = conn.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+    if not _cancel_requested(job_id) and (not row or row.get('status') != JobStatus.CANCELLED.value):
         return
     conn.execute(
         "UPDATE import_jobs SET status=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP "
@@ -237,11 +238,15 @@ def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
 def process_import(conn, job_id: int, pdf_path: Path, *,
                    data_type: str, family: str, year: int, round_name: str,
                    claimed: bool=False, pre_extracted_path: Path | None=None,
-                   extraction_summary: dict | None=None):
+                   extraction_summary: dict | None=None, source_filename: str | None=None, worker_id: str | None=None):
     """Run extraction/normalization/validation and stop at STAGED/REVIEW_REQUIRED."""
-    work = WORK_ROOT / f"job_{job_id}_{uuid.uuid4().hex[:8]}"
+    # Stable per-job work path lets the chunk manifest skip completed parts on retry.
+    work = WORK_ROOT / f"job_{job_id}"
     raw = work / "raw"
     normalized = work / "normalized"
+    shutil.rmtree(normalized, ignore_errors=True)
+    shutil.rmtree(work / "cleaned", ignore_errors=True)
+    shutil.rmtree(work / "isolated_project", ignore_errors=True)
     staging = STAGING_ROOT / f"job_{job_id}"
     for d in (raw, normalized, staging):
         d.mkdir(parents=True, exist_ok=True)
@@ -258,10 +263,44 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
 
         if data_type == "CUTOFFS":
             if pre_extracted_path is None:
-                mod = _load_module(SCRIPTS / "cutoff_extractor.py", "cet_cutoff_extractor")
-                summary = mod.process_single_pdf(pdf_path=pdf_path, outdir=raw,
-                                                 dpi=300, lang="eng", use_camelot=False)
+                # Run bounded page-range extraction in a child process. This keeps
+                # the parent API process from retaining the full PDF parser state
+                # and allows cooperative pause/cancel checkpoints between pages.
+                control_dir = staging
+                control_dir.mkdir(parents=True, exist_ok=True)
+                env = os.environ.copy()
+                env["CAPFIND_JOB_CONTROL_DIR"] = str(control_dir)
+                env["CAPFIND_JOB_ID"] = str(job_id)
+                env["CAPFIND_WORKER_ID"] = str(worker_id or "")
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
+                chunk_pages = str(max(10, min(250, int(env.get("CAPFIND_CHUNK_PAGES", "100")))))
+                command = [
+                    sys.executable, str(SCRIPTS / "chunked_cutoff_extractor.py"),
+                    str(pdf_path), "--out", str(raw), "--chunk-pages", chunk_pages,
+                    "--source-name", source_filename or pdf_path.name,
+                ]
+                process = subprocess.run(
+                    command, cwd=str(BASE), env=env, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", check=False,
+                )
+                _raise_if_cancelled(conn, job_id)
+                if process.returncode != 0:
+                    raise RuntimeError(
+                        "Chunked cutoff extraction failed: "
+                        + ((process.stderr or process.stdout or "no extractor output")[-3500:])
+                    )
+                manifest_path = raw / ".chunk_work" / "manifest.json"
+                if not manifest_path.is_file():
+                    raise RuntimeError("Chunked extractor did not write its completion manifest")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("status") != "COMPLETED":
+                    raise RuntimeError("Chunked extractor manifest is not marked COMPLETED")
+                summary = dict(manifest.get("result") or {})
+                summary["merged_records"] = int(summary.get("rows_extracted", 0))
                 extracted_path = raw / f"{pdf_path.stem}_cutoffs.csv"
+                if not summary.get("page_coverage_valid"):
+                    raise RuntimeError("Chunked extractor failed original-page coverage validation")
             else:
                 extracted_path = Path(pre_extracted_path)
                 summary = dict(extraction_summary or {})
