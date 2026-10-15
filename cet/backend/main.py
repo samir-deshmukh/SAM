@@ -1789,7 +1789,7 @@ def review_list(request: Request):
                    (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id) AS staging_row_count,
                    (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id AND UPPER(COALESCE(r.validation_status,'')) = 'REVIEW') AS validation_issue_count
             FROM import_jobs j
-            WHERE j.status IN ('REVIEW_REQUIRED','COMMITTING')
+            WHERE j.status IN ('STAGED','REVIEW_REQUIRED','COMMITTING')
             ORDER BY j.id DESC
         """).fetchall()
         response = [dict(r) for r in rows]
