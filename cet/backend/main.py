@@ -9,7 +9,7 @@ from .admin.security import verify_password,make_session,read_session,hash_passw
 from .admin.network import client_ip
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file
 from .admin.source_storage import store_source_pdf, materialize_source, delete_source, storage_backend, StorageNotConfigured
-from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
+from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release,revalidate_legacy_mh_staging
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
@@ -1829,6 +1829,16 @@ def review_list(request: Request):
                 # Preserve the conservative count if an old report is malformed.
                 pass
         return response
+
+@app.post('/admin/api/imports/{job_id}/revalidate-legacy-mh')
+def revalidate_legacy_mh(request: Request, job_id: int):
+    u = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    with connect() as c:
+        try:
+            return revalidate_legacy_mh_staging(c, job_id, u['uid'])
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
 
 @app.get('/admin/api/imports/{job_id}/review')
 def review_detail(request: Request, job_id: int):
