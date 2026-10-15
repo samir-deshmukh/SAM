@@ -7,6 +7,7 @@ fact tables are NOT modified here.
 """
 from __future__ import annotations
 import csv, importlib.util, json, shutil, subprocess, sys, os, time
+from functools import lru_cache
 from pathlib import Path
 from .db import event, update_status
 from .state import JobStatus, can_transition
@@ -70,6 +71,18 @@ def _page_from(row: dict):
     v = str(row.get("page", "")).strip()
     return int(v) if v.isdigit() else None
 
+@lru_cache(maxsize=1)
+def _known_cutoff_categories() -> frozenset[str]:
+    """Load the canonical base-category whitelist once per process."""
+    path = BASE / "data" / "reference" / "category_whitelist.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return frozenset(
+            str(row.get("base_code", "")).strip().upper()
+            for row in csv.DictReader(handle)
+            if str(row.get("base_code", "")).strip()
+        )
+
+
 def _resolve_cutoff_dimensions(raw: dict):
     """Resolve cutoff category/section/stage without inventing source context.
 
@@ -83,7 +96,7 @@ def _resolve_cutoff_dimensions(raw: dict):
 
     category = str(raw.get("category", "")).strip()
     base, ladies, derived_section = parse_category(category)
-    if base is None:
+    if base is None or base.upper() not in _known_cutoff_categories():
         raise ValueError(f"Unknown category: {category!r}")
 
     section_raw = str(raw.get("section", "")).strip()
