@@ -76,16 +76,23 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
       return;
     }
     const peers=new Set();
-    const channel=new BroadcastChannel('cet-cap-admin-tab-identity-v1');
-    channel.onmessage=event=>{
-      const data=event.data||{};
-      if(data.tabId!==tabId||data.instanceId===instanceId)return;
-      if(data.type==='probe')channel.postMessage({type:'peer',tabId,instanceId});
-      if(data.type==='peer')peers.add(data.instanceId);
-    };
-    channel.postMessage({type:'probe',tabId,instanceId});
-    await new Promise(resolve=>setTimeout(resolve,180));
-    channel.close();
+    let channel;
+    try{
+      channel=new BroadcastChannel('cet-cap-admin-tab-identity-v1');
+      channel.onmessage=event=>{
+        const data=event.data||{};
+        if(data.tabId!==tabId||data.instanceId===instanceId)return;
+        if(data.type==='probe')channel.postMessage({type:'peer',tabId,instanceId});
+        if(data.type==='peer')peers.add(data.instanceId);
+      };
+      channel.postMessage({type:'probe',tabId,instanceId});
+      await new Promise(resolve=>setTimeout(resolve,180));
+      channel.close();
+    }catch(_){
+      try{if(channel)channel.close()}catch(__){}
+      if(owner&&owner!==instanceId)rotateTabId();
+      return;
+    }
     // If a live tab owns this copied ID, only the copy rotates. A stale lock
     // without a live peer is retained so the same tab can recover after reload.
     if(owner&&owner!==instanceId&&peers.has(owner)){rotateTabId();return;}
@@ -123,8 +130,12 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   }
   window.__cetAdminTabRetry=acquire;
   window.__cetAdminLockPromise=resolveClonedTabIdentity().then(acquire);
+  // Backpressure is essential: a slow database heartbeat must not spawn a
+  // new request every five seconds and worsen pool exhaustion.
+  let heartbeatBusy=false;
   setInterval(async function(){
-    if(!window.__cetAdminTabReady)return;
+    if(!window.__cetAdminTabReady||heartbeatBusy)return;
+    heartbeatBusy=true;
     try{
       const r=await fetch('/admin/api/admin-lock/heartbeat',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store'});
       if(r.status===401){window.location.replace('/admin/login');return;}
@@ -132,6 +143,7 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
       if(!r.ok){showBlocked('connection');return;}
       try{localStorage.setItem(LOCK_KEY,JSON.stringify({id:tabId,ts:Date.now(),instanceId}));}catch(_){}
     }catch(_){showBlocked('connection');}
+    finally{heartbeatBusy=false;}
   },5000);
   // Do not block on storage events: a stale write from a previous page can
   // race with successful server acquisition. The next API/heartbeat response
