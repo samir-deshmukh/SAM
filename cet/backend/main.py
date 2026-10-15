@@ -93,6 +93,7 @@ def _import_queue_loop():
             if job_id is None:
                 time.sleep(2)
                 continue
+            log.info('Import queue worker claimed job_id=%s worker_id=%s', job_id, _WORKER_ID)
             _ACTIVE_IMPORT_JOB_ID = job_id
             heartbeat_stop = threading.Event()
             heartbeat_thread = threading.Thread(
@@ -180,6 +181,18 @@ async def lifespan(_app):
         # STAGED imports must remain pending until an administrator explicitly
         # approves them in the Review Center. A service restart is not approval.
         log.info('Startup maintenance will leave STAGED imports pending')
+
+        # Start the durable import worker before the independent college website
+        # resolver sync. That sync can take time on a cold deployment; it must
+        # never delay PDF jobs from being claimed and processed.
+        try:
+            _recover_interrupted_imports()
+            threading.Thread(target=_import_queue_loop, daemon=True,
+                             name='durable-import-queue').start()
+            log.info('Durable import queue worker started before resolver sync')
+        except Exception:
+            log.exception('Import queue recovery/startup failed')
+
         # Rebuild the derived website-resolver view after every deploy so an
         # admin page visit is never required to make current CAP colleges appear.
         try:
@@ -188,14 +201,6 @@ async def lifespan(_app):
             log.info('Startup resolver sync completed: colleges=%s', resolver_count)
         except Exception:
             log.exception('Startup resolver sync failed')
-
-        try:
-            _recover_interrupted_imports()
-            threading.Thread(target=_import_queue_loop, daemon=True,
-                             name='durable-import-queue').start()
-            log.info('Durable import queue worker started')
-        except Exception:
-            log.exception('Import queue recovery/startup failed')
 
     threading.Thread(target=_startup_database_maintenance, daemon=True,
                      name='database-startup-maintenance').start()
