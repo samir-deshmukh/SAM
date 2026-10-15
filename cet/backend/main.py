@@ -467,9 +467,12 @@ def user(request):
             'role': row['role'],
             'av': int(row['auth_version']),
         }
-    except Exception:
-        log.exception('Session validation failed')
-        return None
+    except Exception as exc:
+        # A transient database/pool failure is not an invalid login session.
+        # Returning None here made require() emit HTTP 401 and forced the UI
+        # to redirect the administrator to login during pool exhaustion.
+        log.exception('Session validation temporarily unavailable')
+        raise HTTPException(status_code=503, detail='Admin session validation temporarily unavailable') from exc
 
 
 _ADMIN_LOCK_TTL_SECONDS = 45
