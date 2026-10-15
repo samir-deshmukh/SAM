@@ -44,3 +44,8 @@ def test_worker_binds_only_to_loopback_by_default():
         "localhost",
         "127.0.0.1",
     }
+
+
+def test_private_network_access_is_enabled_for_browser_to_loopback():
+    cors = next(m for m in local_worker.app.user_middleware if m.cls.__name__ == "CORSMiddleware")
+    assert cors.kwargs.get("allow_private_network") is True
