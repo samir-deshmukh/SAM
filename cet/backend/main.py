@@ -1852,6 +1852,20 @@ def review_detail(request: Request, job_id: int):
                        "FROM import_staging_records WHERE job_id=? ORDER BY id LIMIT 500",(job_id,)).fetchall()
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
+@app.get('/admin/api/imports/{job_id}/commit-progress')
+def import_commit_progress(request: Request, job_id: int):
+    require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
+    with connect() as c:
+        row = c.execute(
+            "SELECT job_id,status,stage,processed,total,progress,message,updated_at FROM import_commit_progress WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+    if not row:
+        return {'job_id': job_id, 'status': 'IDLE', 'stage': 'Waiting', 'processed': 0,
+                'total': 0, 'progress': 0, 'message': 'No commit has started for this import.'}
+    return dict(row)
+
+
 @app.post('/admin/api/imports/{job_id}/approve')
 async def approve(request: Request, job_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
