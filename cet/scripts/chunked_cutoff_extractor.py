@@ -221,6 +221,21 @@ def main() -> int:
     count = (total_pages + args.chunk_pages - 1) // args.chunk_pages
     prior = {int(p["index"]): p for p in manifest.get("parts", [])}
     parts: list[dict] = []
+    # Lightweight live progress snapshots consumed by /admin/api/runtime.
+    control_dir = Path(os.environ.get("CAPFIND_JOB_CONTROL_DIR", "")).expanduser()
+    progress_path = control_dir / "progress.json" if str(control_dir) not in ("", ".") else None
+
+    def write_progress(state: str, page: int, chunk_number: int, message: str = "") -> None:
+        if progress_path is None:
+            return
+        atomic_json(progress_path, {
+            "state": state, "page": max(0, min(total_pages, int(page))),
+            "total": total_pages, "chunk_count": max(0, int(chunk_number)),
+            "total_chunks": count, "chunk_pages": args.chunk_pages,
+            "message": message,
+        })
+
+    write_progress("RUNNING", 0, 0, "Preparing extraction")
 
     for idx in range(count):
         start = idx * args.chunk_pages
@@ -243,6 +258,7 @@ def main() -> int:
             parts.append(part_info)
             continue
 
+        write_progress("RUNNING", start + 1, number - 1, f"Extracting pages {start+1}-{end}")
         print(f"[{number}/{count}] pages {start+1}-{end}: creating bounded PDF part")
         if not chunk_pdf.exists():
             with fitz.open(source) as split_source:
@@ -275,6 +291,7 @@ def main() -> int:
                 import time
                 time.sleep(attempt * 2)
         if result is None or result.returncode != 0:
+            write_progress("FAILED", start + 1, number - 1, f"Chunk {number} failed on pages {start+1}-{end}")
             manifest["status"] = "FAILED"
             manifest["failed_part"] = number
             manifest["failed_page_range"] = [start + 1, end]
@@ -304,6 +321,7 @@ def main() -> int:
         }
         prior[number] = part_info
         parts.append(part_info)
+        write_progress("RUNNING", end, number, f"Completed chunk {number} of {count}")
         manifest["parts"] = parts + [
             p for n, p in sorted(prior.items()) if n > number
             and p.get("status") == "COMPLETED"
@@ -321,6 +339,7 @@ def main() -> int:
     manifest["status"] = "COMPLETED"
     manifest["result"] = result
     atomic_json(manifest_path, manifest)
+    write_progress("COMPLETED", total_pages, count, "All pages extracted and coverage verified")
     print(json.dumps(result, indent=2))
     return 0
 
