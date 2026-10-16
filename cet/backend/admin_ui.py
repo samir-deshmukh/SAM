@@ -170,7 +170,7 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
 
 })();
 window.__cetAdminPollBusy=false;
-window.__cetAdminRunPoll=async function(fn){if(window.__cetAdminPollBusy)return;window.__cetAdminPollBusy=true;try{await fn()}finally{window.__cetAdminPollBusy=false}};
+window.__cetAdminRunPoll=async function(fn){if(window.__cetAdminPollBusy)return;window.__cetAdminPollBusy=true;try{if(!window.__cetAdminTabReady&&window.__cetAdminLockPromise)await window.__cetAdminLockPromise;if(!window.__cetAdminTabReady)return;await fn()}finally{window.__cetAdminPollBusy=false}};
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const csrfHeaders=(extra={})=>{const m=document.cookie.match(/(?:^|; )cet_admin_csrf=([^;]+)/);return Object.assign({'X-CSRF-Token':m?decodeURIComponent(m[1]):'','X-Admin-Client-ID':sessionStorage.getItem('cet-cap-admin-tab-id-v1')||''},extra)};
 async function toast(msg,type=''){const d=document.createElement('div');d.className='toast '+type;d.textContent=msg;document.querySelector('#toastbox').appendChild(d);setTimeout(()=>d.remove(),3500)}
