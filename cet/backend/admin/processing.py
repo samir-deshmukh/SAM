@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv, importlib.util, json, shutil, subprocess, sys, os, time
 from functools import lru_cache
 from pathlib import Path
-from .db import event, update_status
+from .db import connect, event, update_status
 from .state import JobStatus, can_transition
 
 BASE = Path(__file__).resolve().parents[2]
@@ -796,6 +796,27 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     return None,None
 
 
+
+def _write_commit_progress(job_id: int, status: str, stage: str,
+                           processed: int, total: int, message: str) -> None:
+    """Persist progress outside the production-row transaction so polling can see it live."""
+    total = max(0, int(total))
+    processed = max(0, min(int(processed), total)) if total else 0
+    progress = 100 if status == "COMPLETED" else (min(99, int(processed * 100 / total)) if total else 0)
+    with connect() as progress_conn:
+        progress_conn.execute(
+            """INSERT INTO import_commit_progress
+               (job_id,status,stage,processed,total,progress,message,updated_at)
+               VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT(job_id) DO UPDATE SET
+                 status=EXCLUDED.status, stage=EXCLUDED.stage,
+                 processed=EXCLUDED.processed, total=EXCLUDED.total,
+                 progress=EXCLUDED.progress, message=EXCLUDED.message,
+                 updated_at=CURRENT_TIMESTAMP""",
+            (job_id, status, stage, processed, total, progress, message),
+        )
+        progress_conn.commit()
+
 def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
     """Atomically promote a clean staged import into production and create a release."""
     job=conn.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone()
@@ -804,6 +825,12 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         raise ValueError(f"Import is not awaiting approval: {job['status']}")
     dtype=job["data_type"]
     _require_clean_stage(conn,job_id,dtype)
+    total_rows = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM import_staging_records WHERE job_id=?",
+        (job_id,),
+    ).fetchone()["n"])
+    _write_commit_progress(job_id, "RUNNING", "Preparing transaction", 0, total_rows,
+                           "Validation passed; preparing the atomic database commit")
     conn.execute("BEGIN IMMEDIATE")
     try:
         update_status(conn,job_id,JobStatus.APPROVED.value,"Approved by admin; beginning transactional production commit")
@@ -811,7 +838,12 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         update_status(conn,job_id,JobStatus.COMMITTING.value,"Promoting staged rows into production")
         inserted=[]
         source_pdf=job["original_filename"]
-        for r in _load_staged_rows(conn,job_id,dtype):
+        staged_rows = _load_staged_rows(conn,job_id,dtype)
+        progress_interval = max(25, total_rows // 100) if total_rows else 1
+        processed_rows = 0
+        _write_commit_progress(job_id, "RUNNING", "Writing production records", 0, total_rows,
+                               f"Writing 0 of {total_rows:,} staged records")
+        for r in staged_rows:
             raw=json.loads(r["normalized_json"])
             if dtype=="CUTOFFS":
                 rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf)
@@ -821,6 +853,14 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
                 table="seats"
             if rid is not None:
                 inserted.append((table,rid,after))
+            processed_rows += 1
+            if processed_rows % progress_interval == 0 or processed_rows == total_rows:
+                _write_commit_progress(
+                    job_id, "RUNNING", "Writing production records", processed_rows, total_rows,
+                    f"Processed {processed_rows:,} of {total_rows:,} staged records",
+                )
+        _write_commit_progress(job_id, "RUNNING", "Creating release", total_rows, total_rows,
+                               f"All {total_rows:,} staged records processed; creating release and audit entries")
         release_key=f"REL-{job['job_key']}"
         release_result = conn.execute("""INSERT INTO data_releases
             (release_key,source_job_id,source_sha256,status,approved_by,notes)
@@ -845,10 +885,17 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
              json.dumps({"release_id":release_id,"release_key":release_key,
                          "rows_inserted":len(inserted)},ensure_ascii=False),notes or "Approved import"))
         conn.commit()
+        _write_commit_progress(job_id, "COMPLETED", "Database commit complete", total_rows, total_rows,
+                               f"Database commit complete: {len(inserted):,} new rows saved. Release {release_key} is awaiting publish.")
         return {"ok":True,"job_id":job_id,"status":"COMMITTING","release_key":release_key,
                 "release_id":release_id,"rows_inserted":len(inserted)}
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        try:
+            _write_commit_progress(job_id, "FAILED", "Commit failed", 0, total_rows,
+                                   "Transaction rolled back: " + str(exc)[:500])
+        except Exception:
+            pass
         # Preserve a durable failure state in a separate transaction.
         conn.execute("UPDATE import_jobs SET status=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                      (JobStatus.FAILED.value,"Production commit failed; transaction rolled back",job_id))
