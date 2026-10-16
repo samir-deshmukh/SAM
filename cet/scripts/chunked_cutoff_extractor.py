@@ -156,6 +156,14 @@ def combine_outputs(outdir: Path, source: Path, parts: list[dict], total_pages: 
 
 
 def main() -> int:
+    # Yield CPU scheduling priority to the web/API process on small shared instances.
+    # The nested cutoff extractor inherits this lower priority. This does not change
+    # correctness or concurrency; it helps keep admin requests responsive during imports.
+    try:
+        os.nice(5)
+    except (AttributeError, OSError):
+        pass
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
