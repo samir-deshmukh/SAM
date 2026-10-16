@@ -4,6 +4,7 @@ from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
+from starlette.concurrency import run_in_threadpool
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session,hash_password
 from .admin.network import client_ip
@@ -1866,18 +1867,26 @@ def import_commit_progress(request: Request, job_id: int):
     return dict(row)
 
 
+def _approve_import_sync(job_id: int, actor_user_id: int, notes: str):
+    """Run the long atomic promotion in a worker thread, not on the ASGI event loop."""
+    with connect() as c:
+        result = approve_import(c, job_id, actor_user_id, notes)
+    invalidate_public_caches()
+    return result
+
+
 @app.post('/admin/api/imports/{job_id}/approve')
 async def approve(request: Request, job_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
     try: body=await request.json()
     except Exception: body={}
     notes=str(body.get('notes','')).strip()[:4000]
-    with connect() as c:
-        try:
-            result = approve_import(c,job_id,u['uid'],notes)
-            invalidate_public_caches()
-            return result
-        except ValueError as e: raise HTTPException(409,str(e))
+    try:
+        # Keep heartbeats, status polling, and admin requests responsive while
+        # thousands of staged rows are promoted in one database transaction.
+        return await run_in_threadpool(_approve_import_sync, job_id, u['uid'], notes)
+    except ValueError as e:
+        raise HTTPException(409,str(e))
 
 @app.post('/admin/api/imports/{job_id}/reject')
 async def reject(request: Request, job_id: int):
