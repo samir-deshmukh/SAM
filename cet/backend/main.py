@@ -1853,7 +1853,7 @@ def review_detail(request: Request, job_id: int):
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
 @app.post('/admin/api/imports/{job_id}/approve')
-async def approve(request: Request, job_id: int, background_tasks: BackgroundTasks):
+async def approve(request: Request, job_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
     try: body=await request.json()
     except Exception: body={}
@@ -1862,7 +1862,6 @@ async def approve(request: Request, job_id: int, background_tasks: BackgroundTas
         try:
             result = approve_import(c,job_id,u['uid'],notes)
             invalidate_public_caches()
-            background_tasks.add_task(_resolve_one_import_background, job_id)
             return result
         except ValueError as e: raise HTTPException(409,str(e))
 
