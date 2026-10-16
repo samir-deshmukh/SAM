@@ -129,7 +129,16 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
     }catch(_){showBlocked('connection');return false;}
   }
   window.__cetAdminTabRetry=acquire;
-  window.__cetAdminLockPromise=resolveClonedTabIdentity().then(acquire);
+  const NAVIGATION_KEY='cet-cap-admin-same-tab-navigation-v1';
+  let sameTabNavigation=false;
+  try{
+    sameTabNavigation=sessionStorage.getItem(NAVIGATION_KEY)==='1';
+    sessionStorage.removeItem(NAVIGATION_KEY);
+  }catch(_){}
+  // A marker written by this document's pagehide means this is the next page
+  // in the same tab. Preserve its tab ID rather than treating the previous
+  // document, briefly alive during navigation, as a duplicated tab.
+  window.__cetAdminLockPromise=(sameTabNavigation?Promise.resolve():resolveClonedTabIdentity()).then(acquire);
   // Backpressure is essential: a slow database heartbeat must not spawn a
   // new request every five seconds and worsen pool exhaustion.
   let heartbeatBusy=false;
@@ -153,6 +162,7 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   // document's instance ID for a duplicated tab. Do not DELETE the server lock
   // here: a keepalive release can race with the next page's acquire request.
   window.addEventListener('pagehide',function(){
+    try{sessionStorage.setItem('cet-cap-admin-same-tab-navigation-v1','1');}catch(_){}
     const x=readLock();
     const ownsLock=x&&x.id===tabId&&(!x.instanceId||x.instanceId===instanceId);
     if(ownsLock){try{localStorage.removeItem(LOCK_KEY);}catch(_){}}
