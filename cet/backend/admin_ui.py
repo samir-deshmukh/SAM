@@ -148,11 +148,15 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   // Do not block on storage events: a stale write from a previous page can
   // race with successful server acquisition. The next API/heartbeat response
   // will enforce the single-tab lock using the authoritative database row.
-  // Do not release the server lock during pagehide: same-tab navigation can race
-  // the old page's keepalive DELETE against the next page's lock acquisition.
-  // Keep the client ID stable across navigation; the 45-second server TTL is
-  // the fallback when a tab is closed or the browser crashes. Explicit logout
-  // still releases the lock immediately.
+  // Clear only the browser-side ownership marker on page exit. A new document
+  // in the same tab must reuse sessionStorage's tab ID, not mistake the old
+  // document's instance ID for a duplicated tab. Do not DELETE the server lock
+  // here: a keepalive release can race with the next page's acquire request.
+  window.addEventListener('pagehide',function(){
+    const x=readLock();
+    const ownsLock=x&&x.id===tabId&&(!x.instanceId||x.instanceId===instanceId);
+    if(ownsLock){try{localStorage.removeItem(LOCK_KEY);}catch(_){}}
+  });
 
 })();
 window.__cetAdminPollBusy=false;
