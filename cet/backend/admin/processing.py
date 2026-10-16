@@ -404,6 +404,16 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env.setdefault("OMP_THREAD_LIMIT", "1")
                 env.setdefault("OPENBLAS_NUM_THREADS", "1")
                 env.setdefault("MKL_NUM_THREADS", "1")
+                # The extractor closes each PDF page after processing and streams seat rows
+                # to disk, so long files need a length-aware watchdog rather than a
+                # fixed 30-minute cutoff. Keep a hard ceiling for genuinely stuck jobs.
+                try:
+                    import fitz
+                    with fitz.open(pdf_path) as source_doc:
+                        expected_pages = len(source_doc)
+                except Exception:
+                    expected_pages = 0
+                timeout_seconds = max(1800, min(4 * 60 * 60, expected_pages * 15))
                 log_path = work / "seat_extractor.log"
                 with log_path.open("w", encoding="utf-8") as log:
                     p = subprocess.Popen(
@@ -421,10 +431,16 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                                 p.kill()
                                 p.wait(timeout=3)
                             _raise_if_cancelled(conn, job_id)
-                        if time.monotonic() - started > 1800:
+                        # Large CAP seat-matrix PDFs can legitimately take longer than
+                        # 30 minutes, especially when OCR is needed. Scale the watchdog
+                        # from the document length instead of killing a healthy long job.
+                        if time.monotonic() - started > timeout_seconds:
                             p.kill()
                             p.wait(timeout=5)
-                            raise RuntimeError("Seat-matrix extractor timed out after 30 minutes")
+                            raise RuntimeError(
+                                f"Seat-matrix extractor timed out after {int(timeout_seconds // 60)} minutes "
+                                f"for a {expected_pages}-page PDF"
+                            )
                         time.sleep(0.25)
                 extractor_output = log_path.read_text(encoding="utf-8", errors="replace")
                 _raise_if_cancelled(conn, job_id)
