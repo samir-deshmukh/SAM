@@ -148,13 +148,12 @@ window.__cetAdminLockMessage='Admin connection is unavailable. Retry the connect
   // Do not block on storage events: a stale write from a previous page can
   // race with successful server acquisition. The next API/heartbeat response
   // will enforce the single-tab lock using the authoritative database row.
-  // Release promptly when the page is leaving; server TTL remains the crash/offline fallback.
-  window.addEventListener('pagehide',function(){
-    const x=readLock();
-    const ownsLock=x&&x.id===tabId&&(!x.instanceId||x.instanceId===instanceId);
-    if(ownsLock){try{localStorage.removeItem(LOCK_KEY);}catch(_){}}
-    if(ownsLock){try{fetch('/admin/api/admin-lock/release',{method:'POST',headers:{'X-CSRF-Token':csrf(),'X-Admin-Client-ID':tabId},cache:'no-store',keepalive:true});}catch(_){}}
-  });
+  // Do not release the server lock during pagehide: same-tab navigation can race
+  // the old page's keepalive DELETE against the next page's lock acquisition.
+  // Keep the client ID stable across navigation; the 45-second server TTL is
+  // the fallback when a tab is closed or the browser crashes. Explicit logout
+  // still releases the lock immediately.
+
 })();
 window.__cetAdminPollBusy=false;
 window.__cetAdminRunPoll=async function(fn){if(window.__cetAdminPollBusy)return;window.__cetAdminPollBusy=true;try{await fn()}finally{window.__cetAdminPollBusy=false}};
