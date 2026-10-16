@@ -238,8 +238,15 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
         identity_existing.setdefault(identity, set()).add((r[6], r[7], r[8]))
     changed_examples = []
     duplicate_in_stage = 0
+    uncomparable_rows = 0
     for _, row in df.iterrows():
-        base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+        # A malformed category has already been quarantined by _stage_csv.
+        # Do not let one bad extracted row abort comparison of a large PDF.
+        try:
+            base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+        except (ValueError, KeyError):
+            uncomparable_rows += 1
+            continue
         rs = row["rank_suffix"].strip() or None
         rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
         pct = float(row["percentage"]) if row["percentage"].strip() else None
@@ -257,9 +264,9 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
                 changed_examples.append({"identity": identity, "new": key[6:]})
         else:
             new_rows += 1
-    return {"rows_compared": len(df), "already_present_exact_key": duplicates,
-            "new_candidates": new_rows, "changed_candidates": changed,
-            "duplicate_in_staged_input": duplicate_in_stage,
+    return {"rows_compared": len(df), "rows_uncomparable_quarantined": uncomparable_rows,
+            "already_present_exact_key": duplicates, "new_candidates": new_rows,
+            "changed_candidates": changed, "duplicate_in_staged_input": duplicate_in_stage,
             "changed_examples": changed_examples}
 
 def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
