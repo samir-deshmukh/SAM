@@ -1570,16 +1570,17 @@ def runtime_metrics(request: Request):
                 manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 pass
-        total_pages = int(active.get('total_pages') or progress.get('total') or manifest.get('total_pages') or 0)
-        current_page = int(active.get('current_page') or progress.get('page') or 0)
-        chunk_size = max(1, int(manifest.get('chunk_pages') or 100))
+        total_pages = int(progress.get('total') or active.get('total_pages') or manifest.get('total_pages') or 0)
+        current_page = int(progress.get('page') or active.get('current_page') or 0)
+        chunk_size = max(1, int(progress.get('chunk_pages') or manifest.get('chunk_pages') or 10))
+        completed_chunks = len([x for x in manifest.get('parts', []) if x.get('status') == 'COMPLETED'])
         pause_requested = (control / 'PAUSE').exists()
         job_progress = {
             'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
             'page': current_page, 'total_pages': total_pages,
             'percent': round(min(100, current_page / total_pages * 100), 1) if total_pages else 0,
-            'chunk_count': int(active.get('current_chunk') or len([x for x in manifest.get('parts', []) if x.get('status') == 'COMPLETED'])),
-            'total_chunks': int(active.get('total_chunks') or (((total_pages + chunk_size - 1) // chunk_size) if total_pages else 0)),
+            'chunk_count': int(progress.get('chunk_count') or active.get('current_chunk') or completed_chunks),
+            'total_chunks': int(progress.get('total_chunks') or active.get('total_chunks') or (((total_pages + chunk_size - 1) // chunk_size) if total_pages else 0)),
             'pause_requested': pause_requested,
             'paused_at_checkpoint': active['status'] == 'PAUSED' or progress.get('state') == 'PAUSED',
         }
