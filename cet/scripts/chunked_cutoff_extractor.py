@@ -257,12 +257,27 @@ def main() -> int:
         if not args.hybrid:
             command.append("--native-only")
         log_path = chunk_out / "extractor.log"
-        with log_path.open("w", encoding="utf-8") as log:
-            result = subprocess.run(command, cwd=str(BASE), env=env,
-                                    stdout=log, stderr=subprocess.STDOUT, check=False)
-        if result.returncode != 0:
+        result = None
+        # A child extractor can fail transiently under tight shared-instance memory
+        # pressure. Retry this range in isolation before failing the whole PDF. Keep
+        # completed chunks and the manifest so a later job retry resumes at this range.
+        for attempt in range(1, 4):
+            if attempt > 1:
+                for artifact in (expected_csv, expected_json, expected_audit):
+                    artifact.unlink(missing_ok=True)
+                print(f"Chunk {number}/{count} retry {attempt}/3 for pages {start+1}-{end}", file=sys.stderr)
+            with log_path.open("w", encoding="utf-8") as log:
+                result = subprocess.run(command, cwd=str(BASE), env=env,
+                                        stdout=log, stderr=subprocess.STDOUT, check=False)
+            if result.returncode == 0:
+                break
+            if attempt < 3:
+                import time
+                time.sleep(attempt * 2)
+        if result is None or result.returncode != 0:
             manifest["status"] = "FAILED"
             manifest["failed_part"] = number
+            manifest["failed_page_range"] = [start + 1, end]
             manifest["parts"] = parts + [{
                 "index": number, "start_page": start + 1, "end_page": end,
                 "page_count": end - start, "status": "FAILED",
@@ -270,8 +285,8 @@ def main() -> int:
             atomic_json(manifest_path, manifest)
             tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
             print("\n".join(tail), file=sys.stderr)
-            print(f"Chunk {number} failed; completed chunks are retained for resume.", file=sys.stderr)
-            return result.returncode or 1
+            print(f"Chunk {number} pages {start+1}-{end} failed after 3 attempts; completed chunks are retained for resume.", file=sys.stderr)
+            return (result.returncode if result else 1) or 1
 
         _, _, _, rows = remap_chunk_artifacts(
             chunk_out, stem, source_name, start
