@@ -131,6 +131,10 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
         "institution_code", "institution_name", "program_code",
         "program_name", "status", "section",
     )
+    seat_valid_categories = seat_lane_map = seat_alias_map = None
+    if result_type == "SEATS":
+        from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
+        seat_valid_categories, seat_lane_map, seat_alias_map = load_whitelists(BASE / "data" / "reference")
     last_values = {field: "" for field in fill_columns}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
@@ -157,6 +161,18 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                     _resolve_cutoff_dimensions(normalized)
                 except (ValueError, KeyError) as exc:
                     row_errors.append(str(exc))
+            elif result_type == "SEATS" and not missing:
+                lane_raw = str(normalized.get("allocation_type", "")).strip()
+                category_raw = str(normalized.get("category", "")).strip()
+                if lane_raw not in seat_lane_map:
+                    row_errors.append(f"Unknown allocation type: {lane_raw!r}")
+                if category_raw != TOTAL_MARKER:
+                    category = normalize_category(category_raw, seat_alias_map)
+                    if category not in seat_valid_categories:
+                        row_errors.append(
+                            f"Unknown category {category_raw!r} at page {_page_from(normalized)}; "
+                            "check the source PDF before approval"
+                        )
             if row_errors:
                 quarantined += 1
                 row_status = "REVIEW"
