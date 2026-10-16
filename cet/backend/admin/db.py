@@ -188,6 +188,18 @@ def init_admin_schema():
         c.executescript(SCHEMA.read_text(encoding="utf-8"))
         # Forward-compatible migrations for databases created before institute
         # enrichment was expanded to city/address provenance.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS import_commit_progress (
+                job_id BIGINT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'IDLE',
+                stage TEXT NOT NULL DEFAULT 'Waiting',
+                processed BIGINT NOT NULL DEFAULT 0,
+                total BIGINT NOT NULL DEFAULT 0,
+                progress INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         for statement in (
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district TEXT",
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS address TEXT",
