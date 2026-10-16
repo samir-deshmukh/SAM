@@ -160,8 +160,8 @@ def main() -> int:
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-name", default=None, help="Original uploaded filename for provenance fields")
-    parser.add_argument("--chunk-pages", type=int, default=100,
-                        help="Maximum pages per temporary PDF part (default: 100)")
+    parser.add_argument("--chunk-pages", type=int, default=10,
+                        help="Maximum pages per temporary PDF part (default: 10)")
     parser.add_argument("--keep-parts", action="store_true",
                         help="Keep temporary split PDFs for inspection")
     parser.add_argument("--hybrid", action="store_true",
