@@ -2231,9 +2231,7 @@ async def resolver_find(request: Request):
 
 @app.post('/admin/api/resolver/verify')
 async def resolver_manual_verify(request: Request):
-    # The resolver page is available to REVIEWER users too; allow them to
-    # record a manual website verification instead of rendering a dead action.
-    u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'}, csrf=True)
+    u=require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
     try:
         body=await request.json()
     except Exception:
