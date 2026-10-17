@@ -109,7 +109,7 @@ def store_source_pdf(local_path: Path, object_key: str, sha256: str) -> str:
     # No ACL/public-read option is ever set: the bucket/object must remain private.
     client.upload_file(
         str(local_path), bucket, key,
-        ExtraArgs={"ContentType": "application/pdf", "Metadata": {"sha256": sha256}},
+        ExtraArgs={"ContentType": ("text/csv; charset=utf-8" if Path(object_key).suffix.lower() == ".csv" else "application/pdf"), "Metadata": {"sha256": sha256}},
     )
     return f"s3://{bucket}/{quote(key, safe='/')}"
 

@@ -30,7 +30,7 @@ REQUIRED_COLUMNS = [
 ]
 
 FILENAME_PATTERN = re.compile(
-    r'^(?P<family>BCA|BBA|MBA|MCA)_(?P<year>\d{2})_C(?P<round>\d)',
+    r'^(?P<family>BCA|BBA|MBA|MCA|BTECH|BE)_(?P<year>\d{2})_C(?P<round>\d)',
     re.IGNORECASE,
 )
 

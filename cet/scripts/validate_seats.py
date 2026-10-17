@@ -22,7 +22,7 @@ REQUIRED_COLUMNS = [
 ]
 
 FILENAME_PATTERN = re.compile(
-    r'^(?P<family>BCA|BBA|MBA|MCA)_SM', re.IGNORECASE,
+    r'^(?P<family>BCA|BBA|MBA|MCA|BTECH|BE)_SM', re.IGNORECASE,
 )
 
 # Rows individually verified against source context to be PDF

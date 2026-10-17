@@ -1291,6 +1291,115 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
         raise
 
 
+
+MAX_CSV_BYTES = 100 * 1024 * 1024
+CSV_CUTOFF_REQUIRED = {'source_pdf','page','institution_code','institution_name','program_code','program_name','status','home_university','section','stage','category','rank','rank_number','rank_suffix','percentage','percentage_raw','raw_value','source','merged_from'}
+CSV_SEAT_REQUIRED = {'source_pdf','page','institution_code','choice_code','allocation_type','category','gender','seats'}
+
+def _csv_header(path: Path):
+    with path.open('r', encoding='utf-8-sig', newline='') as handle:
+        try: return {str(value).strip() for value in next(csv.reader(handle))}
+        except StopIteration: return set()
+
+def _process_csv_import_background(job_id: int):
+    """Stage a locally pre-extracted canonical CSV through existing validation."""
+    with _IMPORT_PROCESS_LOCK:
+        with connect() as connection:
+            job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+            if not job or job['status'] not in {'QUEUED','FAILED','CANCELLED','REVIEW_REQUIRED'}: return
+            try:
+                with materialize_source(job['stored_path']) as source_path:
+                    expected_hash = str(job.get('sha256') or '').strip().lower()
+                    if expected_hash and sha256_file(source_path).lower() != expected_hash:
+                        raise RuntimeError('CSV fingerprint does not match the upload record')
+                    # Keep the input artifact inside the job work directory so the
+                    # audit result can reference it even when the private source is in S3.
+                    raw_dir = BASE / 'data' / 'import_work' / f'job_{job_id}' / 'raw'
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    staged_csv = raw_dir / 'uploaded_source.csv'
+                    import shutil
+                    shutil.copy2(source_path, staged_csv)
+                    result = process_import(connection, job_id, staged_csv,
+                        data_type=job['data_type'], family=job['course_family'], year=int(job['year']),
+                        round_name=job.get('round') or 'C1', claimed=True, pre_extracted_path=staged_csv,
+                        extraction_summary={'source':'pre-extracted CSV'}, source_filename=job['original_filename'])
+                    if not result.get('ok'):
+                        log.error('CSV import staging failed: job_id=%s error=%s', job_id, result.get('error'))
+            except Exception as exc:
+                log.exception('CSV import failed: job_id=%s', job_id)
+                connection.rollback()
+                connection.execute("UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(exc)[:4000],job_id))
+                event(connection,job_id,'ERROR','CSV import failed: '+str(exc)[:1000],None)
+                connection.commit()
+
+@app.post('/admin/api/imports/csv')
+def upload_csv(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...),
+               data_type: str = Form(...), course_family: str = Form(...), year: int = Form(...),
+               round_name: str = Form('')):
+    current_user = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    name = Path(file.filename or '').name
+    if not name.lower().endswith('.csv'): raise HTTPException(400,'Only .csv files are accepted in CSV Import')
+    data_type = str(data_type or '').strip().upper(); family = str(course_family or '').strip().upper()
+    if data_type not in {'CUTOFFS','SEATS'}: raise HTTPException(400,'Choose Cutoff data or Seat matrix data')
+    if family not in {'BCA','BBA','MBA','MCA','BE','BTECH'}: raise HTTPException(400,'Unsupported course family')
+    if year < 2000 or year > 2100: raise HTTPException(400,'Academic year must be a four-digit year')
+    round_name = str(round_name or '').strip().upper()
+    if data_type == 'CUTOFFS' and round_name not in {'C1','C2','C3','C4'}: raise HTTPException(400,'Select CAP cutoff round C1, C2, C3 or C4')
+    if data_type == 'SEATS': round_name = ''
+    job_key = 'IMPORT-' + uuid.uuid4().hex[:12].upper(); tmp = IMPORTS / (job_key + '.upload')
+    stored_value = None; total = 0; digest = hashlib.sha256()
+    try:
+        with open(tmp,'wb') as output:
+            while True:
+                chunk=file.file.read(1024*1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_CSV_BYTES: raise HTTPException(413,'CSV exceeds 100 MiB limit')
+                digest.update(chunk); output.write(chunk)
+        if total < 8: raise HTTPException(400,'CSV is empty or too small')
+        try:
+            header = _csv_header(tmp)
+            with tmp.open('r', encoding='utf-8-sig', newline='') as csv_handle:
+                reader = csv.reader(csv_handle); next(reader, None)
+                has_data = next(reader, None) is not None
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise HTTPException(400,'CSV must be a valid UTF-8 CSV file') from exc
+        if not has_data: raise HTTPException(400,'CSV contains a header but no data rows')
+        required = CSV_CUTOFF_REQUIRED if data_type == 'CUTOFFS' else CSV_SEAT_REQUIRED
+        missing = sorted(required - header)
+        if missing: raise HTTPException(400,'CSV is not in CETFind canonical format. Missing columns: '+', '.join(missing))
+        fingerprint=digest.hexdigest()
+        try: stored_value=store_source_pdf(tmp,f'imports/{job_key}.csv',fingerprint)
+        except StorageNotConfigured as exc: raise HTTPException(503,str(exc)) from exc
+        if tmp.exists(): tmp.unlink()
+        with connect() as connection:
+            connection.execute("INSERT INTO import_jobs(job_key,original_filename,stored_path,sha256,size_bytes,status,created_by,data_type,course_family,year,round,confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_key,name,stored_value,fingerprint,total,'QUEUED',current_user['uid'],data_type,family,year,round_name or None,1.0))
+            row=connection.execute('SELECT id FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+            if not row: raise RuntimeError('CSV import job could not be created')
+            job_id=int(row['id'])
+            event(connection,job_id,'CSV_RECEIVED',f'Pre-extracted {data_type.lower()} CSV uploaded; PDF extraction skipped',10)
+            event(connection,job_id,'QUEUED','CSV queued for canonical validation and staging',20)
+            connection.commit()
+        background_tasks.add_task(_process_csv_import_background,job_id)
+        return JSONResponse(status_code=202,content={'ok':True,'id':job_id,'job_key':job_key,'status':'QUEUED','message':'CSV accepted; PDF extraction skipped.'})
+    except HTTPException:
+        if tmp.exists(): tmp.unlink()
+        if stored_value:
+            try:
+                with connect() as connection: exists=connection.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+                if not exists: delete_source(stored_value)
+            except Exception: log.exception('Could not clean rejected CSV source %s',job_key)
+        raise
+    except Exception:
+        if tmp.exists(): tmp.unlink()
+        if stored_value:
+            try:
+                with connect() as connection: exists=connection.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+                if not exists: delete_source(stored_value)
+            except Exception: log.exception('Could not clean orphaned CSV source %s',job_key)
+        raise
+
 def _resolver_server_busy():
     """Keep AI resolver work out of the critical path on the small web instance."""
     with connect() as c:
@@ -1424,9 +1533,17 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         if not job:
             raise HTTPException(404, 'Import not found')
         if job.get('source_deleted'):
-            raise HTTPException(409, 'The source PDF was manually deleted. Re-upload it to retry extraction.')
+            raise HTTPException(409, 'The source file was manually deleted. Re-upload it to retry processing.')
         if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
             raise HTTPException(409, f'Import is not ready for processing: {job["status"]}')
+        if str(job.get('original_filename') or '').lower().endswith('.csv'):
+            if job.get('source_deleted'): raise HTTPException(409, 'The source CSV was manually deleted. Re-upload it to retry import.')
+            connection.execute('DELETE FROM import_staging_records WHERE job_id=?',(job_id,))
+            connection.execute('DELETE FROM import_results WHERE job_id=?',(job_id,))
+            connection.execute("UPDATE import_jobs SET status='QUEUED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(job_id,))
+            event(connection,job_id,'RETRY','CSV revalidation and staging queued',10); connection.commit()
+            background_tasks.add_task(_process_csv_import_background,job_id)
+            return {'ok':True,'id':job_id,'status':'QUEUED','source_type':'CSV'}
         if job['status'] == JobStatus.CANCELLED.value:
             if job.get('worker_alive') or _ACTIVE_IMPORT_JOB_ID == job_id:
                 raise HTTPException(409, 'Cancellation is still stopping the worker; wait a moment before retrying')
