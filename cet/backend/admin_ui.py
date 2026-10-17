@@ -190,6 +190,78 @@ html,body,.main,.content,.side,.top,.card,.panel,.modal,.modalhead,.modalbody,.m
 .modalback{background:rgba(0,0,0,.28)!important}
 pre.json{background:#F7F7F7!important;color:#222222!important;border:1px solid #E7E7E7}
 
+
+/* Clean enterprise light UI: white working surfaces on a soft neutral canvas. */
+:root{
+  --bg:#F5F7FA;--panel:#FFFFFF;--ink:#17191C;--muted:#68717D;
+  --line:#E4E8ED;--red:#17191C;--blue:#17191C;--green:#17191C;
+  --amber:#ECEFF2;--purple:#17191C;--shadow:0 2px 5px rgba(20,28,38,.025),0 8px 22px rgba(20,28,38,.045)
+}
+html,body{background:#F5F7FA!important;color:#17191C!important}
+.main,.content{background:#F5F7FA!important;color:#17191C!important}
+.side,.top{background:#FFFFFF!important;color:#17191C!important}
+.side{border-right:1px solid #E5E9EE!important}
+.top{border-bottom:1px solid #E5E9EE!important;box-shadow:0 2px 7px rgba(20,28,38,.025)!important}
+.brand b,.brand .mark,.brand span,.sidefoot,.online{color:#17191C!important}
+.brand span,.sidefoot{color:#78818C!important}
+.nav{gap:4px!important}
+.nav a{background:transparent!important;color:#515B67!important;border:1px solid transparent!important;border-radius:7px!important;padding:10px 12px!important;font-weight:500!important}
+.nav a:hover{background:#F5F7F9!important;color:#17191C!important;border-color:#EEF0F3!important;transform:none!important}
+.nav a.active{position:relative;background:#F1F3F5!important;color:#17191C!important;border-color:#E8EBEF!important;font-weight:650!important}
+.nav a.active:before{content:"";position:absolute;left:-1px;top:7px;bottom:7px;width:3px;background:#17191C;border-radius:0 3px 3px 0}
+.search{background:#F7F8FA!important;border:1px solid #E4E8ED!important;color:#68717D!important;border-radius:8px!important}
+.avatar{background:#17191C!important;color:#FFFFFF!important}
+.content{padding-top:30px!important}
+.title{margin-bottom:25px!important}
+.title h1{font-size:29px!important;letter-spacing:-.7px!important;font-weight:650!important;color:#17191C!important}
+.title p{font-size:13px!important;line-height:1.55!important;color:#68717D!important}
+.card,.panel,.modal,.admin-tab-lock-card{background:#FFFFFF!important;border:1px solid #E4E8ED!important;border-radius:11px!important;box-shadow:var(--shadow)!important}
+.card:hover{box-shadow:0 3px 7px rgba(20,28,38,.03),0 11px 25px rgba(20,28,38,.055)!important;transform:translateY(-1px)}
+.kpi{padding:19px!important}
+.khead{font-size:12px!important;font-weight:550!important;color:#5E6874!important}
+.num,.metric .value{font-size:27px!important;font-weight:650!important;letter-spacing:-.45px!important;color:#17191C!important}
+.trend{font-size:11px!important;color:#69737F!important}
+.ki,.si,.hi{background:#F2F4F6!important;color:#343B44!important;border:1px solid #E9EDF1!important;border-radius:9px!important}
+.stage.active .si{background:#17191C!important;color:#FFFFFF!important;box-shadow:0 3px 8px rgba(23,25,28,.12)!important}
+.stage b{font-size:10px!important;font-weight:600!important;color:#424B56!important}
+.stage small{color:#78818C!important}
+.tablewrap{border-radius:8px!important}
+.table{font-size:12px!important}
+.table th{background:#F7F8FA!important;color:#68717D!important;font-size:10px!important;font-weight:650!important;text-transform:uppercase;letter-spacing:.045em;border-bottom:1px solid #E4E8ED!important;padding:12px 11px!important}
+.table td{background:#FFFFFF!important;color:#303741!important;border-bottom:1px solid #EDF0F3!important;padding:12px 11px!important}
+.table tbody tr:hover td{background:#FAFBFC!important}
+.toolbar h2,.panel h2{font-size:14px!important;font-weight:650!important;color:#252A31!important}
+.muted,.small,.metric .label,.event p,.stage small{color:#68717D!important}
+.live{color:#4E5864!important;font-weight:550!important}
+.dot{background:#4C8A70!important;box-shadow:0 0 0 4px rgba(76,138,112,.10)!important}
+.primary,.btn.primary{background:#17191C!important;color:#FFFFFF!important;border:1px solid #17191C!important;box-shadow:0 2px 3px rgba(20,28,38,.08)!important}
+.primary:hover,.btn.primary:hover{background:#30343A!important}
+.secondary,.success,.dangerbtn,.btn.ghost,.ghost,.processbtn,.iconbtn,.trashbtn,.close{background:#FFFFFF!important;color:#303741!important;border:1px solid #DCE2E8!important;box-shadow:none!important}
+.secondary:hover,.success:hover,.dangerbtn:hover,.ghost:hover,.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close:hover{background:#F5F7F9!important;border-color:#CBD3DC!important}
+.btn{border-radius:7px!important;font-weight:600!important}
+.input,.select,textarea{background:#FFFFFF!important;color:#252A31!important;border:1px solid #DCE2E8!important;border-radius:7px!important}
+.input::placeholder,textarea::placeholder{color:#89929D!important}
+.input:focus,.select:focus,textarea:focus{border-color:#8A949F!important;box-shadow:0 0 0 3px rgba(85,98,112,.10)!important}
+.status{display:inline!important;padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:#4B5561!important;font-size:11px!important;font-weight:600!important}
+.status:before{display:none!important;content:none!important}
+.red,.green,.blue,.purple,.amber,.gray{background:transparent!important;color:#4B5561!important}
+.notice{background:#F8FAFB!important;border:1px solid #E5EAF0!important;color:#4D5864!important;border-radius:8px!important}
+.issue{background:#FBF8F3!important;border-left-color:#B6A17D!important;color:#655A49!important}
+.commit-track{background:#E9EDF1!important;border-radius:5px!important}
+.commit-bar{background:#303943!important}
+.skeleton{background:#ECEFF3!important}
+.bars{border-color:#E5E9EE!important}
+.bar{background:#D9DEE5!important}
+.bar.g{background:#65717E!important}
+.hr,.event:before{border-color:#E8ECF0!important;background:#E8ECF0!important}
+.eventdot{background:#D6DCE3!important;border-color:#FFFFFF!important;box-shadow:0 0 0 1px #D6DCE3!important}
+.event.active .eventdot{background:#65717E!important;box-shadow:0 0 0 4px rgba(101,113,126,.12)!important}
+.modalback{background:rgba(22,28,35,.34)!important}
+.modalhead,.modalfoot{border-color:#E5E9EE!important}
+pre.json{background:#F7F9FB!important;color:#303741!important;border:1px solid #E5E9EE!important}
+.toast,.toast.ok,.toast.err{background:#17191C!important;color:#FFFFFF!important;box-shadow:0 8px 22px rgba(20,28,38,.16)!important}
+@media(max-width:720px){.content{padding:20px 14px 32px!important}.title h1{font-size:25px!important}.card,.panel{border-radius:9px!important}}
+
 '''
 
 
