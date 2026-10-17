@@ -1,6 +1,5 @@
 import os,uuid,json,time,re,secrets,logging,sys,subprocess,threading,hashlib,csv
 from pathlib import Path
-from urllib.parse import urlsplit
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -2259,21 +2258,14 @@ async def resolver_manual_verify(request: Request):
         if not row:
             raise HTTPException(404,'College not found in current CAP data')
         code=str(row['institution_code']).strip()
-        website=posted_website or str(row['website'] or '').strip()
+        website=str(row['website'] or '').strip()
         if not website:
-            raise HTTPException(409,'Enter a website URL before saving')
-        try:
-            parsed=urlsplit(website)
-            valid_url=parsed.scheme.lower() in ('http','https') and bool(parsed.hostname) and not parsed.username and not parsed.password
-        except Exception:
-            valid_url=False
-        if not valid_url:
-            raise HTTPException(400,'Enter a valid http:// or https:// website URL')
+            raise HTTPException(409,'This college has no website URL to verify')
         old_status=str(row['status'] or '')
-        note='Website URL manually entered and verified by admin.' if posted_website else 'Manually verified by admin after checking the website.'
+        note='Manually verified by admin after checking the website.'
         c.execute("INSERT INTO college_website_resolver (institution_code,institution_name,city,website,status,source,source_url,verification_note,last_checked_at,updated_at) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT (institution_code) DO UPDATE SET institution_name=excluded.institution_name,city=COALESCE(excluded.city,college_website_resolver.city),website=excluded.website,status='VERIFIED',source='manual_admin',source_url=excluded.source_url,verification_note=excluded.verification_note,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP",(code,row['institution_name'],row['city'],website,'VERIFIED','manual_admin',website,note))
         c.execute("UPDATE institutes SET website=?,website_source='manual_admin',verified_at=CURRENT_TIMESTAMP WHERE institution_code=?",(website,code))
-        c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",(u['uid'],'MANUAL_VERIFY_WEBSITE','INSTITUTE',code,json.dumps({'status':old_status,'website':website}),json.dumps({'status':'VERIFIED','website':website}),'Admin manually entered/checked the official website and marked it verified'))
+        c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",(u['uid'],'MANUAL_VERIFY_WEBSITE','INSTITUTE',code,json.dumps({'status':old_status,'website':website}),json.dumps({'status':'VERIFIED','website':website}),'Admin manually checked the website and marked it verified'))
         c.commit()
     return {'ok':True,'institution_code':code,'status':'VERIFIED','website':website}
 
