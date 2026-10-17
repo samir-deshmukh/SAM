@@ -528,7 +528,7 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 .select{appearance:none;-webkit-appearance:none;background-color:#FFFFFF!important;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 4 4 4 4-4' fill='none' stroke='%23111111' stroke-width='1.5'/%3E%3C/svg%3E")!important;background-repeat:no-repeat!important;background-position:right 11px center!important;padding-right:31px!important;border-color:#DEDEDE!important;border-radius:8px!important;color:#111111!important}
 .select option{background:#FFFFFF;color:#111111;padding:8px}
 .filters .select{min-width:135px}
-.resolver-actions{display:grid;grid-template-columns:repeat(2,minmax(106px,1fr));align-items:stretch;gap:6px;width:100%;min-width:0}
+.resolver-actions{display:grid;grid-template-columns:repeat(3,minmax(106px,1fr));align-items:stretch;gap:6px;width:100%;min-width:0}
 .resolver-actions .btn{width:100%;min-width:0;min-height:31px;padding:6px 8px!important;white-space:nowrap;justify-content:center}
 .resolver-actions .small{display:flex;align-items:center;justify-content:center;min-height:31px}
 .table td{vertical-align:middle}
