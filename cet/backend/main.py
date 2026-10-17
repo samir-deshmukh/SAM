@@ -1965,7 +1965,7 @@ def releases_page_route(request: Request):
 @app.get('/admin/rollback', response_class=HTMLResponse)
 def rollback_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
-    return releases_page(active='rollback', title='Rollback History')
+    return RedirectResponse('/admin/releases', status_code=307)
 
 @app.get('/admin/api/releases')
 def releases_api(request: Request):
