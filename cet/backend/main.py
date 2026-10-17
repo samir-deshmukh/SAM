@@ -79,17 +79,21 @@ def _import_queue_loop():
                 _LAST_QUEUE_RECOVERY = time.monotonic()
             with connect() as connection:
                 row = connection.execute(
-                    "SELECT id FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    "SELECT id,original_filename FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
                 ).fetchone()
+                is_csv_job = False
                 if row:
                     candidate = int(row['id'])
+                    is_csv_job = str(row.get('original_filename') or '').lower().endswith('.csv')
                     claimed = connection.execute(
                         "UPDATE import_jobs SET status='EXTRACTING',worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED'",
                         (_WORKER_ID, candidate),
                     ).rowcount
                     if claimed:
                         job_id = candidate
-                        event(connection, job_id, 'WORKER_CLAIMED', 'Server worker claimed the queued PDF', 42)
+                        event(connection, job_id, 'WORKER_CLAIMED',
+                              'Server worker claimed the queued canonical CSV' if is_csv_job else 'Server worker claimed the queued PDF',
+                              25 if is_csv_job else 42)
                 connection.commit()
             if job_id is None:
                 time.sleep(2)
@@ -102,8 +106,13 @@ def _import_queue_loop():
                 daemon=True, name=f'import-heartbeat-{job_id}',
             )
             heartbeat_thread.start()
-            with _IMPORT_PROCESS_LOCK:
-                _process_import_background_locked(job_id)
+            if is_csv_job:
+                # Canonical CSVs share the durable queue, but must never enter the
+                # PDF parser. The CSV processor owns the same global import lock.
+                _process_csv_import_background(job_id)
+            else:
+                with _IMPORT_PROCESS_LOCK:
+                    _process_import_background_locked(job_id)
         except Exception:
             log.exception('Import queue worker iteration failed')
             time.sleep(3)
@@ -1357,7 +1366,7 @@ def _process_csv_import_background(job_id: int):
     with _IMPORT_PROCESS_LOCK:
         with connect() as connection:
             job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
-            if not job or job['status'] not in {'QUEUED','FAILED','CANCELLED','REVIEW_REQUIRED'}: return
+            if not job or job['status'] not in {'QUEUED','EXTRACTING','FAILED','CANCELLED','REVIEW_REQUIRED'}: return
             try:
                 with materialize_source(job['stored_path']) as source_path:
                     expected_hash = str(job.get('sha256') or '').strip().lower()
@@ -1460,8 +1469,10 @@ def upload_csv(request: Request, background_tasks: BackgroundTasks, file: Upload
             event(connection,job_id,'CSV_RECEIVED',f'Pre-extracted {data_type.lower()} CSV uploaded; PDF extraction skipped',10)
             event(connection,job_id,'QUEUED','CSV queued for canonical validation and staging',20)
             connection.commit()
-        background_tasks.add_task(_process_csv_import_background,job_id)
-        return JSONResponse(status_code=202,content={'ok':True,'id':job_id,'job_key':job_key,'status':'QUEUED','message':'CSV accepted; PDF extraction skipped.'})
+        # The durable server queue dispatches CSV jobs to validation/staging and
+        # PDF jobs to extraction. Avoid an in-request BackgroundTask racing the
+        # queue worker for the same QUEUED record.
+        return JSONResponse(status_code=202,content={'ok':True,'id':job_id,'job_key':job_key,'status':'QUEUED','message':'CSV accepted; queued for validation and staging (PDF extraction skipped).'})
     except HTTPException:
         if tmp.exists(): tmp.unlink()
         if stored_value:
@@ -1621,7 +1632,6 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             connection.execute('DELETE FROM import_results WHERE job_id=?',(job_id,))
             connection.execute("UPDATE import_jobs SET status='QUEUED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(job_id,))
             event(connection,job_id,'RETRY','CSV revalidation and staging queued',10); connection.commit()
-            background_tasks.add_task(_process_csv_import_background,job_id)
             return {'ok':True,'id':job_id,'status':'QUEUED','source_type':'CSV'}
         if job['status'] == JobStatus.CANCELLED.value:
             if job.get('worker_alive') or _ACTIVE_IMPORT_JOB_ID == job_id:
