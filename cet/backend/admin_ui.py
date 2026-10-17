@@ -357,6 +357,64 @@ html,body{color:#000000!important}
   box-shadow:0 2px 7px rgba(0,0,0,.025)!important;
 }
 
+
+/* Restore the original blue admin theme; retain current layout and processing UI */
+:root{
+  --bg:#f6f8fb!important;--panel:#ffffff!important;--ink:#14213d!important;
+  --muted:#6b7c93!important;--line:#e5eaf0!important;--red:#e11d2e!important;
+  --blue:#2563eb!important;--green:#10b981!important;--amber:#f59e0b!important;
+  --purple:#8b5cf6!important;--shadow:0 8px 28px rgba(20,33,61,.06)!important;
+}
+html,body,.main,.content{background:#f6f8fb!important;color:#14213d!important}
+.side{background:#ffffff!important;color:#14213d!important;border-right:1px solid #e5eaf0!important}
+.brand b,.brand span,.brand .mark,.sidefoot{color:#14213d!important}
+.brand span,.sidefoot,.muted,.title p,.metric .label,.stage small,.event p{color:#6b7c93!important}
+.online,.live,.healthy{color:#10a875!important}
+.nav a{color:#36506f!important;background:transparent!important;border-color:transparent!important}
+.nav a:hover{background:#fff4f5!important;color:#e11d2e!important;border-color:#ffe1e5!important}
+.nav a.active{background:#fff0f1!important;color:#e11d2e!important;border-color:#ffe1e5!important}
+.top{background:rgba(255,255,255,.96)!important;border-bottom:1px solid #e5eaf0!important;box-shadow:0 3px 16px rgba(20,33,61,.035)!important}
+.search{background:#f5f7fa!important;border:1px solid #eef1f5!important;color:#6b7c93!important}
+.avatar{background:#14213d!important;color:#ffffff!important}
+.card,.panel,.modal,.admin-tab-lock-card{background:#ffffff!important;border:1px solid #e5eaf0!important;box-shadow:0 8px 28px rgba(20,33,61,.06)!important}
+.card:hover{box-shadow:0 12px 32px rgba(20,33,61,.08)!important}
+.khead,.stage b,.table td,.metric .value,.title h1{color:#14213d!important}
+.dot{background:#10b981!important;box-shadow:0 0 0 4px rgba(16,185,129,.10)!important}
+.ki,.si,.hi{background:#eef4ff!important;color:#2563eb!important}
+.sky,.lav{background:#eaf2ff!important;color:#2563eb!important}
+.rose{background:#fff0f1!important;color:#e11d2e!important}
+.mint,.stage.done .si,.stage.publish .si{background:#e8fbf3!important;color:#0a9c70!important}
+.stage.warn .si{background:#fff7e6!important;color:#b7791f!important}
+.stage.review .si{background:#fff0f1!important;color:#e11d2e!important}
+.stage.active .si{background:#2563eb!important;color:#ffffff!important;box-shadow:0 0 0 5px rgba(37,99,235,.10)!important}
+.table th{background:#f5f7fa!important;color:#36506f!important;border-bottom:1px solid #e5eaf0!important}
+.table td{color:#14213d!important;border-color:#edf0f5!important}
+.table tbody tr:hover{background:#f6f9ff!important}
+.status{background:#eef4ff!important;color:#2563eb!important}
+.primary,.toast,.toast.ok{background:#2563eb!important;color:#ffffff!important;box-shadow:0 4px 12px rgba(37,99,235,.18)!important}
+.toast.err,.dangerbtn,.red,.danger{background:#fff0f1!important;color:#d92332!important}
+.secondary,.gray,.processbtn,.iconbtn,.trashbtn,.btn.ghost,.ghost{background:#ffffff!important;color:#36506f!important;border:1px solid #dbe3ef!important}
+.success,.green,.btn.success{background:#e8fbf3!important;color:#087f5b!important}
+.blue,.purple{background:#eef4ff!important;color:#2563eb!important}
+.amber{background:#fff7e6!important;color:#b7791f!important}
+.input,.select,textarea{background:#ffffff!important;color:#14213d!important;border:1px solid #dbe3ef!important}
+.input:focus,.select:focus,textarea:focus{border-color:#2563eb!important;box-shadow:0 0 0 3px rgba(37,99,235,.10)!important}
+.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close{background:#2563eb!important;color:#ffffff!important;border-color:#2563eb!important}
+.pdfspin,.activityspin{border-color:#dbe3ef!important;border-top-color:#2563eb!important;border-right-color:#2563eb!important}
+.commit-track{background:#e5eaf0!important}.commit-bar{background:#2563eb!important}
+.bars{border-color:#e5eaf0!important}.bar{background:#cbd8eb!important}.bar.g{background:#10b981!important}
+.notice{background:#f5f8ff!important;border-color:#dce7fa!important;color:#36506f!important}
+.issue{background:#fff7f7!important;border-left-color:#e11d2e!important;color:#7f1d1d!important}
+.skeleton{background:#edf1f7!important}
+.modalback{background:rgba(20,33,61,.48)!important}
+.modalhead,.modalfoot{border-color:#e5eaf0!important}
+.close{background:#f5f7fa!important;color:#36506f!important}
+.timeline .event:before{background:#dbe3ef!important}.eventdot{background:#cbd8eb!important;border-color:#ffffff!important;box-shadow:0 0 0 1px #dbe3ef!important}
+.event.active .eventdot{background:#2563eb!important;box-shadow:0 0 0 5px rgba(37,99,235,.10)!important}
+.admin-tab-lock{background:#f6f8fb!important}
+.admin-tab-lock-card button{background:#2563eb!important;color:#ffffff!important}
+pre.json{background:#14213d!important;color:#f6f8fb!important}
+
 '''
 
 
