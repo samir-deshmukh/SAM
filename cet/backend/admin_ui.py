@@ -315,6 +315,35 @@ html,body,.main,.content{background:#F5F5F5!important;color:#111111!important}
 pre.json{background:#F7F7F7!important;color:#222222!important;border:1px solid #E5E5E5!important}
 .toast,.toast.ok,.toast.err{background:#111111!important;color:#FFFFFF!important;box-shadow:0 8px 22px rgba(0,0,0,.16)!important}
 
+
+/* Strict black-and-white, white-led pass: no beige, grey fills, or tinted shadows. */
+:root{--bg:#FFFFFF;--panel:#FFFFFF;--ink:#000000;--muted:#000000;--line:#FFFFFF;--red:#000000;--blue:#000000;--green:#000000;--amber:#000000;--purple:#000000;--shadow:none}
+html,body,.main,.content,.side,.top,.card,.panel,.modal,.admin-tab-lock,.admin-tab-lock-card,
+.search,.ki,.si,.hi,.sky,.rose,.mint,.lav,.secondary,.dangerbtn,.success,.red,.green,.blue,.purple,.amber,.gray,
+.table th,.table tbody tr:hover,.processbtn,.iconbtn,.trashbtn,.close,.notice,.issue,.skeleton,.stage .si,
+.commit-track,.bars,.bar,.eventdot,.event:before,.admin-tab-lock-card button,.input,.select,textarea{
+  background:#FFFFFF!important;color:#000000!important;border-color:#FFFFFF!important;box-shadow:none!important
+}
+body,.main,.content,.side,.top,.card,.panel,.modal,.admin-tab-lock,.admin-tab-lock-card{background:#FFFFFF!important}
+*{box-shadow:none!important;text-shadow:none!important}
+html,body{color:#000000!important}
+.brand b,.brand span,.brand .mark,.sidefoot,.online,.nav a,.nav a:hover,.nav a.active,
+.title h1,.title p,.khead,.stage b,.stage small,.table th,.table td,.metric .label,.metric .value,
+.muted,.small,.event p,.live,.healthy,.danger,.warning,.status,.status-detail,.empty,.search{color:#000000!important}
+.nav a{background:#FFFFFF!important;border:0!important;border-radius:0!important}
+.nav a:hover,.nav a.active{background:#FFFFFF!important;color:#000000!important;border-bottom:1px solid #000000!important}
+.primary,.toast,.toast.ok,.toast.err,.commit-bar{background:#000000!important;color:#FFFFFF!important;border-color:#000000!important}
+.btn.ghost,.ghost,.input,.select,textarea,.processbtn,.iconbtn,.trashbtn{background:#FFFFFF!important;color:#000000!important;border:1px solid #000000!important}
+.btn.secondary,.btn.success,.btn.dangerbtn,.secondary,.success,.dangerbtn{background:#FFFFFF!important;color:#000000!important;border:1px solid #FFFFFF!important}
+.table th,.table td{border-color:#FFFFFF!important}
+.status{display:inline!important;padding:0!important;border:0!important;border-radius:0!important;font-weight:600!important}
+.status:before{display:none!important}
+.dot,.bar.g,.event.active .eventdot{background:#000000!important;box-shadow:none!important}
+.bar{background:#000000!important}
+.pdfspin,.activityspin{border-color:#000000!important;border-top-color:#FFFFFF!important;border-right-color:#FFFFFF!important}
+.skeleton:after{background:linear-gradient(90deg,transparent,rgba(0,0,0,.06),transparent)!important}
+.modalback{background:rgba(0,0,0,.35)!important}
+
 '''
 
 
