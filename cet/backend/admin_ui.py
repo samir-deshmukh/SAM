@@ -415,6 +415,61 @@ html,body,.main,.content{background:#f6f8fb!important;color:#14213d!important}
 .admin-tab-lock-card button{background:#2563eb!important;color:#ffffff!important}
 pre.json{background:#14213d!important;color:#f6f8fb!important}
 
+
+/* Final palette correction: cool violet + slate; remove blue/red/green accents and warm shadows */
+:root{
+  --bg:#f7f7fb!important;--panel:#ffffff!important;--ink:#29263d!important;
+  --muted:#77758a!important;--line:#e7e6ef!important;--red:#6d5bd0!important;
+  --blue:#6d5bd0!important;--green:#6d5bd0!important;--amber:#6d5bd0!important;
+  --purple:#6d5bd0!important;--shadow:0 4px 14px rgba(49,46,129,.075)!important;
+}
+html,body,.main,.content{background:#f7f7fb!important;color:#29263d!important}
+.side{background:#ffffff!important;color:#29263d!important;border-right:1px solid #e7e6ef!important}
+.brand b,.brand span,.brand .mark,.sidefoot,.khead,.stage b,.table td,.metric .value,.title h1{color:#29263d!important}
+.brand span,.sidefoot,.muted,.title p,.metric .label,.stage small,.event p{color:#77758a!important}
+.online,.live,.healthy{color:#6d5bd0!important}
+.nav a{color:#59566f!important;background:transparent!important;border-color:transparent!important}
+.nav a:hover,.nav a.active{background:#f0edff!important;color:#5b4ac4!important;border-color:#e2dcff!important}
+.top{background:rgba(255,255,255,.97)!important;border-bottom:1px solid #e7e6ef!important;box-shadow:0 2px 8px rgba(49,46,129,.035)!important}
+.search{background:#fafaff!important;border:1px solid #e7e6ef!important;color:#77758a!important}
+.avatar{background:#393451!important;color:#ffffff!important}
+.card,.panel,.modal,.admin-tab-lock-card{background:#ffffff!important;border:1px solid #e7e6ef!important;box-shadow:0 4px 14px rgba(49,46,129,.075)!important}
+.card:hover{box-shadow:0 6px 18px rgba(49,46,129,.10)!important}
+.dot{background:#6d5bd0!important;box-shadow:0 0 0 4px rgba(109,91,208,.10)!important}
+.ki,.si,.hi,.sky,.lav,.rose,.mint,.stage.done .si,.stage.publish .si,.stage.warn .si,.stage.review .si{
+  background:#f0edff!important;color:#5b4ac4!important;
+}
+.stage.active .si{background:#6d5bd0!important;color:#ffffff!important;box-shadow:0 0 0 5px rgba(109,91,208,.12)!important}
+.table th{background:#f8f7fc!important;color:#59566f!important;border-bottom:1px solid #e7e6ef!important}
+.table td{color:#29263d!important;border-color:#eeedf4!important}
+.table tbody tr:hover{background:#faf9ff!important}
+.status,.blue,.purple,.green,.success,.amber,.primary,.toast,.toast.ok,.btn.success{
+  background:#f0edff!important;color:#5b4ac4!important;border-color:#e2dcff!important;
+}
+.toast.err,.dangerbtn,.red,.danger{background:#f0edff!important;color:#5b4ac4!important;border-color:#e2dcff!important}
+.secondary,.gray,.processbtn,.iconbtn,.trashbtn,.btn.ghost,.ghost,.close{
+  background:#ffffff!important;color:#59566f!important;border:1px solid #e1dfec!important;
+}
+.input,.select,textarea{background:#ffffff!important;color:#29263d!important;border:1px solid #e1dfec!important}
+.input:focus,.select:focus,textarea:focus{border-color:#8b7ce8!important;box-shadow:0 0 0 3px rgba(109,91,208,.10)!important}
+.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close:hover,.primary:hover{
+  background:#6d5bd0!important;color:#ffffff!important;border-color:#6d5bd0!important;
+}
+.pdfspin,.activityspin{border-color:#e1dfec!important;border-top-color:#6d5bd0!important;border-right-color:#6d5bd0!important}
+.commit-track{background:#e7e6ef!important}.commit-bar{background:#6d5bd0!important}
+.bars{border-color:#e7e6ef!important}.bar,.bar.g{background:#b8afea!important}
+.notice{background:#f8f7ff!important;border-color:#e2dcff!important;color:#59566f!important}
+.issue{background:#f8f7ff!important;border-left-color:#8b7ce8!important;color:#59566f!important}
+.skeleton{background:#eeedf5!important}
+.modalback{background:rgba(41,38,61,.38)!important}
+.modalhead,.modalfoot{border-color:#e7e6ef!important}
+.timeline .event:before{background:#e1dfec!important}
+.eventdot{background:#b8afea!important;border-color:#ffffff!important;box-shadow:0 0 0 1px #e1dfec!important}
+.event.active .eventdot{background:#6d5bd0!important;box-shadow:0 0 0 5px rgba(109,91,208,.10)!important}
+.admin-tab-lock{background:#f7f7fb!important}
+.admin-tab-lock-card button{background:#6d5bd0!important;color:#ffffff!important}
+pre.json{background:#29263d!important;color:#f7f7fb!important}
+
 '''
 
 
