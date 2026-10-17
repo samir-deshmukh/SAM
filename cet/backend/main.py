@@ -17,7 +17,7 @@ from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
-                              resolve_import_job)
+                              resolve_import_job, valid_url)
 from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -2499,6 +2499,51 @@ async def resolver_find(request: Request):
                 })
         c.commit()
     return {'ok':True,'results':results}
+
+@app.post('/admin/api/resolver/edit')
+async def resolver_edit(request: Request):
+    u = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, 'Invalid JSON body')
+    code = str(body.get('institution_code') or '').strip()
+    if not code or len(code) > 100:
+        raise HTTPException(400, 'A valid college ID is required')
+    city = str(body.get('city') or '').strip()[:160] or None
+    address = str(body.get('address') or '').strip()[:500] or None
+    website_raw = str(body.get('website') or '').strip()
+    website = valid_url(website_raw) if website_raw else None
+    if website_raw and not website:
+        raise HTTPException(400, 'Website must be a valid public HTTP or HTTPS URL')
+    source = str(body.get('source') or '').strip()[:500] or 'Manual admin correction'
+    source_url_raw = str(body.get('source_url') or '').strip()
+    source_url = valid_url(source_url_raw) if source_url_raw else None
+    if source_url_raw and not source_url:
+        raise HTTPException(400, 'Source URL must be a valid public HTTP or HTTPS URL')
+    with connect() as c:
+        row = c.execute('SELECT institution_code,institution_name,city,website,address,source,source_url FROM college_website_resolver WHERE institution_code=?', (code,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'College not found in resolver')
+        before = dict(row)
+        c.execute("""UPDATE college_website_resolver SET city=?,website=?,address=?,source=?,source_url=?,
+          city_source='manual_admin',website_source='manual_admin',address_source='manual_admin',
+          status=CASE WHEN ? IS NOT NULL THEN 'NEEDS_REVIEW' ELSE 'PENDING' END,
+          verification_note='Manually edited by admin; website requires verification if changed.',
+          updated_at=CURRENT_TIMESTAMP WHERE institution_code=?""",
+          (city, website, address, source, source_url, website, code))
+        c.execute("""UPDATE institutes SET city=?,website=?,address=?,city_source='manual_admin',
+          website_source='manual_admin',address_source='manual_admin',verified_at=CURRENT_TIMESTAMP
+          WHERE institution_code=?""", (city, website, address, code))
+        after = {'institution_code': code, 'institution_name': row['institution_name'], 'city': city,
+                 'website': website, 'address': address, 'source': source, 'source_url': source_url}
+        c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",
+          (u['uid'], 'EDIT_COLLEGE_RESOLVER', 'INSTITUTE', code, json.dumps(before, default=str),
+           json.dumps(after, default=str), 'Manual college metadata correction in Website Resolver'))
+        c.commit()
+    invalidate_public_caches()
+    return {'ok': True, 'college': after}
+
 
 @app.post('/admin/api/resolver/verify')
 async def resolver_manual_verify(request: Request):
