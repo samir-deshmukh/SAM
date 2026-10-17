@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS cutoffs (
     round            INTEGER NOT NULL,
     institution_code TEXT NOT NULL REFERENCES institutes(institution_code),
     program_id       INTEGER NOT NULL REFERENCES programs(program_id),
+    program_code     TEXT,
     base_category    TEXT NOT NULL REFERENCES base_categories(base_code),
     is_ladies        BOOLEAN NOT NULL DEFAULT FALSE,
     section_code     TEXT NOT NULL REFERENCES sections(section_code),
@@ -84,6 +85,8 @@ CREATE INDEX IF NOT EXISTS idx_cutoffs_filter
 
 CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_prog
     ON cutoffs(institution_code, program_id);
+CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_program_code
+    ON cutoffs(institution_code, program_code);
 
 CREATE INDEX IF NOT EXISTS idx_cutoffs_percentile
     ON cutoffs(percentile DESC);

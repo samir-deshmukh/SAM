@@ -725,18 +725,19 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
                       (family,program_name)).fetchone()
     if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
     pid=prog["program_id"]
-    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,base,bool(ladies),
+    program_code=str(raw.get("program_code", "")).strip() or None
+    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,program_code,base,bool(ladies),
           section,stage,None,rank_number,suffix,pct,str(raw.get("category","")).strip(),
           program_name,source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
     cur=conn.execute("""INSERT INTO cutoffs
-        (year,round,institution_code,program_id,base_category,is_ladies,section_code,
+        (year,round,institution_code,program_id,program_code,base_category,is_ladies,section_code,
          stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,
          raw_program_name,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
     inserted=cur.fetchone()
     if inserted:
         rid=inserted["id"]
-        after=dict(zip(["year","round","institution_code","program_id","base_category","is_ladies",
+        after=dict(zip(["year","round","institution_code","program_id","program_code","base_category","is_ladies",
                         "section_code","stage_code","home_university","rank_number","rank_suffix",
                         "percentile","raw_category","raw_program_name","source_pdf","source_page"], vals))
         return rid, after

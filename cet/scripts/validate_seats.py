@@ -73,7 +73,9 @@ def main(raw_dir: str) -> None:
     # Only canonical seat-matrix artifacts belong in this gate. This prevents
     # helper CSVs (for example *_courses.csv from the extractor) from being
     # mistaken for intake files and producing misleading filename errors.
-    csvs = sorted(folder.glob('*_SM.csv'))
+    # Accept both the historical normalized name (*_SM.csv) and the
+    # local extractor's canonical artifact (*_seats_long.csv).
+    csvs = sorted(set(folder.glob('*_SM.csv')) | set(folder.glob('*_seats_long.csv')))
     if not csvs:
         print(f'No canonical seat-matrix CSVs in {folder}')
         sys.exit(1)
@@ -94,6 +96,11 @@ def main(raw_dir: str) -> None:
 
     for path in csvs:
         meta = parse_filename(path)
+        # The course family is not needed for the seat-matrix quality rules.
+        # Local-extractor artifact names retain the original PDF stem, so
+        # permit them without fabricating a course-family label.
+        if not meta and path.name.endswith('_seats_long.csv'):
+            meta = {'family': 'UNKNOWN'}
         if not meta:
             file_errors.append((path.name, 'FILENAME_PATTERN_MISMATCH'))
             continue

@@ -44,6 +44,16 @@ DEFRNTA,Defence - Reserved NTA,Special
 DEFRNTB,Defence - Reserved NTB,Special
 DEFRNTC,Defence - Reserved NTC,Special
 DEFRNTD,Defence - Reserved NTD,Special
+DEFRNT1,Defence - Reserved NT1,Special
+DEFRNT2,Defence - Reserved NT2,Special
+DEFRNT3,Defence - Reserved NT3,Special
+DEFRST,Defence - Reserved ST,Special
+DEFRVJ,Defence - Reserved VJ,Special
+PWDRNT1,PWD - Reserved NT1,Special
+PWDRNT2,PWD - Reserved NT2,Special
+PWDRNT3,PWD - Reserved NT3,Special
+PWDRST,PWD - Reserved ST,Special
+PWDRVJ,PWD - Reserved VJ,Special
 ORPHAN,Orphan - Unspecified,Special
 ORPHAN_INST,Orphan - Institutional,Special
 ORPHAN_NONINST,Orphan - Non-Institutional,Special

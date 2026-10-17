@@ -991,6 +991,12 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
 .pdf-selected-title { padding-left: 12px; border-left: 3px solid var(--paper-500); }
 .pdf-table .pdf-cell-line + .pdf-cell-line { margin-top: 3px; }
 .pdf-view-note { font-size: 12px; color: var(--paper-600); margin: 0 0 14px; line-height: 1.5; }
+.engineering-branch-selector { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 8px; padding: 12px; border: 1px solid #d1d5db; border-radius: 12px; background: #f5f5f5; }
+.engineering-branch-current { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+.engineering-branch-current span { color: #6b7280; font-size: 11px; }
+.engineering-branch-current strong { color: #111827; font-size: 14px; line-height: 1.35; }
+.engineering-branch-arrow { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid #9ca3af; border-radius: 9px; background: #fff; color: #111827; font-size: 22px; cursor: pointer; }
+.engineering-branch-arrow:disabled { opacity: .35; cursor: not-allowed; }
 .pdf-round-title { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--paper-600); margin: 20px 0 8px; }
 #dTrendTable, #dSeatMatrixBody { overflow-x: auto; }
 
@@ -2775,7 +2781,11 @@ function createTrendsController(ids) {
     selectedYear: null,        // which year's table is currently shown
     view: "years",             // "years" (per-year cutoff table) or "seats" (seat matrix)
     drawerOptions: null,       // small precomputed metadata fetched from PostgreSQL
+    selectedProgramCode: '',
   };
+  // The drawer keeps one engineering program selected across both views.
+  let selectedDrawerProgram = null;
+  const isEngineeringCourse = () => /^(BE|B\.E\.?|BTECH|B\.TECH|BE\/BTECH|B\.E\.?\/B\.?TECH|ENGINEERING)/i.test(String(state.course || '').trim());
 
   /* ── DOM refs ── */
   const els = {};
@@ -3107,11 +3117,11 @@ function createTrendsController(ids) {
     els.trendsLoading.style.display = "flex";
     try {
       const data = await loadCollegeYear(state.course, state.college, state.selectedYear);
-      const collegeRows = (Array.isArray(data.pdf_rows) ? data.pdf_rows : [])
-        .filter(r => r.ladies === state.ladies);
+      const allCollegeRows = Array.isArray(data.pdf_rows) ? data.pdf_rows : [];
+      const collegeRows = allCollegeRows.filter(r => r.ladies === state.ladies);
       els.trendsLoading.style.display = "none";
 
-      if (!collegeRows.length) {
+      if (!allCollegeRows.length) {
         showEmpty("<strong>No cutoff data on file</strong>This college has no raw cutoff lines for the selected seat type/year.");
         return;
       }
@@ -3122,8 +3132,21 @@ function createTrendsController(ids) {
       }
       renderYearChips(years);
 
-      const yearRows = collegeRows;
       const branchLabel = id => data.branches[String(id)] || `#${id}`;
+      const programCodeByBranch = new Map();
+      allCollegeRows.forEach(r => {
+        const id = String(r.branch);
+        const code = String(r.program_code || '');
+        if (code && !programCodeByBranch.has(id)) programCodeByBranch.set(id, code);
+      });
+      const branchIds = [...new Set(allCollegeRows.map(r => String(r.branch)))]
+        .sort((a,b) => (programCodeByBranch.get(a) || a).localeCompare(programCodeByBranch.get(b) || b));
+      if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
+      const activeProgram = String(selectedDrawerProgram || '');
+      const yearRows = collegeRows.filter(r => String(r.branch) === activeProgram);
+      const activeProgramRow = allCollegeRows.find(r => String(r.branch) === activeProgram && r.program_code)
+        || allCollegeRows.find(r => String(r.branch) === activeProgram);
+      state.selectedProgramCode = activeProgramRow ? String(activeProgramRow.program_code || '') : '';
       /* Section labels are small enough to derive from the raw code using
          the same label map embedded in the course-year payload when present. */
       const SECTION_LABELS = {
@@ -3143,8 +3166,7 @@ function createTrendsController(ids) {
       const selectedCategory = state.category || null;
       const tableBlocks = [];
 
-      const branches = [...new Set(yearRows.map(r => String(r.branch)))]
-        .sort((a,b) => branchLabel(a).localeCompare(branchLabel(b)));
+      const branches = yearRows.length ? [activeProgram] : [];
 
       branches.forEach(branch => {
         const branchRows = yearRows.filter(r => String(r.branch) === branch);
@@ -3227,10 +3249,20 @@ function createTrendsController(ids) {
         });
       });
 
+      const activeIndex = branchIds.indexOf(activeProgram);
+      const branchSelector = isEngineeringCourse() && branchIds.length > 1 ? `
+        <div class="engineering-branch-selector" aria-label="Engineering branch selector">
+          <button type="button" class="engineering-branch-arrow" data-branch-prev aria-label="Previous branch" ${activeIndex <= 0 ? 'disabled' : ''}>←</button>
+          <div class="engineering-branch-current"><span>Branch ${activeIndex + 1} of ${branchIds.length}</span><strong>${escapeHtml(branchLabel(activeProgram))}</strong></div>
+          <button type="button" class="engineering-branch-arrow" data-branch-next aria-label="Next branch" ${activeIndex >= branchIds.length - 1 ? 'disabled' : ''}>→</button>
+        </div>` : '';
+      const noBranchRows = !yearRows.length
+        ? `<p class="d-text">No cutoff rows are recorded for ${escapeHtml(branchLabel(activeProgram))} for this year and seat type. No other branch's data is substituted.</p>`
+        : '';
       els.trendsTable.style.display = "block";
       els.trendsTable.innerHTML = `
-        <p class="pdf-view-note">Showing all cutoff lines for this college for ${state.selectedYear}. Your selected category + quota is highlighted; nothing else is filtered out.</p>
-        ${tableBlocks.join("")}`;
+        <p class="pdf-view-note">Showing cutoff lines for ${escapeHtml(branchLabel(activeProgram))} at this college for ${state.selectedYear}. Other branches are kept separate. Your selected category + quota is highlighted.</p>
+        ${noBranchRows}${tableBlocks.join("")}${branchSelector}`;
     } catch (err) {
       els.trendsLoading.style.display = "none";
       showEmpty(`<strong>Couldn't load cutoff data</strong>${escapeHtml(err.message)}`);
@@ -3386,10 +3418,44 @@ function createTrendsController(ids) {
         els.seatMatrixBody.innerHTML = `<p class="d-text">No seat matrix on file for this college.</p>`;
         return;
       }
-      const choiceCodes = Object.keys(instData);
+      let branchSelectorHtml = '';
+      if (isEngineeringCourse() && state.selectedYear) {
+        const yearPayload = await loadCollegeYear(state.course, state.college, state.selectedYear);
+        const allRows = Array.isArray(yearPayload.pdf_rows) ? yearPayload.pdf_rows : [];
+        const labels = yearPayload.branches || {};
+        const codeByBranch = new Map();
+        allRows.forEach(r => {
+          const id = String(r.branch);
+          const code = String(r.program_code || '');
+          if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
+        });
+        const branchIds = [...new Set(allRows.map(r => String(r.branch)))]
+          .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
+        if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
+        const selectedRow = allRows.find(r => String(r.branch) === String(selectedDrawerProgram) && r.program_code)
+          || allRows.find(r => String(r.branch) === String(selectedDrawerProgram));
+        state.selectedProgramCode = selectedRow ? String(selectedRow.program_code || '') : '';
+        const branchIndex = branchIds.indexOf(String(selectedDrawerProgram));
+        if (branchIds.length > 1) {
+          branchSelectorHtml = `
+            <div class="engineering-branch-selector" aria-label="Engineering branch selector">
+              <button type="button" class="engineering-branch-arrow" data-branch-prev aria-label="Previous branch" ${branchIndex <= 0 ? 'disabled' : ''}>←</button>
+              <div class="engineering-branch-current"><span>Branch ${branchIndex + 1} of ${branchIds.length}</span><strong>${escapeHtml(labels[String(selectedDrawerProgram)] || 'Select branch')}</strong></div>
+              <button type="button" class="engineering-branch-arrow" data-branch-next aria-label="Next branch" ${branchIndex >= branchIds.length - 1 ? 'disabled' : ''}>→</button>
+            </div>`;
+        }
+      }
+      const allChoiceCodes = Object.keys(instData);
+      const choiceCodes = isEngineeringCourse()
+        ? (state.selectedProgramCode ? allChoiceCodes.filter(code => String(code) === String(state.selectedProgramCode)) : [])
+        : allChoiceCodes;
       const collegeMeta = (CONFIG.colleges || []).find(x => x.course === state.course && String(x.institution_code) === String(state.college));
       const collegeName = collegeMeta ? collegeMeta.name : state.college;
-      els.seatMatrixBody.innerHTML = choiceCodes.map(code => seatMatrixChoiceHtml(state.course, code, instData[code], collegeName, choiceCodes.length)).join("");
+      if (!choiceCodes.length) {
+        els.seatMatrixBody.innerHTML = `${branchSelectorHtml}<p class="d-text">No seat-matrix record is linked to the selected branch (${escapeHtml(state.selectedProgramCode || 'no verified program code')}). Other branches are not shown as a substitute.</p>`;
+        return;
+      }
+      els.seatMatrixBody.innerHTML = `${branchSelectorHtml}${choiceCodes.map(code => seatMatrixChoiceHtml(state.course, code, instData[code], collegeName, choiceCodes.length)).join("")}`;
       els.seatMatrixWrap.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       els.seatMatrixBody.innerHTML = `<p class="d-text">Couldn't load seat matrix: ${escapeHtml(err.message || String(err))}</p>`;
@@ -3478,6 +3544,37 @@ function createTrendsController(ids) {
     enhanceSelect(els.tCategory, { search: true });
     enhanceSelect(els.tQuota,    { search: true });
 
+    if (ids.mode === "drawer") {
+      [els.trendsTable, els.seatMatrixBody].filter(Boolean).forEach(container => {
+        container.addEventListener("click", event => {
+        const prev = event.target.closest("[data-branch-prev]");
+        const next = event.target.closest("[data-branch-next]");
+        if (!prev && !next) return;
+        event.preventDefault();
+        const key = `${state.course}:${state.selectedYear}:${state.college}`;
+        const cached = collegeYearCache.get(key);
+        if (!cached) return;
+        Promise.resolve(cached).then(payload => {
+          const rows = Array.isArray(payload.pdf_rows) ? payload.pdf_rows : [];
+          const labels = payload.branches || {};
+          const codeByBranch = new Map();
+          rows.forEach(r => {
+            const id = String(r.branch);
+            const code = String(r.program_code || '');
+            if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
+          });
+          const branchIds = [...new Set(rows.map(r => String(r.branch)))]
+            .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
+          const index = branchIds.indexOf(String(selectedDrawerProgram));
+          const target = Math.max(0, Math.min(branchIds.length - 1, index + (next ? 1 : -1)));
+          selectedDrawerProgram = branchIds[target] || selectedDrawerProgram;
+          renderDrawerAllData();
+          if (els.seatMatrixWrap && els.seatMatrixWrap.style.display !== "none") renderSeatMatrix();
+        }).catch(err => console.error("Could not change engineering branch:", err));
+        });
+      });
+    }
+
     /* Seat Matrix toggle — independent of the category/quota picked
        above; shows/hides its own table and loads the data on first
        open (cached after that, see loadSeats()). */
@@ -3503,6 +3600,8 @@ function createTrendsController(ids) {
     state.ladies = false;
     state.category = state.quota = null;
     state.selectedYear = null;
+    state.selectedProgramCode = '';
+    selectedDrawerProgram = null;
     els.tCourse.innerHTML = `<option value="${course}" selected>${course}</option>`;
     els.tCollege.innerHTML = `<option value="${collegeCode}" selected>${collegeCode}</option>`;
 

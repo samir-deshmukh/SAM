@@ -205,6 +205,8 @@ def main() -> int:
         "total_pages": total_pages,
         "chunk_pages": args.chunk_pages,
         "engine": "hybrid" if args.hybrid else "native_only",
+        "chunked_extractor_sha256": sha256_file(Path(__file__).resolve()),
+        "page_extractor_sha256": sha256_file(EXTRACTOR),
     }
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -270,6 +272,10 @@ def main() -> int:
         env["CAPFIND_CHUNK_INDEX"] = str(number)
         env["CAPFIND_TOTAL_CHUNKS"] = str(count)
         command = [sys.executable, str(EXTRACTOR), str(chunk_pdf), "--out", str(chunk_out)]
+        if number > 1:
+            previous_context = part_root / f"part_{number - 1:04d}" / "final_context.json"
+            if previous_context.is_file():
+                command.extend(["--initial-context", str(previous_context)])
         if not args.hybrid:
             command.append("--native-only")
         log_path = chunk_out / "extractor.log"

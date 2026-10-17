@@ -737,7 +737,7 @@ def get_college_year_runtime(request: Request, institution_code: str, year: int,
         q = text("""
             SELECT c.program_id, c.institution_code, c.base_category, c.raw_category,
                    c.is_ladies, c.section_code, c.stage_code, c.year, c.round,
-                   c.percentile, c.rank_number, p.program_name_raw
+                   c.percentile, c.rank_number, p.program_name_raw, c.program_code
             FROM cutoffs c
             JOIN programs p ON p.program_id = c.program_id
             WHERE c.institution_code = :inst
@@ -755,18 +755,22 @@ def get_college_year_runtime(request: Request, institution_code: str, year: int,
         sections={}
         pdf_rows=[]
         for r in rows:
-            program_id=str(r[0]); branch=str(r[11] or program_id)
-            branches[program_id]=branch
+            program_id=str(r[0])
+            program_code=str(r[12] or '').strip()
+            branch_key=program_code or program_id
+            branch=str(r[11] or program_id)
+            branches[branch_key]=branch
             cat=str(r[2] or r[3] or '')
             raw_cat=str(r[3] or r[2] or cat)
             categories[cat]={'full':cat,'group':'Other'}
             sec=str(r[5] or '')
             sections[sec]=sec
             pdf_rows.append({
-                'branch':program_id,'college':institution_code,'category':cat,
+                'branch':branch_key,'college':institution_code,'category':cat,
                 'raw_category':raw_cat,'ladies':bool(r[4]),'section':sec,
                 'stage':str(r[6] or f'Round {r[8]}'),'year':int(r[7]),
                 'round':int(r[8]),'percentile':float(r[9]),'rank':r[10],
+                'program_code':str(r[12] or ''),
             })
         return {'course':course,'year':year,'college':institution_code,
                 'branches':branches,'categories':categories,'sections':sections,

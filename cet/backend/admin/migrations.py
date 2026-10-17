@@ -4,6 +4,11 @@ def ensure_part4_schema():
     # The PostgreSQL schema is created idempotently at startup. This function
     # remains as a compatibility hook for existing admin publish code.
     with connect() as c:
+        # Program code is the authoritative join key between a cutoff branch
+        # and the seat-matrix choice_code. Nullable for legacy rows; never infer
+        # it from the branch display name.
+        c.execute("ALTER TABLE cutoffs ADD COLUMN IF NOT EXISTS program_code TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_program_code ON cutoffs(institution_code, program_code)")
         # Local-worker upload tokens are stored separately from import_jobs so
         # SELECT j.* responses can never expose bearer-token hashes to browsers.
         c.execute("""CREATE TABLE IF NOT EXISTS local_worker_tokens (

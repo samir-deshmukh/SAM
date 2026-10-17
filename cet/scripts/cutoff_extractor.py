@@ -294,6 +294,97 @@ def split_by_stage(line: str) -> List[Tuple[str, str]]:
 
 
 # ----------------------------------------------------------------------
+# Metadata context tracking
+# ----------------------------------------------------------------------
+def update_metadata_from_line(
+    line: str,
+    metadata: Dict[str, str],
+    parser_state: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Update table metadata as each page line is read.
+
+    CAP PDFs can contain multiple program tables on one page and a table can
+    continue onto the next page. Extracting one metadata dictionary per page
+    assigns every row to the first program on that page and loses context on
+    continuation pages. This line-level updater preserves the source order.
+    It also joins a wrapped program title when its opening parenthesis has
+    not yet been closed in the source text.
+    Returns the metadata event kind when a line was consumed.
+    """
+    state = parser_state if parser_state is not None else {}
+    pending_program = bool(state.get("pending_program_continuation"))
+    if pending_program:
+        state["pending_program_continuation"] = False
+        program_name = str(metadata.get("program_name", "") or "")
+        continuation_line = line.strip()
+        is_boundary = any(pattern.match(line) for pattern in (INSTITUTE_RE, PROGRAM_RE, STATUS_RE, UNIVERSITY_RE))
+        is_boundary = is_boundary or bool(detect_section(line)) or continuation_line.upper() in BARE_STAGE_TOKENS
+        is_boundary = is_boundary or bool(RANK_VALUE_RE.search(line)) or bool(extract_category_tokens(line))
+        if continuation_line and not is_boundary and program_name.count("(") > program_name.count(")"):
+            metadata["program_name"] = f"{program_name.rstrip()} {continuation_line}".strip()
+            state["pending_program_continuation"] = (
+                metadata["program_name"].count("(") > metadata["program_name"].count(")")
+            )
+            return "program_continuation"
+
+    m = INSTITUTE_RE.match(line)
+    if m:
+        code = m.group("code").zfill(5)
+        if code != metadata.get("institution_code", ""):
+            metadata.update({"program_code": "", "program_name": "", "status": "", "home_university": ""})
+        metadata["institution_code"] = code
+        metadata["institution_name"] = m.group("name").strip()
+        return "institution"
+
+    m = PROGRAM_RE.match(line)
+    if m:
+        metadata["program_code"] = m.group("code")
+        metadata["program_name"] = m.group("name").strip()
+        metadata["status"] = ""
+        metadata["home_university"] = ""
+        state["pending_program_continuation"] = (
+            metadata["program_name"].count("(") > metadata["program_name"].count(")")
+        )
+        return "program"
+
+    m = STATUS_RE.match(line)
+    if m:
+        value = m.group("value").strip()
+        split = re.search(r"\s+Home University\s*:\s*", value, re.IGNORECASE)
+        if split:
+            metadata["status"] = value[:split.start()].strip()
+            metadata["home_university"] = value[split.end():].strip()
+        else:
+            metadata["status"] = value
+        return "status"
+
+    if re.match(r"^\s*Status\s*:\s*$", line, re.IGNORECASE):
+        metadata["status"] = "__PENDING_STATUS__"
+        return "status"
+
+    if metadata.get("status") == "__PENDING_STATUS__" and not re.match(
+        r"^\s*(?:Home University\s*:|\d{3,5}\s*-|\d{7,12}[A-Za-z]{0,3}\s*-)", line, re.IGNORECASE
+    ):
+        if re.search(r"\s+Home University\s*:\s*", line, re.IGNORECASE):
+            before, after = re.split(r"\s+Home University\s*:\s*", line, maxsplit=1, flags=re.IGNORECASE)
+            metadata["status"] = before.strip()
+            metadata["home_university"] = after.strip()
+        else:
+            metadata["status"] = line.strip()
+        return "status"
+
+    m = UNIVERSITY_RE.match(line)
+    if m:
+        metadata["home_university"] = m.group("value").strip()
+        return "university"
+    m = re.search(r"\bHome University\s*:\s*(.+)$", line, re.IGNORECASE)
+    if m:
+        metadata["home_university"] = m.group(1).strip()
+        return "university"
+    return None
+
+
+# ----------------------------------------------------------------------
 # Structured page parser
 # ----------------------------------------------------------------------
 def parse_structured_page(
@@ -301,18 +392,33 @@ def parse_structured_page(
     lines: List[str],
     source: str,
     metadata: Dict[str, str],
+    parser_state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
-    current_section: Optional[str] = None
+    state = parser_state if parser_state is not None else {}
+    current_section: Optional[str] = state.get("section")
     pending_categories: List[str] = []
     cat_cursor = 0
     categories_consumed = False
-    current_stage = ""
+    current_stage = str(state.get("stage", "") or "")
 
     for line in lines:
+        metadata_event = update_metadata_from_line(line, metadata, state)
+        if metadata_event:
+            if metadata_event in ("institution", "program"):
+                current_section = None
+                pending_categories = []
+                cat_cursor = 0
+                categories_consumed = False
+                current_stage = ""
+                state["section"] = None
+                state["stage"] = ""
+            continue
+
         sec = detect_section(line)
         if sec:
             current_section = sec
+            state["section"] = current_section
             pending_categories = []
             cat_cursor = 0
             categories_consumed = False
@@ -322,6 +428,7 @@ def parse_structured_page(
         bare = line.strip().upper()
         if bare in BARE_STAGE_TOKENS:
             current_stage = f"Stage-{bare}"
+            state["stage"] = current_stage
             cat_cursor = 0
             continue
         if bare in IGNORED_BARE_WORDS:
@@ -340,6 +447,7 @@ def parse_structured_page(
         for stage, segment in split_by_stage(line):
             if stage:
                 current_stage = stage
+                state["stage"] = current_stage
                 cat_cursor = 0
             if not segment:
                 continue
@@ -543,9 +651,14 @@ def deduplicate_and_merge(all_records: List[Dict[str, Any]]) -> List[Dict[str, A
         key = (
             rec.get("source_pdf", ""),
             rec.get("page"),
+            rec.get("institution_code", ""),
+            rec.get("program_code", ""),
             rec.get("section", ""),
+            rec.get("stage", ""),
             rec.get("category", ""),
-            rec.get("rank"),
+            rec.get("rank_number", rec.get("rank")),
+            rec.get("rank_suffix", ""),
+            rec.get("percentage"),
         )
         groups[key].append(rec)
 
@@ -568,6 +681,7 @@ def process_single_pdf(
     lang: str,
     use_camelot: bool,
     use_pdfium: bool = True,
+    initial_context: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     doc = fitz.open(pdf_path)
     print(f"  pages: {len(doc)}")
@@ -588,48 +702,80 @@ def process_single_pdf(
     all_records_raw: List[Dict[str, Any]] = []
     page_audits: List[Dict[str, Any]] = []
     camelot_all_tables: List[Dict] = []
+    carry_context = {
+        "institution_code": "", "institution_name": "", "program_code": "",
+        "program_name": "", "status": "", "home_university": "",
+    }
+    carry_parser_state: Dict[str, Any] = {"section": None, "stage": ""}
+    if initial_context:
+        initial_metadata = initial_context.get("metadata", initial_context)
+        initial_state = initial_context.get("parser_state", {})
+        for key in carry_context:
+            value = str(initial_metadata.get(key, "") or "").strip()
+            if value:
+                carry_context[key] = value
+        if isinstance(initial_state, dict):
+            carry_parser_state.update(initial_state)
 
     for pnum in range(1, len(native_doc) + 1):
         _worker_checkpoint(pnum, len(native_doc))
         native_page = native_doc[pnum - 1]
         native_text = native_page.get_text("text") or ""
         native_lines = merge_split_rank_lines(normalize_lines(native_text))
-        native_metadata = extract_metadata(native_lines)
-        native_records = parse_structured_page(pnum, native_lines, "native_text", native_metadata)
+        prior_context = dict(carry_context)
+        prior_parser_state = dict(carry_parser_state)
+        native_context = dict(prior_context)
+        native_state = dict(prior_parser_state)
+        native_records = parse_structured_page(pnum, native_lines, "native_text", native_context, native_state)
 
         pdfium_records: List[Dict[str, Any]] = []
+        pdfium_context = dict(prior_context)
+        pdfium_state = dict(prior_parser_state)
         pdfium_error = ""
         if pdfium_doc is not None:
             try:
                 pdfium_page = pdfium_doc[pnum - 1]
                 pdfium_text = pdfium_page.get_text("text") or ""
                 pdfium_lines = merge_split_rank_lines(normalize_lines(pdfium_text))
-                pdfium_metadata = extract_metadata(pdfium_lines)
-                pdfium_records = parse_structured_page(pnum, pdfium_lines, "pdfium_text", pdfium_metadata)
+                pdfium_records = parse_structured_page(pnum, pdfium_lines, "pdfium_text", pdfium_context, pdfium_state)
             except Exception as exc:
                 pdfium_error = str(exc)
 
         if len(pdfium_records) >= len(native_records) and pdfium_records:
             records = pdfium_records
             source_used = "pdfium_text"
+            selected_context = pdfium_context
+            selected_parser_state = pdfium_state
         elif native_records:
             records = native_records
             source_used = "native_text"
+            selected_context = native_context
+            selected_parser_state = native_state
         else:
             records = []
             source_used = "none"
+            selected_context = native_context
+            selected_parser_state = native_state
 
         if not records and pytesseract is not None:
             try:
                 ocr_text = ocr_page(native_page, dpi, lang)
                 ocr_lines = merge_split_rank_lines(normalize_lines(ocr_text))
-                ocr_metadata = extract_metadata(ocr_lines)
-                ocr_records = parse_structured_page(pnum, ocr_lines, "ocr", ocr_metadata)
+                ocr_context = dict(prior_context)
+                ocr_state = dict(prior_parser_state)
+                ocr_records = parse_structured_page(pnum, ocr_lines, "ocr", ocr_context, ocr_state)
                 if ocr_records:
                     records = ocr_records
                     source_used = "ocr"
+                    selected_context = ocr_context
+                    selected_parser_state = ocr_state
             except Exception as exc:
                 print(f"    p{pnum:>3}: OCR fallback failed: {exc}")
+
+        # Keep metadata context across page boundaries. Some CAP tables continue
+        # on the next page with category/value columns only and no repeated program title.
+        carry_context = dict(selected_context)
+        carry_parser_state = dict(selected_parser_state)
 
         for r in records:
             r["source_pdf"] = pdf_path.name
@@ -641,11 +787,16 @@ def process_single_pdf(
 
         records_camelot: List[Dict[str, Any]] = []
         if use_camelot:
-            tables = run_camelot_on_page(pdf_path, pnum)
+            program_headers = sum(bool(PROGRAM_RE.match(line)) for line in native_lines)
+            institution_headers = sum(bool(INSTITUTE_RE.match(line)) for line in native_lines)
+            if program_headers > 1 or institution_headers > 1:
+                print(f"    p{pnum:>3}: skipping Camelot supplement because multiple program/institution blocks need line-level metadata")
+                tables = []
+            else:
+                tables = run_camelot_on_page(pdf_path, pnum)
             if tables:
                 camelot_all_tables.extend(tables)
-                metadata = extract_metadata(native_lines)
-                records_camelot = camelot_to_records(tables, metadata, pnum)
+                records_camelot = camelot_to_records(tables, dict(carry_context), pnum)
                 for r in records_camelot:
                     r["source_pdf"] = pdf_path.name
 
@@ -656,6 +807,10 @@ def process_single_pdf(
             "pdfium_records": len(pdfium_records),
             "ocr_fallback_records": len(records) if source_used == "ocr" else 0,
             "camelot_records": len(records_camelot),
+            "rank_value_hits": _count_value_hits(native_lines),
+            "program_header_count": sum(bool(PROGRAM_RE.match(line)) for line in native_lines),
+            "institution_header_count": sum(bool(INSTITUTE_RE.match(line)) for line in native_lines),
+            "selected_records": len(records) + len(records_camelot),
             "source": source_used,
             "pdfium_error": pdfium_error,
         })
@@ -692,6 +847,12 @@ def process_single_pdf(
     write_csv(csv_path, merged_records)
     write_json(json_path, merged_records)
     write_json(audit_path, page_audits)
+    # Chunked extraction consumes this to preserve program/institution context
+    # when a CAP table continues across a chunk boundary.
+    write_json(outdir / "final_context.json", {
+        "metadata": carry_context,
+        "parser_state": carry_parser_state,
+    })
 
     doc.close()
     if pdfium_doc is not None:
@@ -772,6 +933,8 @@ def main() -> int:
                         help="Enable Camelot (usually adds nothing on these PDFs)")
     parser.add_argument("--native-only", action="store_true",
                         help="Skip PDFium and use PyMuPDF native text; lowers peak memory on large PDFs")
+    parser.add_argument("--initial-context", type=Path, default=None,
+                        help="JSON metadata context from the previous chunk of the same source PDF")
     args = parser.parse_args()
 
     if args.input.is_file() and args.input.suffix.lower() == ".pdf":
@@ -789,6 +952,11 @@ def main() -> int:
     total = len(pdf_files)
     print(f"Found {total} PDF(s).  Output -> {args.out}")
     summary: List[Dict[str, Any]] = []
+    initial_context = None
+    if args.initial_context:
+        initial_context = json.loads(args.initial_context.read_text(encoding="utf-8"))
+        if not isinstance(initial_context, dict):
+            parser.error("--initial-context must point to a JSON object")
 
     for idx, pdf_path in enumerate(pdf_files, 1):
         print(f"\n[{idx}/{total}] {pdf_path.name}")
@@ -800,6 +968,7 @@ def main() -> int:
                 lang=args.lang,
                 use_camelot=args.camelot,
                 use_pdfium=not args.native_only,
+                initial_context=initial_context,
             ))
         except Exception as e:
             print(f"  ERROR: {e}", file=sys.stderr)
