@@ -102,6 +102,31 @@ def refresh(engine, course_family: str | None = None) -> None:
                         "cutoff institution/program codes do not match a seat-matrix choice_code. "
                         "Review source codes and re-import; no fuzzy branch mapping is allowed."
                     )
+                seat_only_branches = conn.execute(text("""
+                    WITH latest_seat_year AS (
+                        SELECT institution_code, MAX(capture_year) AS capture_year
+                        FROM seats WHERE program_family='BE' GROUP BY institution_code
+                    ), seat_codes AS (
+                        SELECT DISTINCT s.institution_code, s.choice_code
+                        FROM seats s JOIN latest_seat_year y
+                          ON y.institution_code=s.institution_code AND y.capture_year=s.capture_year
+                        WHERE s.program_family='BE'
+                    )
+                    SELECT COUNT(*) FROM seat_codes s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
+                        WHERE p.program_family='BE'
+                          AND c.institution_code=s.institution_code
+                          AND c.program_code=s.choice_code
+                    )
+                """)).scalar_one()
+                if seat_only_branches:
+                    raise RuntimeError(
+                        f"Refusing to mark engineering data complete: {seat_only_branches} latest "
+                        "seat-matrix institution/choice-code records have no exact cutoff program_code. "
+                        "Review whether cutoff rows are missing or the source codes differ; "
+                        "no seat-only branch is silently omitted."
+                    )
 
         if course_family:
             conn.execute(text("DELETE FROM cutoff_trend_points WHERE program_family = :course"), params)
