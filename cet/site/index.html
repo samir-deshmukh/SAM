@@ -1176,6 +1176,64 @@ body{letter-spacing:-.01em;}
 .results-table tr.active,.pdf-table td.pdf-selected,.pdf-table th.pdf-selected,.pdf-selected-title{background:rgba(216,207,188,.42)!important;color:#11120D}
 .chip{background:#FFFBF4;border-color:#D8CFBC;color:#11120D}
 .chip.active{background:#11120D;color:#FFFBF4;border-color:#11120D}
+
+
+/* Match the admin panel: strict white, grey, and charcoal palette. */
+:root {
+  --ink-900:#262626; --ink-800:#333333;
+  --paper-50:#FFFFFF; --paper-100:#FFFFFF; --paper-200:#E9E9E9;
+  --paper-300:#DEDEDE; --paper-400:#D6D6D6; --paper-500:#BDBDBD;
+  --paper-600:#666666; --paper-700:#444444; --paper-800:#262626;
+}
+html, body, .sketch-bg, .page-content { background:#F4F4F4; color:#262626; }
+.sketch-bg::after { background-image:linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px); }
+.topbar, .hero-stat, .seo-directory-card, .search-card, .results-bar, .table-wrap,
+.results-table, .drawer, .drawer-head, .drawer-body, .d-section, .d-stat, .trend-card,
+.seat-card, .seat-pdf-card, .seat-pdf-head, .seat-pdf-table-wrap, .seat-pdf-table,
+.feedback-card, .feedback-message, .pdf-table-scroll { background:#FFFFFF!important; color:#262626; }
+.topbar, .hero-stats, .seo-directory-card, .search-card, .results-table,
+.results-table tr, .drawer-head, .d-section, .trend-card, .seat-card,
+.seat-pdf-card, .seat-pdf-data-note, .seat-pdf-footer-note, .feedback-card,
+.feedback-message, .field input, .field select, .ssel-btn, .ssel-search input,
+.feedback-close, .chip, .d-chip, .round-chip, .seat-matrix-toggle, .pdf-table,
+.seat-pdf-table, .results-table td, .results-table th { border-color:#DEDEDE!important; }
+.topbar-nav, .topbar-nav a, .hero-lede, .section-desc, .seo-directory-copy p,
+.field label, .ssel-btn, .results-count span, .college-meta, .status-label,
+.drawer-eyebrow, .d-text, .d-stat-label, .d-stat-value small, .d-bar-row .lbl,
+.d-gap-summary, .trends-desc, .trends-rounds-label, .pdf-view-note,
+.pdf-round-title, .trends-note, .seat-pdf-subline, .seat-pdf-summary-grid span,
+.seat-pdf-data-note, .seat-pdf-footer-note, .feedback-card p { color:#666666!important; }
+.hero h1, .section-title, .section-title em, .hero h1 em, .topbar-brand,
+.seo-directory-copy h2, .results-count strong, .rank-num, .cutoff-num, .pct-num,
+.college-name, .empty-state h4, .drawer-title, .d-stat-value, .d-text strong,
+.d-bar-row .val, .d-gap-summary strong, .trends-title, .tin-value,
+.seat-pdf-institution, .seat-pdf-summary-grid b, .pdf-table-title,
+.feedback-card h2, .feedback-label, .footer-title, .footer-col h5,
+.footer-col p, .footer-inner, .footer-inner a { color:#262626!important; }
+.btn-primary, .search-submit, .seo-directory-link, .chip.active, .ssel-item.active,
+.feedback-launch, .feedback-submit, .feedback-rating button.selected {
+  background:#333333!important; color:#FFFFFF!important; border-color:#333333!important; box-shadow:none!important;
+}
+.btn-primary:hover, .search-submit:hover, .seo-directory-link:hover,
+.feedback-launch:hover, .feedback-submit:hover { background:#555555!important; color:#FFFFFF!important; }
+.btn-ghost, .knowledge-link, .feedback-close, .drawer-close, .feedback-rating button,
+.chip, .d-chip, .round-chip, .seat-matrix-toggle, .ssel-btn, .field input,
+.field select, .ssel-search input { background:#FFFFFF!important; color:#444444!important; }
+.results-table tr:hover, .results-table tr.active, .pdf-table td.pdf-selected,
+.pdf-table th.pdf-selected, .pdf-selected-title, .ssel-item:hover,
+.round-chip.active, .seat-matrix-toggle.active, .chip:hover { background:#E9E9E9!important; color:#262626!important; box-shadow:none!important; }
+.results-table tr.active .status, .status-safe, .status-border, .status-reach,
+.d-bar-fill, .bar, .round-chip .dot { background:#777777!important; }
+.pdf-table thead th, .results-table thead th, .seat-pdf-lane-title,
+.seat-pdf-table thead th, .seat-pdf-table tbody .seat-pdf-rowlabel,
+.seat-pdf-status, .seat-pdf-cap { background:#E9E9E9!important; color:#333333!important; }
+.pdf-table tbody tr:nth-child(even) td, .seat-pdf-table tbody td { background:#FFFFFF!important; color:#333333!important; }
+.tin-value.up, .tin-value.down, .trends-note.warn, .field input.field-invalid { color:#555555!important; border-color:#777777!important; }
+.footer { background:#FFFFFF!important; color:#262626!important; border-top:1px solid #DEDEDE!important; }
+.feedback-modal { background:rgba(0,0,0,.42)!important; }
+.feedback-message:focus, .field input:focus, .field select:focus, .ssel-btn:focus,
+.ssel-search input:focus { border-color:#888888!important; box-shadow:0 0 0 3px rgba(0,0,0,.06)!important; }
+
 </style>
 </head>
 <body>
