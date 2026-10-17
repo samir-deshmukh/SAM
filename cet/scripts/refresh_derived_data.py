@@ -33,6 +33,76 @@ def refresh(engine, course_family: str | None = None) -> None:
             scope = f"course {course_family}" if course_family else "the production database"
             raise RuntimeError(f"Refusing to rebuild derived data: source data is incomplete for {scope} (cutoffs={source_cutoffs}, seats={source_seats})")
 
+        # A green calculator result must mean the latest seat matrix can be
+        # reconstructed from its source metadata, not merely that a lossy
+        # category cache was generated. Check each institution's latest seat
+        # year and require one PDF-derived course metadata record per choice
+        # code before clearing any existing derived tables.
+        family_filter = " AND s.program_family = :course" if course_family else ""
+        missing_metadata = conn.execute(text(f"""
+            WITH latest AS (
+                SELECT program_family, institution_code, MAX(capture_year) AS capture_year
+                FROM seats
+                WHERE (:course IS NULL OR program_family = :course)
+                GROUP BY program_family, institution_code
+            )
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT s.program_family, s.institution_code,
+                       s.capture_year, s.choice_code
+                FROM seats s
+                JOIN latest l ON l.program_family = s.program_family
+                    AND l.institution_code = s.institution_code
+                    AND l.capture_year = s.capture_year
+                LEFT JOIN seat_matrix_courses m ON m.program_family = s.program_family
+                    AND m.institution_code = s.institution_code
+                    AND m.capture_year = s.capture_year
+                    AND m.choice_code = s.choice_code
+                WHERE m.choice_code IS NULL {family_filter}
+            ) missing
+        """), {"course": course_family}).scalar_one()
+        if missing_metadata:
+            raise RuntimeError(
+                f"Refusing to mark CET Data Calculator complete: {missing_metadata} latest "
+                "institution/choice-code seat-matrix records have no full PDF metadata. "
+                "Re-extract and re-import the canonical seat CSV with course_metadata; "
+                "no existing calculated data was cleared."
+            )
+
+        # For engineering, the official cutoff program_code must link exactly
+        # to a seat-matrix choice_code at the same institution. Never fuzzy-map
+        # a branch by its display label.
+        if not course_family or course_family == "BE":
+            be_exists = conn.execute(text("""
+                SELECT COUNT(*) FROM seats WHERE program_family = 'BE'
+            """)).scalar_one()
+            if be_exists:
+                unmatched_branches = conn.execute(text("""
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT c.institution_code, c.program_code
+                        FROM cutoffs c
+                        JOIN programs p ON p.program_id = c.program_id
+                        WHERE p.program_family = 'BE'
+                          AND c.program_code IS NOT NULL AND btrim(c.program_code) <> ''
+                          AND NOT EXISTS (
+                              SELECT 1 FROM seats s
+                              WHERE s.program_family = 'BE'
+                                AND s.institution_code = c.institution_code
+                                AND s.choice_code = c.program_code
+                                AND s.capture_year = (
+                                    SELECT MAX(s2.capture_year) FROM seats s2
+                                    WHERE s2.program_family = s.program_family
+                                      AND s2.institution_code = s.institution_code
+                                )
+                          )
+                    ) unmatched
+                """)).scalar_one()
+                if unmatched_branches:
+                    raise RuntimeError(
+                        f"Refusing to mark engineering data complete: {unmatched_branches} distinct "
+                        "cutoff institution/program codes do not match a seat-matrix choice_code. "
+                        "Review source codes and re-import; no fuzzy branch mapping is allowed."
+                    )
+
         if course_family:
             conn.execute(text("DELETE FROM cutoff_trend_points WHERE program_family = :course"), params)
             conn.execute(text("DELETE FROM cutoff_college_year_summary WHERE program_family = :course"), params)

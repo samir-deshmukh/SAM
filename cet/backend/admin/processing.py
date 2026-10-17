@@ -780,22 +780,56 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
         )
     gender=str(raw.get("gender","")).strip()
     is_ladies={"G":False,"L":True}.get(gender) if gender else None
+    source_row = int(raw["source_row"]) if str(raw.get("source_row", "")).isdigit() else None
     vals=(int(job["year"]),job["course_family"],inst,str(raw.get("choice_code","")).strip(),
           lane,base,total,is_ladies,int(raw["seats"]),cat,lane_raw,gender,
-          source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
+          source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None,
+          source_row)
     cur=conn.execute("""INSERT INTO seats
         (capture_year,program_family,institution_code,choice_code,allocation_lane,base_category,
-         is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+         is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page,source_row)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT DO NOTHING RETURNING id""", vals)
     inserted=cur.fetchone()
     if inserted:
         rid=inserted["id"]
         cols=["capture_year","program_family","institution_code","choice_code","allocation_lane",
               "base_category","is_total","is_ladies","seats","raw_category","raw_allocation_type",
-              "raw_gender","source_pdf","source_page"]
+              "raw_gender","source_pdf","source_page","source_row"]
         return rid, dict(zip(cols,vals))
     return None,None
 
+
+
+def _insert_seat_course_metadata(conn, raw, job, source_pdf):
+    """Persist one official course/choice-code summary from the source PDF."""
+    metadata = raw.get("course_metadata")
+    if not metadata:
+        return False
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid course_metadata JSON: {exc}")
+    if not isinstance(metadata, dict):
+        raise ValueError("course_metadata must be a JSON object")
+    from scripts.ingest_seats import canonical_institution_code
+    institution = canonical_institution_code(
+        str(raw.get("institution_code", "")), str(raw.get("choice_code", ""))
+    )
+    choice = str(raw.get("choice_code", "")).strip()
+    if not institution or not choice:
+        raise ValueError("Seat-matrix course metadata has no institution/choice code")
+    metadata_pdf = str(metadata.get("source_pdf") or raw.get("source_pdf") or source_pdf)
+    page = metadata.get("page") or raw.get("page")
+    page = int(page) if str(page or "").isdigit() else None
+    conn.execute("""INSERT INTO seat_matrix_courses
+        (capture_year,program_family,institution_code,choice_code,source_pdf,source_page,source_job_id,course_metadata)
+        VALUES (?,?,?,?,?,?,?,?::jsonb)
+        ON CONFLICT(capture_year,program_family,institution_code,choice_code) DO NOTHING""",
+        (int(job["year"]), job["course_family"], institution, choice,
+         metadata_pdf, page, int(job["id"]), json.dumps(metadata, ensure_ascii=False)))
+    return True
 
 
 def _write_commit_progress(job_id: int, status: str, stage: str,
@@ -842,6 +876,7 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         staged_rows = _load_staged_rows(conn,job_id,dtype)
         progress_interval = max(25, total_rows // 100) if total_rows else 1
         processed_rows = 0
+        seat_metadata_written = set()
         _write_commit_progress(job_id, "RUNNING", "Writing production records", 0, total_rows,
                                f"Writing 0 of {total_rows:,} staged records")
         for r in staged_rows:
@@ -852,6 +887,13 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
             else:
                 rid, after=_insert_seat_from_json(conn,raw,job,source_pdf)
                 table="seats"
+                metadata = raw.get("course_metadata")
+                if metadata:
+                    metadata_key = (str(raw.get("institution_code", "")).strip(),
+                                    str(raw.get("choice_code", "")).strip())
+                    if metadata_key not in seat_metadata_written:
+                        _insert_seat_course_metadata(conn, raw, job, source_pdf)
+                        seat_metadata_written.add(metadata_key)
             if rid is not None:
                 inserted.append((table,rid,after))
             processed_rows += 1
@@ -929,6 +971,8 @@ def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
     # the reads above; do not issue a nested BEGIN here.
     try:
         conn.execute("DELETE FROM data_release_items WHERE release_id=?",(release_id,))
+        if job_id:
+            conn.execute("DELETE FROM seat_matrix_courses WHERE source_job_id=?",(job_id,))
         conn.execute("DELETE FROM data_releases WHERE id=?",(release_id,))
         if job_id:
             conn.execute("DELETE FROM import_events WHERE job_id=?",(job_id,))
@@ -1005,6 +1049,16 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
                 if code: affected_institutes.add(code)
             cur=conn.execute(f"DELETE FROM {table} WHERE id=?",(item["row_id"],))
             deleted += cur.rowcount
+
+        # Course metadata is stored once per choice code (rather than repeated
+        # for every category row). Remove metadata first introduced by this
+        # source job when rolling the release back; older metadata records are
+        # retained because the import path does not overwrite them.
+        if release["source_job_id"]:
+            conn.execute(
+                "DELETE FROM seat_matrix_courses WHERE source_job_id=?",
+                (release["source_job_id"],),
+            )
 
         # Production reference rows are created as part of imports, but the
         # release ledger historically tracked only cutoff/seat rows. Remove

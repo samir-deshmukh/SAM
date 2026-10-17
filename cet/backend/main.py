@@ -857,9 +857,49 @@ def derived_data_status(request: Request):
         courses = connection.execute(
             "SELECT DISTINCT program_family FROM programs WHERE program_family IS NOT NULL ORDER BY program_family"
         ).fetchall()
+        source_checks = connection.execute("""
+            WITH latest AS (
+                SELECT program_family, institution_code, MAX(capture_year) AS capture_year
+                FROM seats GROUP BY program_family, institution_code
+            ), latest_seats AS (
+                SELECT s.* FROM seats s JOIN latest l
+                  ON l.program_family=s.program_family
+                 AND l.institution_code=s.institution_code
+                 AND l.capture_year=s.capture_year
+            )
+            SELECT s.program_family,
+                   COUNT(DISTINCT s.institution_code || ':' || s.choice_code) AS choice_codes,
+                   COUNT(DISTINCT CASE WHEN m.choice_code IS NOT NULL
+                     THEN s.institution_code || ':' || s.choice_code END) AS metadata_codes,
+                   COUNT(DISTINCT CASE WHEN m.choice_code IS NULL
+                     THEN s.institution_code || ':' || s.choice_code END) AS missing_metadata_codes,
+                   COUNT(*) AS latest_seat_rows
+            FROM latest_seats s
+            LEFT JOIN seat_matrix_courses m
+              ON m.program_family=s.program_family
+             AND m.institution_code=s.institution_code
+             AND m.capture_year=s.capture_year
+             AND m.choice_code=s.choice_code
+            GROUP BY s.program_family ORDER BY s.program_family
+        """).fetchall()
+        branch_check = connection.execute("""
+            SELECT COUNT(DISTINCT c.institution_code || ':' || c.program_code) AS cutoff_codes,
+                   COUNT(DISTINCT CASE WHEN EXISTS (
+                       SELECT 1 FROM seats s
+                       WHERE s.program_family='BE'
+                         AND s.institution_code=c.institution_code
+                         AND s.choice_code=c.program_code
+                         AND s.capture_year=(SELECT MAX(s2.capture_year) FROM seats s2
+                           WHERE s2.program_family='BE' AND s2.institution_code=s.institution_code)
+                   ) THEN c.institution_code || ':' || c.program_code END) AS linked_codes
+            FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
+            WHERE p.program_family='BE' AND c.program_code IS NOT NULL AND trim(c.program_code)<>''
+        """).fetchone()
     return {
         "jobs": [dict(row) for row in rows],
         "courses": [str(row['program_family']) for row in courses],
+        "source_checks": [dict(row) for row in source_checks],
+        "engineering_branch_check": dict(branch_check) if branch_check else {"cutoff_codes": 0, "linked_codes": 0},
     }
 
 
