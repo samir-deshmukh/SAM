@@ -470,6 +470,48 @@ html,body,.main,.content{background:#f7f7fb!important;color:#29263d!important}
 .admin-tab-lock-card button{background:#6d5bd0!important;color:#ffffff!important}
 pre.json{background:#29263d!important;color:#f7f7fb!important}
 
+
+/* Strict neutral theme: white, greys, and charcoal only */
+:root{
+ --bg:#f4f4f4!important;--panel:#ffffff!important;--ink:#262626!important;
+ --muted:#707070!important;--line:#dedede!important;
+ --red:#666666!important;--blue:#666666!important;--green:#666666!important;
+ --amber:#666666!important;--purple:#666666!important;
+ --shadow:0 3px 12px rgba(0,0,0,.07)!important;
+}
+html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262626!important}
+.side,.top,.card,.panel,.modal,.admin-tab-lock-card{background:#fff!important;color:#262626!important;border-color:#dedede!important;box-shadow:0 3px 12px rgba(0,0,0,.06)!important}
+.brand b,.brand span,.brand .mark,.sidefoot,.khead,.stage b,.table td,.metric .value,.title h1,
+.label,.value,h1,h2,h3,strong,b{color:#262626!important}
+.brand span,.sidefoot,.muted,.title p,.metric .label,.stage small,.event p,.small{color:#707070!important}
+.nav a,.secondary,.gray,.processbtn,.iconbtn,.trashbtn,.btn.ghost,.ghost{color:#555!important;background:#fff!important;border-color:#d6d6d6!important}
+.nav a:hover,.nav a.active{background:#e9e9e9!important;color:#222!important;border-color:#d0d0d0!important}
+.online,.live,.healthy{color:#555!important}
+.avatar,pre.json{background:#333!important;color:#fff!important}
+.card:hover{box-shadow:0 5px 15px rgba(0,0,0,.09)!important}
+.dot{background:#777!important;box-shadow:0 0 0 4px rgba(0,0,0,.07)!important}
+.ki,.si,.hi,.sky,.lav,.rose,.mint,.stage.done .si,.stage.publish .si,.stage.warn .si,.stage.review .si,
+.status,.blue,.purple,.green,.success,.amber,.primary,.toast,.toast.ok,.btn.success,.toast.err,.dangerbtn,.red,.danger{
+ background:#e9e9e9!important;color:#333!important;border-color:#d2d2d2!important;box-shadow:none!important
+}
+.stage.active .si,.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close,.admin-tab-lock-card button{
+ background:#555!important;color:#fff!important;border-color:#555!important;box-shadow:none!important
+}
+.table th{background:#f0f0f0!important;color:#444!important;border-color:#dedede!important}
+.table td{color:#292929!important;border-color:#e5e5e5!important}
+.table tbody tr:hover{background:#f7f7f7!important}
+.input,.select,textarea,.search{background:#fff!important;color:#333!important;border:1px solid #d4d4d4!important}
+.input:focus,.select:focus,textarea:focus{border-color:#888!important;box-shadow:0 0 0 2px rgba(0,0,0,.07)!important}
+.pdfspin,.activityspin{border-color:#d8d8d8!important;border-top-color:#666!important;border-right-color:#666!important}
+.commit-track,.bars{background:#e5e5e5!important;border-color:#d8d8d8!important}
+.commit-bar,.bar,.bar.g,.eventdot,.event.active .eventdot{background:#777!important;border-color:#fff!important;box-shadow:none!important}
+.notice,.issue,.issue.good{background:#f3f3f3!important;border-color:#d8d8d8!important;border-left-color:#888!important;color:#444!important}
+.skeleton{background:#e9e9e9!important}
+.modalback{background:rgba(0,0,0,.42)!important}
+.modalhead,.modalfoot,.timeline .event:before{border-color:#dedede!important}
+.close{background:#eee!important;color:#444!important}
+.admin-tab-lock{background:#f4f4f4!important}
+
 '''
 
 
