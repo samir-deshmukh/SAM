@@ -1393,6 +1393,10 @@ def _process_csv_import_background(job_id: int):
                         progress_callback=report_csv_progress)
                     if not result.get('ok'):
                         log.error('CSV import staging failed: job_id=%s error=%s', job_id, result.get('error'))
+                    elif result.get('status') == 'CANCELLED':
+                        _write_commit_progress(job_id, 'CANCELLED', 'CSV processing cancelled',
+                                               int(csv_progress_state['processed']), int(csv_progress_state['total']),
+                                               'CSV processing was stopped by an admin.')
                     else:
                         processed = int(csv_progress_state['processed'])
                         total = int(csv_progress_state['total'])
@@ -1693,13 +1697,13 @@ def pause_import(request: Request, job_id: int):
             raise HTTPException(404, 'Import not found')
         if str(job['stored_path'] or '').startswith('local://'):
             raise HTTPException(409, 'This legacy import belongs to the local worker')
-        if job['status'] not in {'QUEUED', 'EXTRACTING', 'PAUSED'}:
-            raise HTTPException(409, f'Only a queued or extracting import can be paused (current status: {job["status"]})')
+        if job['status'] not in {'QUEUED', 'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING', 'PAUSED'}:
+            raise HTTPException(409, f'Import cannot be paused while in {job["status"]}')
         control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
         control.mkdir(parents=True, exist_ok=True)
         (control / 'PAUSE').touch()
-        connection.execute("UPDATE import_jobs SET status='PAUSED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','EXTRACTING','PAUSED')", (job_id,))
-        event(connection, job_id, 'PAUSE_REQUESTED', 'Pause requested; extraction will stop at a safe page checkpoint', None)
+        connection.execute("UPDATE import_jobs SET status='PAUSED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING','PAUSED')", (job_id,))
+        event(connection, job_id, 'PAUSE_REQUESTED', 'Pause requested; processing will stop at the next safe checkpoint', None)
         connection.commit()
     return {'ok': True, 'job_id': job_id, 'status': 'PAUSE_REQUESTED'}
 
@@ -1708,7 +1712,7 @@ def pause_import(request: Request, job_id: int):
 def resume_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        job = connection.execute('SELECT status,stored_path,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT status,stored_path,original_filename,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
         if str(job['stored_path'] or '').startswith('local://'):
@@ -1717,9 +1721,10 @@ def resume_import(request: Request, job_id: int):
             raise HTTPException(409, f'Only an extracting import can be resumed (current status: {job["status"]})')
         control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
         (control / 'PAUSE').unlink(missing_ok=True)
-        next_status = 'EXTRACTING' if job.get('worker_id') and job.get('worker_alive') else 'QUEUED'
+        is_csv = str(job.get('original_filename') or '').lower().endswith('.csv')
+        next_status = 'NORMALIZING' if is_csv else ('EXTRACTING' if job.get('worker_id') and job.get('worker_alive') else 'QUEUED')
         connection.execute("UPDATE import_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='PAUSED'", (next_status, job_id))
-        event(connection, job_id, 'RESUME_REQUESTED', 'Pause marker removed; extraction will continue', None)
+        event(connection, job_id, 'RESUME_REQUESTED', 'Pause marker removed; processing will continue', None)
         connection.commit()
     return {'ok': True, 'job_id': job_id, 'status': next_status}
 

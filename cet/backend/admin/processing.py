@@ -119,6 +119,16 @@ def _resolve_cutoff_dimensions(raw: dict):
 
     return base, ladies, section, stage
 
+def _csv_control_checkpoint(conn, job_id: int) -> None:
+    """Honor stop/pause controls while a large CSV is being staged."""
+    import time
+    pause_marker = STAGING_ROOT / f"job_{job_id}" / "PAUSE"
+    while pause_marker.exists():
+        _raise_if_cancelled(conn, job_id)
+        time.sleep(0.25)
+    _raise_if_cancelled(conn, job_id)
+
+
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                valid: bool, validation_message: str, required_fields=(),
                progress_callback=None) -> tuple[int, int]:
@@ -209,10 +219,14 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
             rows += 1
             if progress_callback and (rows % progress_interval == 0 or (total_rows and rows == total_rows)):
                 try:
+                    _csv_control_checkpoint(conn, job_id)
                     progress_callback(rows, total_rows)
+                except ImportCancelled:
+                    raise
                 except Exception:
                     # Telemetry must never interrupt the import itself.
                     pass
+    _csv_control_checkpoint(conn, job_id)
     return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
