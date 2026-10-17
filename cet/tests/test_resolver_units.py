@@ -50,3 +50,35 @@ def test_infer_city_from_name_does_not_match_short_substrings():
     from backend.admin.resolver import infer_city_from_name
     assert infer_city_from_name("Mumbaiwala Institute", ["Mumbai"]) is None
     assert infer_city_from_name("Vidarbha College", ["Nagpur", "Vidarbha"]) is None
+
+
+def test_import_name_recovery_uses_real_staged_names_not_codes():
+    import json
+    from backend.admin.resolver import _import_names_for_codes
+
+    class FakeResult:
+        def fetchall(self):
+            return [
+                {"normalized_json": json.dumps({"institution_code": "1234", "institution_name": "Example Institute of Technology"})},
+                {"normalized_json": json.dumps({"institution_code": "5678", "institution_name": "5678"})},
+            ]
+
+    class FakeConnection:
+        def execute(self, query, params):
+            assert "import_staging_records" in query
+            assert params == ("1234", "5678")
+            return FakeResult()
+
+    assert _import_names_for_codes(FakeConnection(), ["1234", "5678"]) == {
+        "1234": "Example Institute of Technology"
+    }
+
+
+def test_import_name_recovery_skips_query_when_no_codes():
+    from backend.admin.resolver import _import_names_for_codes
+
+    class FakeConnection:
+        def execute(self, *args):
+            raise AssertionError("Should not query without missing names")
+
+    assert _import_names_for_codes(FakeConnection(), []) == {}

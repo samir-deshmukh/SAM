@@ -644,6 +644,42 @@ def resolve_import_job(job_id=None, limit=None):
     }
 
 
+def _import_names_for_codes(conn, codes):
+    """Recover real institution names from retained import staging records.
+
+    Only query codes whose institute name is missing or is just the code. The
+    staging payload is the original CAP-import evidence; never treat the code
+    itself as a valid display name when a better source exists.
+    """
+    codes = sorted({str(code).strip() for code in codes if str(code or '').strip()})
+    if not codes:
+        return {}
+    placeholders = ','.join('?' for _ in codes)
+    try:
+        rows = conn.execute(
+            "SELECT normalized_json FROM import_staging_records "
+            "WHERE result_type IN ('CUTOFFS','SEATS') "
+            "AND normalized_json IS NOT NULL "
+            f"AND (normalized_json::jsonb ->> 'institution_code') IN ({placeholders}) "
+            "ORDER BY id DESC",
+            tuple(codes),
+        ).fetchall()
+    except Exception:
+        log.exception('Could not recover institution names from import staging')
+        return {}
+    found = {}
+    for row in rows:
+        try:
+            data = json.loads(row.get('normalized_json') or '{}')
+        except Exception:
+            continue
+        code = str(data.get('institution_code') or '').strip()
+        name = str(data.get('institution_name') or '').strip()
+        if code in codes and name and name != code and code not in found:
+            found[code] = name
+    return found
+
+
 def sync_institutes_to_resolver(conn):
     """Synchronize resolver only from institutes still backed by production data.
 
@@ -686,6 +722,14 @@ def sync_institutes_to_resolver(conn):
         log.info('Resolver scope returned %s production-backed rows', len(rows))
     count = 0
     known_cities = _known_city_names(conn)
+    placeholder_codes = [
+        str(r['institution_code']).strip() for r in rows
+        if str(r['institution_code'] or '').strip()
+        and (not str(r['institution_name'] or '').strip()
+             or str(r['institution_name'] or '').strip() == str(r['institution_code']).strip())
+        and not str(refs.get(str(r['institution_code']).strip(), {}).get('institution_name') or '').strip()
+    ]
+    staged_names = _import_names_for_codes(conn, placeholder_codes)
     for r in rows:
         code = str(r['institution_code']).strip()
         if not code:
@@ -695,7 +739,10 @@ def sync_institutes_to_resolver(conn):
         db_name = str(r['institution_name'] or '').strip()
         # Imports can temporarily store only the CAP choice code as the name.
         # Prefer the maintained reference name when it is available.
-        name = ref_name if ref_name and (not db_name or db_name == code) else (db_name or ref_name or code)
+        staged_name = staged_names.get(code, '')
+        name = (ref_name if ref_name and (not db_name or db_name == code)
+                else staged_name if (not db_name or db_name == code) and staged_name
+                else db_name or ref_name or staged_name or code)
         # Repair a missing derived institute row from production-backed scope.
         conn.execute(
             "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
@@ -713,7 +760,7 @@ def sync_institutes_to_resolver(conn):
         source = 'institutes' if r['website'] else ('reference_csv' if website else None)
         # Keep the public institute metadata aligned with the same maintained
         # reference source used by the resolver, without overwriting admin data.
-        if ref_name or city or website:
+        if (ref_name or (name and name != code) or city or website):
             conn.execute(
                 "UPDATE institutes SET "
                 "institution_name=CASE WHEN (institution_name IS NULL OR institution_name=?) AND ? IS NOT NULL THEN ? ELSE institution_name END,"
@@ -722,7 +769,7 @@ def sync_institutes_to_resolver(conn):
                 "website_source=CASE WHEN website IS NULL AND ? IS NOT NULL THEN 'reference_csv' ELSE website_source END,"
                 "verified_at=CASE WHEN (? IS NOT NULL OR ? IS NOT NULL) THEN COALESCE(verified_at,CURRENT_TIMESTAMP) ELSE verified_at END "
                 "WHERE institution_code=?",
-                (code, ref_name or None, ref_name or None, city, website,
+                (code, (name if name != code else None), (name if name != code else None), city, website,
                  city, city_source, website, city, website, code),
             )
         existing = conn.execute(

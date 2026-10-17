@@ -2311,7 +2311,14 @@ def resolver_page_route(request: Request):
                       COALESCE(r.city,i.city) AS city,
                       COALESCE(r.website,i.website) AS website,
                       COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source) AS source,
+                      COALESCE(r.source,i.website_source,
+                        (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
+                         WHERE c.institution_code=i.institution_code
+                         ORDER BY c.year DESC, c.id DESC LIMIT 1),
+                        (SELECT 'Seat matrix: ' || s.source_pdf FROM seats s
+                         WHERE s.institution_code=i.institution_code
+                         ORDER BY s.capture_year DESC, s.id DESC LIMIT 1),
+                        'CAP data (source file unavailable)') AS source,
                       COALESCE(r.source_url,i.website) AS source_url,
                       r.address, r.city_source, r.website_source, r.address_source,
                       r.verification_note, r.last_checked_at, r.updated_at
@@ -2335,7 +2342,14 @@ def resolver_api(request: Request):
                       COALESCE(r.city,i.city) AS city,
                       COALESCE(r.website,i.website) AS website,
                       COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source) AS source,
+                      COALESCE(r.source,i.website_source,
+                        (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
+                         WHERE c.institution_code=i.institution_code
+                         ORDER BY c.year DESC, c.id DESC LIMIT 1),
+                        (SELECT 'Seat matrix: ' || s.source_pdf FROM seats s
+                         WHERE s.institution_code=i.institution_code
+                         ORDER BY s.capture_year DESC, s.id DESC LIMIT 1),
+                        'CAP data (source file unavailable)') AS source,
                       COALESCE(r.source_url,i.website) AS source_url,
                       r.address, r.city_source, r.website_source, r.address_source,
                       r.verification_note, r.last_checked_at, r.updated_at
