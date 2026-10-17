@@ -141,6 +141,22 @@ html,body,.main,.content{background:#F3F1EC!important;color:#383832!important}
 .modalback{background:rgba(49,47,40,.30)!important}
 .admin-tab-lock-card button{background:#777D6B!important;color:#FFFFFF!important}
 
+
+/* Statuses are plain text, not badges: remove pill shape, fill, border and status dot. */
+.status{
+  display:inline;
+  padding:0!important;
+  border:0!important;
+  border-radius:0!important;
+  background:transparent!important;
+  box-shadow:none!important;
+  font-size:11px!important;
+  font-weight:600!important;
+  line-height:inherit;
+  white-space:nowrap;
+}
+.status:before{display:none!important;content:none!important}
+
 '''
 
 
