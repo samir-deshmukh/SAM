@@ -2203,7 +2203,12 @@ async function loadRealCollegeData() {
       .filter(v => v && v.toLowerCase() !== "select course"))];
 
     CONFIG.cityOptions = cities.map(v => ({ value: v, label: v }));
-    CONFIG.courseOptions = courses.map(v => ({ value: v, label: v }));
+    // BE and BTech are alternate labels for the same engineering course family here.
+    // Keep the API value unchanged so existing filters and endpoints continue to work.
+    CONFIG.courseOptions = courses.map(v => ({
+      value: v,
+      label: v === "BE" ? "BE / BTech" : v
+    }));
 
     populateSelects();
     renderResults();
