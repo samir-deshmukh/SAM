@@ -344,6 +344,19 @@ html,body{color:#000000!important}
 .skeleton:after{background:linear-gradient(90deg,transparent,rgba(0,0,0,.06),transparent)!important}
 .modalback{background:rgba(0,0,0,.35)!important}
 
+
+/* Final shadow tuning: white-led UI with only subtle neutral black depth. */
+:root{--shadow:0 3px 10px rgba(0,0,0,.035)}
+.card,.panel,.modal,.admin-tab-lock-card{
+  box-shadow:0 3px 10px rgba(0,0,0,.035)!important;
+}
+.card:hover{
+  box-shadow:0 5px 14px rgba(0,0,0,.055)!important;
+}
+.top{
+  box-shadow:0 2px 7px rgba(0,0,0,.025)!important;
+}
+
 '''
 
 
