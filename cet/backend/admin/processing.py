@@ -897,7 +897,7 @@ def _insert_seat_course_metadata(conn, raw, job, source_pdf):
     page = int(page) if str(page or "").isdigit() else None
     conn.execute("""INSERT INTO seat_matrix_courses
         (capture_year,program_family,institution_code,choice_code,source_pdf,source_page,source_job_id,course_metadata)
-        VALUES (?,?,?,?,?,?,?,?::jsonb)
+        VALUES (?,?,?,?,?,?,?,CAST(? AS jsonb))
         ON CONFLICT(capture_year,program_family,institution_code,choice_code) DO NOTHING""",
         (int(job["year"]), job["course_family"], institution, choice,
          metadata_pdf, page, int(job["id"]), json.dumps(metadata, ensure_ascii=False)))
