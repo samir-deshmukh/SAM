@@ -181,6 +181,12 @@ def connect():
 
 def init_admin_schema():
     with connect() as c:
+        # Migrate this column before running PUBLIC_SCHEMA: on an existing
+        # database CREATE TABLE IF NOT EXISTS does not add new columns, while
+        # the schema's index declaration references program_code immediately.
+        # ALTER TABLE IF EXISTS also safely no-ops on a fresh database where
+        # the cutoffs table has not been created yet.
+        c.execute("ALTER TABLE IF EXISTS cutoffs ADD COLUMN IF NOT EXISTS program_code TEXT")
         # Both public fact tables and admin workflow tables live in the same
         # PostgreSQL database. This prevents an approved import from landing
         # in one store while the public API reads another.
