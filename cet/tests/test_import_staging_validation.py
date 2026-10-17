@@ -11,8 +11,16 @@ class FakeConnection:
     def execute(self, query, values):
         if "INSERT INTO import_staging_records" in query:
             self.rows.append(values)
-        else:
-            raise AssertionError(f"Unexpected SQL in test: {query}")
+            return None
+        if "SELECT status FROM import_jobs" in query:
+            class Result:
+                @staticmethod
+                def fetchone():
+                    return {"status": "STAGING"}
+            return Result()
+        if "UPDATE import_jobs SET status" in query:
+            return None
+        raise AssertionError(f"Unexpected SQL in test: {query}")
 
 
 def test_file_validation_failure_does_not_mark_every_cutoff_row_as_row_error(tmp_path):
