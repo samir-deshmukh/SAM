@@ -18,6 +18,61 @@ body,.side,.top,.content,.card,.panel,.modal,.admin-tab-lock,.admin-tab-lock-car
 .search,.ki,.si,.hi,.secondary,.dangerbtn,.gray,.blue,.purple,.red,.rose,.mint,.sky,.lav,.green,.success,.amber,.table th,.table tbody tr:hover,.processbtn:hover,.trashbtn:hover,.close{background:#FFFBF4!important;color:#11120D!important}
 .ki,.si,.hi,.secondary,.dangerbtn,.gray,.blue,.purple,.red,.rose,.mint,.sky,.lav,.green,.success,.amber{border:1px solid #D8CFBC}
 .nav a.active{background:#D8CFBC!important;color:#11120D!important}
+
+/* Premium monochrome admin theme */
+:root{
+  --bg:#F4F4F4;--panel:#FFFFFF;--ink:#111111;--muted:#5F5F5F;
+  --line:#DEDEDE;--red:#050505;--blue:#111111;--green:#111111;
+  --amber:#BDBDBD;--purple:#111111;--shadow:0 8px 28px rgba(0,0,0,.055)
+}
+html,body,.main,.content{background:#F4F4F4!important;color:#111111!important}
+.side{background:#080808!important;border-right:1px solid #252525!important;color:#FFFFFF!important}
+.brand b,.brand span,.brand .mark,.sidefoot,.online{color:#FFFFFF!important}
+.brand span,.sidefoot{opacity:.72}
+.nav a{color:#C9C9C9!important;background:transparent!important;border:1px solid transparent}
+.nav a:hover{background:#1B1B1B!important;color:#FFFFFF!important;border-color:#303030;transform:translateX(2px)}
+.nav a.active{background:#FFFFFF!important;color:#080808!important;border-color:#FFFFFF;font-weight:800}
+.top{background:rgba(255,255,255,.96)!important;border-bottom:1px solid #DEDEDE!important;box-shadow:0 3px 16px rgba(0,0,0,.035)!important}
+.search{background:#F6F6F6!important;border:1px solid #E0E0E0!important;color:#555!important}
+.avatar{background:#080808!important;color:#FFFFFF!important}
+.card,.panel,.modal,.admin-tab-lock-card{background:#FFFFFF!important;border:1px solid #E1E1E1!important;box-shadow:0 7px 24px rgba(0,0,0,.045)!important}
+.card:hover{box-shadow:0 12px 30px rgba(0,0,0,.075)!important}
+.title h1,.title p,.khead,.stage b,.stage small,.table td,.metric .label,.metric .value,.muted,.small,.event p,.sidefoot{color:inherit}
+.title p,.muted,.metric .label,.stage small,.event p{color:#666666!important}
+.live,.online,.healthy,.danger,.warning{color:#222222!important}
+.dot{background:#111111!important;box-shadow:0 0 0 4px rgba(0,0,0,.07)!important}
+.ki,.si,.hi{background:#F0F0F0!important;color:#111111!important}
+.stage.done .si,.stage.warn .si,.stage.review .si,.stage.publish .si{background:#E8E8E8!important;color:#111111!important}
+.stage.active .si{background:#111111!important;color:#FFFFFF!important;box-shadow:0 0 0 5px rgba(0,0,0,.09)!important}
+.table th{background:#F0F0F0!important;color:#111111!important;border-bottom:1px solid #DCDCDC}
+.table td{color:#222222!important;border-color:#E7E7E7!important}
+.table tbody tr:hover{background:#F7F7F7!important}
+.status{background:#EFEFEF!important;color:#222222!important}
+.primary,.toast,.toast.ok,.toast.err{background:#080808!important;color:#FFFFFF!important;box-shadow:0 4px 12px rgba(0,0,0,.13)!important}
+.secondary,.dangerbtn,.success,.red,.green,.blue,.purple,.amber,.gray{background:#EEEEEE!important;color:#111111!important}
+.btn.ghost,.ghost{background:#FFFFFF!important;color:#111111!important;border:1px solid #D5D5D5!important}
+.btn.success{background:#111111!important;color:#FFFFFF!important}
+.btn.dangerbtn{background:#F0F0F0!important;color:#111111!important;border:1px solid #D8D8D8}
+.input,.select,textarea{background:#FFFFFF!important;color:#111111!important;border:1px solid #D8D8D8!important}
+.input:focus,.select:focus,textarea:focus{border-color:#111111!important;box-shadow:0 0 0 3px rgba(0,0,0,.08)!important}
+.processbtn,.iconbtn,.trashbtn{background:#FFFFFF!important;color:#111111!important;border:1px solid #D8D8D8!important}
+.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close{background:#111111!important;color:#FFFFFF!important;border-color:#111111!important}
+.pdfspin,.activityspin{border-color:#D6D6D6!important;border-top-color:#111111!important;border-right-color:#111111!important}
+.commit-track{background:#E8E8E8!important}.commit-bar{background:#111111!important}
+.bars{border-color:#E1E1E1!important}.bar{background:#D2D2D2!important}.bar.g{background:#111111!important}
+.notice{background:#F7F7F7!important;border-color:#DDDDDD!important;color:#222222!important}
+.issue{background:#F5F5F5!important;border-left-color:#777777!important;color:#222222!important}
+.skeleton{background:#EAEAEA!important}
+.modalback{background:rgba(0,0,0,.58)!important;backdrop-filter:blur(5px)}
+.modalhead,.modalfoot{border-color:#E5E5E5!important}
+.close{background:#F0F0F0!important;color:#111111!important}
+.timeline .event:before{background:#E0E0E0!important}.eventdot{background:#DADADA!important;border-color:#FFFFFF!important;box-shadow:0 0 0 1px #DADADA!important}
+.event.active .eventdot{background:#111111!important;box-shadow:0 0 0 5px rgba(0,0,0,.08)!important}
+.admin-tab-lock{background:#F4F4F4!important}
+.admin-tab-lock-card button{background:#080808!important;color:#FFFFFF!important}
+pre.json{background:#111111!important;color:#F1F1F1!important}
+@media(max-width:720px){.side{display:none!important}}
+
 '''
 
 
