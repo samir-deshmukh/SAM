@@ -686,11 +686,33 @@ def revalidate_legacy_mh_staging(conn, job_id: int, actor_user_id: int):
     return {"ok": True, "job_id": job_id, "rows_revalidated": len(repaired_ids),
             "status": JobStatus.REVIEW_REQUIRED.value, "production_committed": False}
 
-def _insert_cutoff_from_json(conn, raw, job, source_pdf):
+@lru_cache(maxsize=1)
+def _cutoff_program_levels():
+    """Read program aliases once; never rebuild a pandas DataFrame per row."""
+    path = BASE / "data" / "reference" / "program_aliases.csv"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return {
+            str(row.get("raw_name", "")).strip(): str(row.get("level", "")).strip()
+            for row in csv.DictReader(handle)
+        }
+
+
+@lru_cache(maxsize=1)
+def _seat_import_whitelists():
+    from scripts.validate_seats import load_whitelists
+    return load_whitelists(BASE / "data" / "reference")
+
+
+def _insert_cutoff_from_json(conn, raw, job, source_pdf, reference_cache=None):
     import sys
     sys.path.insert(0, str(SCRIPTS))
     from validate_data import parse_filename
     family = job["course_family"]
+    reference_cache = reference_cache if reference_cache is not None else {
+        "institutes": set(), "base_categories": set(), "sections": set(), "stages": set(), "program_ids": {}
+    }
     program_name = str(raw.get("program_name","")).strip()
     inst = str(raw.get("institution_code","")).strip()
     if not program_name or not inst:
@@ -701,30 +723,35 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
     rank_number = int(rank) if rank.isdigit() else None
     suffix = str(raw.get("rank_suffix","")).strip() or None
 
-    level_map = {}
-    alias_file = BASE/"data"/"reference"/"program_aliases.csv"
-    if alias_file.exists():
-        import pandas as pd
-        df=pd.read_csv(alias_file,dtype=str,keep_default_na=False)
-        level_map=dict(zip(df["raw_name"].str.strip(),df["level"].str.strip()))
-    level=level_map.get(program_name)
+    level = _cutoff_program_levels().get(program_name)
     # A PDF can legitimately contain an institute that is not yet present in
     # the reference table. The PDF is the authoritative source for its code
     # and name at import time; upsert that reference row before the fact row
     # so PostgreSQL's FK remains enforced without requiring a manual seed run.
-    conn.execute("""INSERT INTO institutes(institution_code,institution_name)
-        VALUES(?,?) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name""",
-        (inst, str(raw.get("institution_name","")).strip() or inst))
-    conn.execute("INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING", (base,))
-    conn.execute("INSERT INTO sections(section_code,section_full) VALUES(?,?) ON CONFLICT(section_code) DO NOTHING",
-                 (section, section))
-    conn.execute("INSERT INTO stages(stage_code) VALUES(?) ON CONFLICT(stage_code) DO NOTHING", (stage,))
-    conn.execute("INSERT INTO programs(program_family,program_name_raw,level) VALUES(?,?,?) ON CONFLICT(program_family,program_name_raw) DO NOTHING",
-                 (family,program_name,level))
-    prog=conn.execute("SELECT program_id FROM programs WHERE program_family=? AND program_name_raw=?",
-                      (family,program_name)).fetchone()
-    if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
-    pid=prog["program_id"]
+    if inst not in reference_cache["institutes"]:
+        conn.execute("""INSERT INTO institutes(institution_code,institution_name)
+            VALUES(?,?) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name""",
+            (inst, str(raw.get("institution_name","")).strip() or inst))
+        reference_cache["institutes"].add(inst)
+    if base not in reference_cache["base_categories"]:
+        conn.execute("INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING", (base,))
+        reference_cache["base_categories"].add(base)
+    if section not in reference_cache["sections"]:
+        conn.execute("INSERT INTO sections(section_code,section_full) VALUES(?,?) ON CONFLICT(section_code) DO NOTHING",
+                     (section, section))
+        reference_cache["sections"].add(section)
+    if stage not in reference_cache["stages"]:
+        conn.execute("INSERT INTO stages(stage_code) VALUES(?) ON CONFLICT(stage_code) DO NOTHING", (stage,))
+        reference_cache["stages"].add(stage)
+    program_key = (family, program_name)
+    if program_key not in reference_cache["program_ids"]:
+        conn.execute("INSERT INTO programs(program_family,program_name_raw,level) VALUES(?,?,?) ON CONFLICT(program_family,program_name_raw) DO NOTHING",
+                     (family,program_name,level))
+        prog=conn.execute("SELECT program_id FROM programs WHERE program_family=? AND program_name_raw=?",
+                          (family,program_name)).fetchone()
+        if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
+        reference_cache["program_ids"][program_key] = prog["program_id"]
+    pid=reference_cache["program_ids"][program_key]
     program_code=str(raw.get("program_code", "")).strip() or None
     vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,program_code,base,bool(ladies),
           section,stage,None,rank_number,suffix,pct,str(raw.get("category","")).strip(),
@@ -744,10 +771,13 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
     return None, None
 
 
-def _insert_seat_from_json(conn, raw, job, source_pdf):
+def _insert_seat_from_json(conn, raw, job, source_pdf, reference_cache=None):
     from scripts.ingest_seats import canonical_institution_code
-    from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
-    valid_cats, lane_map, alias_map = load_whitelists(BASE/"data"/"reference")
+    from scripts.validate_seats import normalize_category, TOTAL_MARKER
+    reference_cache = reference_cache if reference_cache is not None else {
+        "institutes": set(), "base_categories": set(), "allocation_lanes": set()
+    }
+    valid_cats, lane_map, alias_map = _seat_import_whitelists()
     inst=canonical_institution_code(str(raw.get("institution_code","")),str(raw.get("choice_code","")))
     lane_raw=str(raw.get("allocation_type","")).strip()
     lane=lane_map.get(lane_raw)
@@ -756,10 +786,12 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     # but the admin import path writes directly to the production connection.
     # Ensure the referenced lane exists here as well so a fresh Render database
     # cannot reject an otherwise validated seat row with a foreign-key error.
-    conn.execute(
-        "INSERT INTO allocation_lanes(lane_code,lane_full) VALUES(?,?) ON CONFLICT(lane_code) DO NOTHING",
-        (lane, lane_raw),
-    )
+    if lane not in reference_cache["allocation_lanes"]:
+        conn.execute(
+            "INSERT INTO allocation_lanes(lane_code,lane_full) VALUES(?,?) ON CONFLICT(lane_code) DO NOTHING",
+            (lane, lane_raw),
+        )
+        reference_cache["allocation_lanes"].add(lane)
     cat=str(raw.get("category","")).strip()
     total=cat==TOTAL_MARKER
     base=None if total else normalize_category(cat,alias_map)
@@ -768,16 +800,19 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     # Seat imports use the same PostgreSQL FK graph as cutoff imports.
     # The standalone seat ingester seeds these reference rows, but the admin
     # approval path writes directly to production and must do the same.
-    conn.execute(
-        "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
-        "ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name",
-        (inst, str(raw.get("institution_name","")).strip() or inst),
-    )
-    if base is not None:
+    if inst not in reference_cache["institutes"]:
+        conn.execute(
+            "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
+            "ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name",
+            (inst, str(raw.get("institution_name","")).strip() or inst),
+        )
+        reference_cache["institutes"].add(inst)
+    if base is not None and base not in reference_cache["base_categories"]:
         conn.execute(
             "INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING",
             (base,),
         )
+        reference_cache["base_categories"].add(base)
     gender=str(raw.get("gender","")).strip()
     is_ladies={"G":False,"L":True}.get(gender) if gender else None
     source_row = int(raw["source_row"]) if str(raw.get("source_row", "")).isdigit() else None
@@ -877,15 +912,18 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         progress_interval = max(25, total_rows // 100) if total_rows else 1
         processed_rows = 0
         seat_metadata_written = set()
+        reference_cache = ({"institutes": set(), "base_categories": set(), "sections": set(), "stages": set(), "program_ids": {}}
+                           if dtype == "CUTOFFS" else
+                           {"institutes": set(), "base_categories": set(), "allocation_lanes": set()})
         _write_commit_progress(job_id, "RUNNING", "Writing production records", 0, total_rows,
                                f"Writing 0 of {total_rows:,} staged records")
         for r in staged_rows:
             raw=json.loads(r["normalized_json"])
             if dtype=="CUTOFFS":
-                rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf)
+                rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf,reference_cache)
                 table="cutoffs"
             else:
-                rid, after=_insert_seat_from_json(conn,raw,job,source_pdf)
+                rid, after=_insert_seat_from_json(conn,raw,job,source_pdf,reference_cache)
                 table="seats"
                 metadata = raw.get("course_metadata")
                 if metadata:
