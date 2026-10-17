@@ -2374,15 +2374,14 @@ def resolver_next(request: Request):
     busy, reason = _resolver_server_busy()
     if busy:
         with connect() as c:
-            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW')").fetchone()['n']
+            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE')").fetchone()['n']
         return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(pending)}
     try:
         with connect() as c:
             current = c.execute(
                 "SELECT institution_code,institution_name,status FROM college_website_resolver "
-                "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW') "
-                "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
-                "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name) LIMIT 1"
+                "WHERE status IN ('PENDING','CANDIDATE') "
+                "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name) LIMIT 1"
             ).fetchone()
         result = resolve_import_job(None, limit=1)
         return {'ok': True, 'busy': False,
@@ -2441,7 +2440,7 @@ async def resolver_find(request: Request):
                     })
                     continue
             try:
-                ai, _ = gemini_find(r['institution_name'], r.get('city'), excluded_website if force_research else None)
+                ai, _ = gemini_find(r['institution_name'], r.get('city'), excluded_website if force_research else None, institution_code=code)
                 url = ai.get('official_url')
                 city = str(ai.get('city')).strip() if ai.get('city') else r.get('city')
                 address = str(ai.get('address')).strip() if ai.get('address') else None
@@ -2462,7 +2461,7 @@ async def resolver_find(request: Request):
                 verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
                     not ai_url or _same_site(v.get('url'), ai_url)
                 )
-                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if v.get('ok') else 'FAILED')
+                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') in (408, 425, 429) or (v.get('status') and v.get('status') >= 500) or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
                 note = ' '.join(x for x in (
                     (ai.get('note') or ''),
                     (ai_check.get('note') or ''),

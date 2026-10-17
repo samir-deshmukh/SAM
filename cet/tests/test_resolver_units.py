@@ -36,3 +36,17 @@ def test_verify_url_rejects_private_dns_result(monkeypatch):
     result = verify_url("https://example.edu", "Example College")
     assert result["ok"] is False
     assert "non-public" in result["note"]
+
+
+def test_infer_city_from_name_uses_whole_phrase_and_longest_match():
+    from backend.admin.resolver import infer_city_from_name
+    cities = ["Pune", "Navi Mumbai", "Mumbai", "Nashik"]
+    assert infer_city_from_name("Navi Mumbai Institute of Technology", cities) == "Navi Mumbai"
+    assert infer_city_from_name("College of Engineering, Pune", cities) == "Pune"
+    assert infer_city_from_name("Institute of Technology", cities) is None
+
+
+def test_infer_city_from_name_does_not_match_short_substrings():
+    from backend.admin.resolver import infer_city_from_name
+    assert infer_city_from_name("Mumbaiwala Institute", ["Mumbai"]) is None
+    assert infer_city_from_name("Vidarbha College", ["Nagpur", "Vidarbha"]) is None
