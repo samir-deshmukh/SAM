@@ -2307,11 +2307,11 @@ def resolver_page_route(request: Request):
         c.commit()
         rows=[dict(r) for r in c.execute(
             """SELECT i.institution_code,
-                      COALESCE(r.institution_name,i.institution_name) AS institution_name,
+                      COALESCE(NULLIF(r.institution_name,''),NULLIF(i.institution_name,'')) AS institution_name,
                       COALESCE(r.city,i.city) AS city,
                       COALESCE(r.website,i.website) AS website,
                       COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source,
+                      COALESCE(NULLIF(r.source,''),NULLIF(i.website_source,''),
                         (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
                          WHERE c.institution_code=i.institution_code
                          ORDER BY c.year DESC, c.id DESC LIMIT 1),
@@ -2338,11 +2338,11 @@ def resolver_api(request: Request):
         c.commit()
         return [dict(r) for r in c.execute(
             """SELECT i.institution_code,
-                      COALESCE(r.institution_name,i.institution_name) AS institution_name,
+                      COALESCE(NULLIF(r.institution_name,''),NULLIF(i.institution_name,'')) AS institution_name,
                       COALESCE(r.city,i.city) AS city,
                       COALESCE(r.website,i.website) AS website,
                       COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source,
+                      COALESCE(NULLIF(r.source,''),NULLIF(i.website_source,''),
                         (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
                          WHERE c.institution_code=i.institution_code
                          ORDER BY c.year DESC, c.id DESC LIMIT 1),
