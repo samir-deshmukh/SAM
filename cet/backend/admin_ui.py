@@ -157,6 +157,39 @@ html,body,.main,.content{background:#F3F1EC!important;color:#383832!important}
 }
 .status:before{display:none!important;content:none!important}
 
+
+/* Complete admin panel: bright white surfaces, restrained grey borders, soft downward shadows. */
+:root{--bg:#FFFFFF;--panel:#FFFFFF;--ink:#171717;--muted:#666666;--line:#E7E7E7;--red:#171717;--blue:#171717;--green:#171717;--amber:#EEEEEE;--purple:#171717;--shadow:0 10px 26px rgba(0,0,0,.06)}
+html,body,.main,.content,.side,.top,.card,.panel,.modal,.modalhead,.modalbody,.modalfoot,.admin-tab-lock,.admin-tab-lock-card,.notice,.issue,.search,.input,.select,textarea,.table th,.table td,.metric,.kpi,.toolbar,.filters,.health,.hr,.event,.runtime-metrics,.extraction-mini,.commit-progress,.pagegrid,.layout,.sidepanel,.tablewrap{background-color:#FFFFFF!important;color:#171717!important}
+.side{border-right:1px solid #E7E7E7!important}
+.top{border-bottom:1px solid #E7E7E7!important;box-shadow:0 3px 14px rgba(0,0,0,.035)!important}
+.brand b,.brand span,.brand .mark,.sidefoot,.online{color:#171717!important;opacity:1}
+.nav a{color:#333333!important;background:#FFFFFF!important;border-color:transparent!important}
+.nav a:hover,.nav a.active{background:#F2F2F2!important;color:#111111!important;border-color:#E5E5E5!important}
+.card,.panel,.modal,.admin-tab-lock-card{border:1px solid #E7E7E7!important;box-shadow:0 9px 24px rgba(0,0,0,.06)!important}
+.card:hover{box-shadow:0 13px 28px rgba(0,0,0,.075)!important}
+.title h1,.title p,.khead,.stage b,.stage small,.table td,.table th,.metric .label,.metric .value,.muted,.small,.event p,.live,.healthy,.danger,.warning{color:#171717!important}
+.title p,.muted,.metric .label,.stage small,.event p,.sidefoot{color:#666666!important}
+.search,.input,.select,textarea{border:1px solid #E2E2E2!important;box-shadow:none}
+.input:focus,.select:focus,textarea:focus{border-color:#AFAFAF!important;box-shadow:0 0 0 3px rgba(0,0,0,.045)!important}
+.table th{background:#F8F8F8!important;border-bottom:1px solid #E7E7E7!important}
+.table td{border-color:#EEEEEE!important}
+.table tbody tr:hover{background:#FAFAFA!important}
+.ki,.si,.hi,.stage.done .si,.stage.warn .si,.stage.review .si,.stage.publish .si{background:#F5F5F5!important;color:#222222!important;border:1px solid #EAEAEA}
+.stage.active .si{background:#222222!important;color:#FFFFFF!important;box-shadow:0 4px 10px rgba(0,0,0,.12)!important}
+.primary,.btn.primary,.toast,.toast.ok,.toast.err{background:#171717!important;color:#FFFFFF!important;border-color:#171717!important}
+.secondary,.success,.dangerbtn,.btn.ghost,.ghost,.processbtn,.iconbtn,.trashbtn,.close{background:#FFFFFF!important;color:#171717!important;border:1px solid #E0E0E0!important}
+.secondary:hover,.success:hover,.dangerbtn:hover,.ghost:hover,.processbtn:hover,.iconbtn:hover,.trashbtn:hover,.close:hover{background:#F5F5F5!important}
+.status{display:inline!important;padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:#222222!important;font-size:11px!important;font-weight:600!important}
+.status:before{display:none!important;content:none!important}
+.red,.green,.blue,.purple,.amber,.gray{background:transparent!important;color:#222222!important}
+.notice,.issue{border:1px solid #E8E8E8!important;border-radius:8px}
+.commit-track{background:#EEEEEE!important}
+.commit-bar{background:#222222!important}
+.skeleton{background:#EEEEEE!important}
+.modalback{background:rgba(0,0,0,.28)!important}
+pre.json{background:#F7F7F7!important;color:#222222!important;border:1px solid #E7E7E7}
+
 '''
 
 
