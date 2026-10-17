@@ -1714,7 +1714,8 @@ def runtime_metrics(request: Request):
     with connect() as connection:
         storage = connection.execute('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS bytes FROM import_jobs WHERE source_deleted=FALSE AND stored_path NOT LIKE ?',
                                      ('local://%',)).fetchone()
-        active = connection.execute("SELECT id,status,original_filename,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        latest_event = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (active['id'],)).fetchone() if active else None
         queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']
     job_progress = None
     if active:
@@ -1739,6 +1740,9 @@ def runtime_metrics(request: Request):
         pause_requested = (control / 'PAUSE').exists()
         job_progress = {
             'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
+            'data_type': active['data_type'] or 'CUTOFFS',
+            'event_progress': latest_event['progress'] if latest_event else None,
+            'event_message': latest_event['message'] if latest_event else '',
             'page': current_page, 'total_pages': total_pages,
             'percent': round(min(100, current_page / total_pages * 100), 1) if total_pages else 0,
             'chunk_count': int(progress.get('chunk_count') or active.get('current_chunk') or completed_chunks),
