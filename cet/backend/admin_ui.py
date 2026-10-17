@@ -891,7 +891,7 @@ async function purge(id){if(!confirm('Permanently delete this rolled-back releas
 def derived_data() -> str:
     body='''<div class="title"><div><h1>CET Data Calculator</h1></div><div class="live"><span class="dot"></span>Admin controlled</div></div>
 <div class="pagegrid derived-grid"><div class="card panel derived-build-card"><div class="toolbar"><h2>Build derived data</h2><span class="muted small">No automatic rebuilds</span></div>
-<div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button></div>
+<div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button><button id="clearBuildBtn" class="btn" onclick="clearCalculatedData()">Clear calculated data</button></div><p class="small muted" style="margin-top:8px">Clearing removes stored graph, filter-option and seat-matrix cache rows for the selected course, or all courses if “All courses” is selected. Source cutoff and seat records are not deleted.</p>
 <div id="buildProgress" class="notice" style="margin-top:12px;display:none"><div style="display:flex;justify-content:space-between;gap:12px"><b id="progressTitle">Calculating…</b><span id="progressPct">0%</span></div><div style="height:4px;background:#D8CFBC;border-radius:99px;overflow:hidden;margin-top:6px"><div id="progressBar" style="height:100%;width:0%;background:#11120D;transition:width .35s"></div></div><div id="progressMessage" class="small muted" style="margin-top:7px">Waiting for server…</div></div>
 </div>
 <div class="card panel"><div class="toolbar"><h2>What gets calculated</h2></div><div class="timeline"><div class="event"><div class="eventdot"></div><div><h4>Trend / graph points</h4><p>Per college, program, category, quota, year and CAP round.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Category & quota options</h4><p>Only combinations actually present for that particular college are stored.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Seat matrix</h4><p>Latest available seat matrix is reduced to the rows the drawer needs.</p></div></div><div class="event"><div class="eventdot"></div><div><h4>Public requests</h4><p>Fast indexed reads only. No heavy aggregation happens when candidates open Slide 2.</p></div></div></div></div></div>
@@ -938,8 +938,18 @@ async function retryBuild(id,btn){
 }
 async function deleteBuild(id,btn){
   if(btn.disabled)return;
+  const job=jobs.find(x=>Number(x.id)===Number(id));
+  const scope=job&&job.course_family?job.course_family:'ALL courses';
+  if(!confirm('Delete build history and clear stored calculated data for '+scope+'? This removes graph, filter-option and seat-matrix cache rows, but keeps source cutoff/seat records.'))return;
   btn.disabled=true;
-  try{await api('/admin/api/derived-data/'+id,{method:'DELETE',headers:csrfHeaders()});toast('Build history deleted','ok');await load()}catch(e){btn.disabled=false;toast(e.message,'err')}
+  try{await api('/admin/api/derived-data/'+id,{method:'DELETE',headers:csrfHeaders()});toast('Build history and its calculated data deleted','ok');await load()}catch(e){btn.disabled=false;toast(e.message,'err')}
+}
+async function clearCalculatedData(){
+  const course=document.querySelector('#course').value;
+  const scope=course||'ALL courses';
+  if(!confirm('Permanently clear stored calculated data for '+scope+'? Public graphs/filter options/seat matrices for this scope will be unavailable until recalculated. Source cutoff and seat records will remain.'))return;
+  const btn=document.querySelector('#clearBuildBtn');if(btn.disabled)return;btn.disabled=true;
+  try{const form=new FormData();if(course)form.append('course',course);await api('/admin/api/derived-data/clear',{method:'POST',headers:csrfHeaders(),body:form});toast('Calculated data cleared for '+scope,'ok');await load()}catch(e){toast(e.message,'err')}finally{btn.disabled=false}
 }
 window.refreshAdminData=load;window.__cetAdminRunPoll(load);setInterval(()=>window.__cetAdminRunPoll(load),15000);
 </script>'''

@@ -786,21 +786,65 @@ def retry_derived_data_build(job_id: int, request: Request, background_tasks: Ba
     return JSONResponse(status_code=202, content={"ok": True, "job_id": new_id, "status": "QUEUED"})
 
 
+def _clear_derived_data_scope(connection, course: str | None) -> None:
+    tables = (
+        'cutoff_trend_points',
+        'cutoff_college_year_summary',
+        'cutoff_filter_options',
+        'seat_matrix_runtime',
+    )
+    if course:
+        for table in tables:
+            connection.execute(f"DELETE FROM {table} WHERE program_family=?", (course,))
+    else:
+        for table in tables:
+            connection.execute(f"DELETE FROM {table}")
+
+
 @app.delete('/admin/api/derived-data/{job_id}')
 def delete_derived_data_build(job_id: int, request: Request):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f"Derived data build #{active['id']} is running; wait until it finishes before deleting calculated data")
         job = connection.execute(
-            "SELECT id,status FROM derived_data_build_jobs WHERE id=?",
+            "SELECT id,status,course_family FROM derived_data_build_jobs WHERE id=?",
             (job_id,),
         ).fetchone()
         if not job:
             raise HTTPException(404, 'Build job not found')
         if str(job['status']).upper() in {'QUEUED', 'RUNNING'}:
             raise HTTPException(409, 'A running build cannot be deleted')
+        _clear_derived_data_scope(connection, str(job['course_family']) if job['course_family'] else None)
         connection.execute("DELETE FROM derived_data_build_jobs WHERE id=?", (job_id,))
         connection.commit()
-    return {"ok": True}
+    invalidate_public_caches()
+    return {"ok": True, "calculated_data_cleared": True}
+
+
+@app.post('/admin/api/derived-data/clear')
+def clear_derived_data(request: Request, course: str | None = Form(None)):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    course = (course or '').strip() or None
+    with connect() as connection:
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f"Derived data build #{active['id']} is running; wait until it finishes before clearing calculated data")
+        if course:
+            exists = connection.execute(
+                "SELECT 1 FROM programs WHERE program_family=? LIMIT 1", (course,)
+            ).fetchone()
+            if not exists:
+                raise HTTPException(400, f'Unknown course family: {course}')
+        _clear_derived_data_scope(connection, course)
+        connection.commit()
+    invalidate_public_caches()
+    return {"ok": True, "course": course or "ALL", "calculated_data_cleared": True}
 
 
 @app.get('/admin/api/derived-data/status')
