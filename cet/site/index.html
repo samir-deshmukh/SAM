@@ -1185,7 +1185,8 @@ body{letter-spacing:-.01em;}
   --paper-300:#DEDEDE; --paper-400:#D6D6D6; --paper-500:#BDBDBD;
   --paper-600:#666666; --paper-700:#444444; --paper-800:#262626;
 }
-html, body, .sketch-bg, .page-content { background:#F4F4F4; color:#262626; }
+html, body, .sketch-bg { background:#F4F4F4; color:#262626; }
+.page-content { background:transparent!important; color:#262626; }
 .sketch-bg::after { background-image:linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px); }
 .topbar, .hero-stat, .seo-directory-card, .search-card, .results-bar, .table-wrap,
 .results-table, .drawer, .drawer-head, .drawer-body, .d-section, .d-stat, .trend-card,
@@ -1235,10 +1236,10 @@ html, body, .sketch-bg, .page-content { background:#F4F4F4; color:#262626; }
 .tortoise-tr { opacity:.38; }
 .tortoise-bl { opacity:.40; }
 /* The site uses the semantic <footer> element, not a .footer class. */
-footer { background:#FFFFFF!important; color:#262626!important; border-top:1px solid #DEDEDE!important; }
-footer .footer-title, footer .footer-col h5, footer .footer-col p,
-footer .footer-inner, footer .footer-inner a { color:#262626!important; }
-footer .footer-grid { border-top-color:#DEDEDE!important; }
+footer { background:#111111!important; color:#FFFFFF!important; border-top:1px solid #333333!important; }
+footer .footer-title, footer .footer-title em, footer .footer-col h5, footer .footer-col p,
+footer .footer-inner, footer .footer-inner a { color:#FFFFFF!important; }
+footer .footer-grid { border-top-color:#444444!important; }
 .feedback-modal { background:rgba(0,0,0,.42)!important; }
 .feedback-message:focus, .field input:focus, .field select:focus, .ssel-btn:focus,
 .ssel-search input:focus { border-color:#888888!important; box-shadow:0 0 0 3px rgba(0,0,0,.06)!important; }
