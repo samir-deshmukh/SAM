@@ -787,42 +787,61 @@ async function load(){loadSiteUsage();try{const [o,j]=await Promise.all([api('/a
 def import_center() -> str:
     body="""<div class="title"><div><h1>Import Center</h1></div><div class="live"><span class="dot"></span>Server-side processing</div></div>
 <div class="grid4 runtime-metrics" style="margin-bottom:14px">
-  <div class="card metric upload-quick"><div class="label">Upload PDF</div><div class="small muted" style="margin-top:4px">Maximum 50 MiB per PDF · server-side processing</div><form id="uploadForm" style="margin-top:8px"><input id="file" type="file" accept="application/pdf,.pdf" multiple required style="display:block;margin:0 0 8px"><div id="selectedFiles" class="small muted" style="margin-bottom:8px">No PDFs selected.</div><button class="btn primary" id="uploadBtn">Upload</button><div id="uploadState" class="small muted" style="margin-top:6px"></div></form></div>
+  <div class="card metric upload-quick"><div class="label">Memory / extraction input</div><div class="small muted" style="margin-top:4px">One upload area for both PDF sources and pre-extracted CSVs. PDFs run through extraction; CSVs go straight to validation and staging.</div><form id="uploadForm" style="margin-top:8px"><input id="file" type="file" accept="application/pdf,.pdf,.csv,text/csv" multiple required style="display:block;margin:0 0 8px"><div id="selectedFiles" class="small muted" style="margin-bottom:8px">No files selected.</div><div id="uploadMetadata" class="small muted" style="margin-bottom:8px">Select PDF or canonical CSV files. Each file is routed by type.</div><button class="btn primary" id="uploadBtn">Upload and validate</button><div id="uploadState" class="small muted" style="margin-top:6px"></div></form><details style="margin-top:10px"><summary class="small">Canonical CSV requirements</summary><div class="small muted" style="margin-top:8px;overflow-wrap:anywhere">Cutoffs: source_pdf, page, institution_code, institution_name, program_code, program_name, status, home_university, section, stage, category, rank, rank_number, rank_suffix, percentage, percentage_raw, raw_value, source, merged_from.<br><br>Seats: source_pdf, page, institution_code, choice_code, allocation_type, category, gender, seats. CSV files must use this canonical schema.</div></details></div>
   <div class="card metric"><div class="label">Backend RAM</div><div class="value" id="ramValue">—</div><div class="small muted" id="ramDetail">Reading cgroup metrics</div></div>
   <div class="card metric"><div class="label">CPU usage</div><div class="value" id="cpuValue">—</div><div class="small muted" id="cpuDetail">Measured between polls</div></div>
  </div>
-<div class="card panel" id="csvImportCard" style="margin-top:14px"><div class="toolbar"><div><h2>Upload pre-extracted CSV</h2><div class="small muted">Process data extracted on your PC without running PDF extraction on Render.</div></div><span class="status blue">CSV</span></div><form id="csvUploadForm" style="margin-top:12px"><input type="hidden" name="data_type" id="csvAutoType"><input type="hidden" name="course_family" id="csvAutoFamily"><input type="hidden" name="year" id="csvAutoYear"><input type="hidden" name="round_name" id="csvAutoRound"><div class="small muted" id="csvAutoMetadata" style="margin:8px 0 12px">Choose a canonical CSV. CAPFind will infer data type, course, year, and round from its columns and source PDF filename.</div><div style="margin-top:12px"><input id="csvFile" name="file" type="file" accept=".csv,text/csv" required style="display:block;margin-bottom:8px"><div class="small muted">Maximum 100 MiB. Upload the canonical CETFind CSV exported by the local extraction/normalization script; arbitrary spreadsheet columns are not automatically mapped.</div></div><button class="btn primary" id="csvUploadBtn" type="submit" style="margin-top:10px">Validate and stage CSV</button><div id="csvUploadState" class="small muted" style="margin-top:8px"></div></form><details style="margin-top:12px"><summary class="small">Required CSV columns</summary><div class="small muted" style="margin-top:8px;overflow-wrap:anywhere">Cutoffs: source_pdf, page, institution_code, institution_name, program_code, program_name, status, home_university, section, stage, category, rank, rank_number, rank_suffix, percentage, percentage_raw, raw_value, source, merged_from.<br><br>Seats: source_pdf, page, institution_code, choice_code, allocation_type, category, gender, seats.</div></details></div>
 <div class="card panel" id="liveExtractionCard" style="margin-top:14px"><div class="toolbar"><h2>Live extraction progress</h2><span class="small muted" id="liveExtractionState">Checking worker…</span></div><div id="liveExtractionEmpty" class="small muted">Waiting for an active extraction.</div><div id="liveExtractionDetails" style="display:none"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap"><div style="min-width:0;flex:1"><b id="liveExtractionFile" style="overflow-wrap:anywhere">—</b><div class="small muted" id="liveExtractionStep" style="margin-top:5px">—</div></div><b id="liveExtractionPercent" style="font-size:22px;white-space:nowrap">0%</b></div><div class="commit-track" style="margin:12px 0 10px"><div class="commit-bar" id="liveExtractionBar"></div></div><div class="commit-progress-stats"><span id="liveExtractionPages">Pages: —</span><span id="liveExtractionChunks">Chunks: —</span><span id="liveExtractionQueue">Queued: 0</span></div><div class="small muted" id="liveExtractionHint" style="margin-top:9px">Progress refreshes automatically.</div></div></div>
 <div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Import queue</h2></div><div class="tablewrap"><table class="table import-queue"><thead><tr><th>Metadata</th><th>Status</th><th>Updated</th><th>Controls</th></tr></thead><tbody id="list"></tbody></table></div></div>"""
     js=_common_js()+r'''<script>
-const form=document.querySelector('#uploadForm'),fileInput=document.querySelector('#file'),uploadBtn=document.querySelector('#uploadBtn'),uploadState=document.querySelector('#uploadState');
-fileInput.addEventListener('change',()=>{const files=[...fileInput.files];document.querySelector('#selectedFiles').textContent=files.length?files.map(f=>f.name+' ('+bytes(f.size)+')').join(' · '):'No PDFs selected.'});
-const csvForm=document.querySelector('#csvUploadForm'),csvFile=document.querySelector('#csvFile'),csvBtn=document.querySelector('#csvUploadBtn'),csvState=document.querySelector('#csvUploadState'),csvAutoMetadata=document.querySelector('#csvAutoMetadata');
-let csvMetadataReady=false;
-csvFile.addEventListener('change',async()=>{
-  csvMetadataReady=false;
-  const f=csvFile.files?.[0]; if(!f){csvAutoMetadata.textContent='Choose a canonical CSV; metadata will be detected automatically.';return}
-  try{
-    const text=await f.slice(0,65536).text();
-    const lines=text.split(/\r?\n/); const header=(lines[0]||'').replace(/^\uFEFF/,'').split(',').map(x=>x.trim().replace(/^"|"$/g,'').toLowerCase());
-    const first=(lines.find((x,i)=>i>0&&x.trim())||'').match(/^"?([^",]+)/);
-    const source=(first?.[1]||f.name).trim(); const names=(source+' '+f.name).toUpperCase();
-    const type=header.includes('institution_name')&&header.includes('program_name')?'CUTOFFS':header.includes('choice_code')&&header.includes('seats')?'SEATS':'';
-    const family=/(\bBCA\b)/.test(names)?'BCA':/(\bBBA\b)/.test(names)?'BBA':/(\bMBA\b)/.test(names)?'MBA':/(\bMCA\b)/.test(names)?'MCA':/(\bBE\b|B\.?E\.?|BTECH|B\.?TECH|ENGG|SEATMATRIX|SEAT_MATRIX|\bFE\b)/.test(names)?'BE':'';
-    const year=(names.match(/20[0-9]{2}/)||[])[0]||'';
-    const roundMatch=names.match(/CAP[ _-]*(?:ROUND[ _-]*)?([1-4])|\bC([1-4])\b/);
-    const round=roundMatch?(roundMatch[1]||roundMatch[2]?'C'+(roundMatch[1]||roundMatch[2]):''):'';
-    document.querySelector('#csvAutoType').value=type;
-    document.querySelector('#csvAutoFamily').value=family;
-    document.querySelector('#csvAutoYear').value=year;
-    document.querySelector('#csvAutoRound').value=round;
-    csvMetadataReady=Boolean(type&&family&&year&&(type==='SEATS'||round));
-    csvAutoMetadata.textContent='Detected: '+(type==='CUTOFFS'?'Cutoff data':type==='SEATS'?'Seat matrix':'unknown data type')+' · '+(family||'unknown course')+' · '+(year||'unknown year')+(type==='CUTOFFS'?' · '+(round||'CAP round not found'):'')+'. '+(csvMetadataReady?'Ready to upload.':'Rename the PDF/source_pdf filename to include course and year'+(type==='CUTOFFS'?' and CAP1, CAP2, CAP3, or CAP4':'')+', then choose the CSV again.');
-    csvState.textContent=csvMetadataReady?'Metadata detected from CSV header and source PDF filename.':'Could not infer all required metadata from this CSV.';
-  }catch(err){csvAutoMetadata.textContent='Could not read CSV metadata: '+err.message}
+const form=document.querySelector('#uploadForm'),fileInput=document.querySelector('#file'),uploadBtn=document.querySelector('#uploadBtn'),uploadState=document.querySelector('#uploadState'),uploadMetadata=document.querySelector('#uploadMetadata');
+function parseCsvLine(line){const out=[];let value='',quoted=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'&&quoted&&line[i+1]==='"'){value+='"';i++}else if(ch==='"'){quoted=!quoted}else if(ch===','&&!quoted){out.push(value);value=''}else value+=ch}out.push(value);return out}
+function detectCsvMetadata(file,header,line){
+  const cols=header.map(x=>x.trim().toLowerCase()),values=parseCsvLine(line||'');
+  const row={};cols.forEach((k,i)=>row[k]=String(values[i]??'').trim());
+  const type=cols.includes('institution_name')&&cols.includes('program_name')&&cols.includes('program_code')?'CUTOFFS':cols.includes('choice_code')&&cols.includes('seats')&&cols.includes('allocation_type')?'SEATS':'';
+  const names=(String(row.source_pdf||'')+' '+file.name).toUpperCase();
+  const family=/\bBCA\b/.test(names)?'BCA':/\bBBA\b/.test(names)?'BBA':/\bMBA\b/.test(names)?'MBA':/\bMCA\b/.test(names)?'MCA':(/\bB\.?E\.?\b|BTECH|B\.?TECH|ENGG|SEATMATRIX|SEAT_MATRIX|\bFE\b/.test(names)?'BE':'');
+  const year=(names.match(/20[0-9]{2}/)||[])[0]||'';
+  const m=names.match(/CAP[ _-]*(?:ROUND[ _-]*)?([1-4])|\bC([1-4])\b/),round=m?'C'+(m[1]||m[2]):'';
+  return {type,family,year,round,ready:Boolean(type&&family&&year&&(type==='SEATS'||round))};
+}
+fileInput.addEventListener('change',async()=>{
+  const files=[...fileInput.files];document.querySelector('#selectedFiles').textContent=files.length?files.map(f=>f.name+' ('+bytes(f.size)+')').join(' · '):'No files selected.';
+  if(!files.length){uploadMetadata.textContent='Select PDF or canonical CSV files. Each file is routed by type.';return}
+  const details=[];
+  for(const f of files){
+    if(/\.pdf$/i.test(f.name)){details.push('PDF · '+f.name+' — server extraction');continue}
+    if(!/\.csv$/i.test(f.name)){details.push('Unsupported file · '+f.name);continue}
+    try{const lines=(await f.slice(0,65536).text()).split(/\r?\n/),header=parseCsvLine((lines[0]||'').replace(/^\uFEFF/,'')),dataLine=lines.find((x,i)=>i>0&&x.trim())||'',m=detectCsvMetadata(f,header,dataLine);details.push('CSV · '+f.name+' — '+(m.ready?m.type+' / '+m.family+' / '+m.year+(m.type==='CUTOFFS'?' / '+m.round:''):'metadata/schema needs correction'))}catch(e){details.push('CSV · '+f.name+' — could not read metadata')}
+  }
+  uploadMetadata.textContent=details.join(' | ');
 });
-csvForm.addEventListener('submit',async e=>{e.preventDefault();const f=csvFile.files?.[0];if(!f)return;if(!csvMetadataReady){toast('Could not identify data type/course/year/round from the CSV. Check the source PDF filename and choose the file again.','err');return}if(f.size>100*1024*1024){toast('CSV must be 100 MiB or smaller.','err');return}csvBtn.disabled=true;csvFile.disabled=true;csvState.textContent='Uploading '+f.name+'…';try{const data=new FormData();data.append('file',f,f.name);data.append('data_type',document.querySelector('#csvAutoType').value);data.append('course_family',document.querySelector('#csvAutoFamily').value);data.append('year',document.querySelector('#csvAutoYear').value);data.append('round_name',document.querySelector('#csvAutoRound').value);if(!data.get('file'))throw new Error('CSV file was not attached to the upload request. Please reselect it.');const result=await api('/admin/api/imports/csv',{method:'POST',headers:csrfHeaders(),body:data});csvState.textContent='Accepted as job #'+result.id+'. Validation and staging are running; no production data is changed until approval.';toast('CSV queued for validation · job #'+result.id,'ok');csvFile.value='';await load()}catch(err){csvState.textContent='Upload failed: '+err.message;toast(err.message,'err')}finally{csvBtn.disabled=false;csvFile.disabled=false;await load()}});
-form.addEventListener('submit',async e=>{e.preventDefault();const files=[...fileInput.files];if(!files.length)return;if(files.some(f=>f.size>50*1024*1024)){toast('Each PDF must be 50 MiB or smaller.','err');return}uploadBtn.disabled=true;fileInput.disabled=true;try{for(let i=0;i<files.length;i++){uploadState.textContent='Uploading '+(i+1)+' of '+files.length+': '+files[i].name;const data=new FormData();data.append('file',files[i],files[i].name);const result=await api('/admin/api/imports',{method:'POST',headers:csrfHeaders(),body:data});toast('Queued '+files[i].name+' · job #'+(result.id||result.job_id),'ok');await load()}uploadState.textContent='All selected PDFs were submitted. Processing continues when this page is closed.';fileInput.value='';document.querySelector('#selectedFiles').textContent='No PDFs selected.'}catch(err){uploadState.textContent='Upload stopped: '+err.message;toast(err.message,'err')}finally{uploadBtn.disabled=false;fileInput.disabled=false;await load()}});
+form.addEventListener('submit',async e=>{
+  e.preventDefault();const files=[...fileInput.files];if(!files.length)return;
+  const tooLarge=files.find(f=>f.size>(/\.csv$/i.test(f.name)?100:50)*1024*1024);
+  if(tooLarge){toast(tooLarge.name+' exceeds the '+(/\.csv$/i.test(tooLarge.name)?'100 MiB CSV':'50 MiB PDF')+' limit.','err');return}
+  if(files.some(f=>!(/\.pdf$/i.test(f.name)||/\.csv$/i.test(f.name)))){toast('Select only PDF or canonical CSV files.','err');return}
+  uploadBtn.disabled=true;fileInput.disabled=true;let accepted=0;
+  try{
+    for(let i=0;i<files.length;i++){
+      const f=files[i];uploadState.textContent='Processing upload '+(i+1)+' of '+files.length+': '+f.name;
+      const data=new FormData();data.append('file',f,f.name);
+      let endpoint='/admin/api/imports',kind='PDF';
+      if(/\.csv$/i.test(f.name)){
+        kind='CSV';const text=await f.slice(0,65536).text(),lines=text.split(/\r?\n/),header=parseCsvLine((lines[0]||'').replace(/^\uFEFF/,'')),line=lines.find((x,n)=>n>0&&x.trim())||'',meta=detectCsvMetadata(f,header,line);
+        if(!meta.ready)throw new Error('Could not infer valid type/course/year/round for '+f.name+'. CSVs need canonical columns and a source_pdf filename containing course/year'+(meta.type==='CUTOFFS'?' and CAP round':'')+'.');
+        if(!data.get('file'))throw new Error('File attachment missing for '+f.name);
+        data.append('data_type',meta.type);data.append('course_family',meta.family);data.append('year',meta.year);data.append('round_name',meta.round);endpoint='/admin/api/imports/csv';
+      }
+      const result=await api(endpoint,{method:'POST',headers:csrfHeaders(),body:data});accepted++;
+      toast(kind+' queued: '+f.name+' · job #'+(result.id||result.job_id),'ok');await load();
+    }
+    uploadState.textContent='Submitted '+accepted+' file(s). PDFs are extracted server-side; CSVs skip extraction and enter validation/staging. Closing this page will not stop server jobs.';
+    fileInput.value='';document.querySelector('#selectedFiles').textContent='No files selected.';uploadMetadata.textContent='Select PDF or canonical CSV files. Each file is routed by type.';
+  }catch(err){uploadState.textContent='Upload stopped after '+accepted+' file(s): '+err.message;toast(err.message,'err')}
+  finally{uploadBtn.disabled=false;fileInput.disabled=false;await load()}
+});
 async function control(id,action){const labels={pause:'Pause extraction at the next safe checkpoint?',resume:'Resume this extraction?',cancel:'Cancel this import? You can retry it later.'};if(!confirm(labels[action]||'Continue?'))return;try{await api('/admin/api/imports/'+id+'/'+action,{method:'POST',headers:csrfHeaders()});toast(action==='pause'?'Pause requested':action==='resume'?'Resume requested':'Cancellation requested','ok');await load()}catch(e){toast(e.message,'err')}}
 async function removeJob(id){const job=(await api('/admin/api/imports')).find(x=>Number(x.id)===Number(id));const drive=String(job?.stored_path||'').startsWith('gdrive://');if(!confirm(drive?'Delete this CAPFind import record and its uncommitted staging data? The original PDF will remain in Google Drive.':'Permanently delete this import, its source file and uncommitted staging data?'))return;try{await api('/admin/api/imports/'+id,{method:'DELETE',headers:csrfHeaders()});toast(drive?'Import deleted; original Drive PDF remains':'Import deleted','ok');await load()}catch(e){toast(e.message,'err')}}
 
