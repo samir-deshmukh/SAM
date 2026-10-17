@@ -1229,7 +1229,16 @@ html, body, .sketch-bg, .page-content { background:#F4F4F4; color:#262626; }
 .seat-pdf-status, .seat-pdf-cap { background:#E9E9E9!important; color:#333333!important; }
 .pdf-table tbody tr:nth-child(even) td, .seat-pdf-table tbody td { background:#FFFFFF!important; color:#333333!important; }
 .tin-value.up, .tin-value.down, .trends-note.warn, .field input.field-invalid { color:#555555!important; border-color:#777777!important; }
-.footer { background:#FFFFFF!important; color:#262626!important; border-top:1px solid #DEDEDE!important; }
+/* Preserve the original animated tortoises; make their line art visible on grey-white. */
+.tortoise-main, .tortoise-tr, .tortoise-bl { color:#777777!important; }
+.tortoise-main { opacity:.42; }
+.tortoise-tr { opacity:.38; }
+.tortoise-bl { opacity:.40; }
+/* The site uses the semantic <footer> element, not a .footer class. */
+footer { background:#FFFFFF!important; color:#262626!important; border-top:1px solid #DEDEDE!important; }
+footer .footer-title, footer .footer-col h5, footer .footer-col p,
+footer .footer-inner, footer .footer-inner a { color:#262626!important; }
+footer .footer-grid { border-top-color:#DEDEDE!important; }
 .feedback-modal { background:rgba(0,0,0,.42)!important; }
 .feedback-message:focus, .field input:focus, .field select:focus, .ssel-btn:focus,
 .ssel-search input:focus { border-color:#888888!important; box-shadow:0 0 0 3px rgba(0,0,0,.06)!important; }
