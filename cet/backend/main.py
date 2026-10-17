@@ -1370,12 +1370,36 @@ def _process_csv_import_background(job_id: int):
                     staged_csv = raw_dir / 'uploaded_source.csv'
                     import shutil
                     shutil.copy2(source_path, staged_csv)
+                    from .admin.processing import _write_commit_progress
+                    # Publish an active status before the long validation/staging
+                    # transaction begins, so the runtime poller can discover CSV jobs.
+                    connection.execute("UPDATE import_jobs SET status='NORMALIZING',updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+                    event(connection, job_id, 'CSV_PROCESSING', 'CSV upload complete; validation and staging started', 25)
+                    connection.commit()
+                    total_bytes = int(job.get('size_bytes') or staged_csv.stat().st_size)
+                    _write_commit_progress(job_id, 'RUNNING', 'Reading CSV', 0, 1,
+                                           f"CSV received ({total_bytes:,} bytes); starting validation")
+                    csv_progress_state = {'processed': 0, 'total': 0}
+                    def report_csv_progress(processed, total):
+                        csv_progress_state.update(processed=processed, total=total)
+                        _write_commit_progress(
+                            job_id, 'RUNNING', 'Staging CSV rows', processed, total,
+                            f"Staging {processed:,} of {total:,} CSV rows",
+                        )
                     result = process_import(connection, job_id, staged_csv,
                         data_type=job['data_type'], family=job['course_family'], year=int(job['year']),
                         round_name=job.get('round') or 'C1', claimed=True, pre_extracted_path=staged_csv,
-                        extraction_summary={'source':'pre-extracted CSV'}, source_filename=job['original_filename'])
+                        extraction_summary={'source':'pre-extracted CSV'}, source_filename=job['original_filename'],
+                        progress_callback=report_csv_progress)
                     if not result.get('ok'):
                         log.error('CSV import staging failed: job_id=%s error=%s', job_id, result.get('error'))
+                    else:
+                        processed = int(csv_progress_state['processed'])
+                        total = int(csv_progress_state['total'])
+                        _write_commit_progress(
+                            job_id, 'COMPLETED', 'CSV staging complete', total or processed, total or processed,
+                            f"CSV validation and staging finished ({processed:,} rows processed). Check import status for review findings.",
+                        )
             except Exception as exc:
                 log.exception('CSV import failed: job_id=%s', job_id)
                 connection.rollback()
@@ -1767,6 +1791,7 @@ def runtime_metrics(request: Request):
                                      ('local://%',)).fetchone()
         active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
         latest_event = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (active['id'],)).fetchone() if active else None
+        csv_progress = connection.execute('SELECT status,stage,processed,total,progress,message FROM import_commit_progress WHERE job_id=?', (active['id'],)).fetchone() if active else None
         queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']
     job_progress = None
     if active:
@@ -1792,8 +1817,11 @@ def runtime_metrics(request: Request):
         job_progress = {
             'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
             'data_type': active['data_type'] or 'CUTOFFS',
-            'event_progress': latest_event['progress'] if latest_event else None,
-            'event_message': latest_event['message'] if latest_event else '',
+            'event_progress': (csv_progress['progress'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['progress'] if latest_event else None)),
+            'event_message': (csv_progress['message'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['message'] if latest_event else '')),
+            'progress_stage': csv_progress['stage'] if csv_progress else '',
+            'rows_processed': int(csv_progress['processed'] or 0) if csv_progress else 0,
+            'total_rows': int(csv_progress['total'] or 0) if csv_progress else 0,
             'page': current_page, 'total_pages': total_pages,
             'percent': round(min(100, current_page / total_pages * 100), 1) if total_pages else 0,
             'chunk_count': int(progress.get('chunk_count') or active.get('current_chunk') or completed_chunks),

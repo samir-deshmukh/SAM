@@ -120,9 +120,21 @@ def _resolve_cutoff_dimensions(raw: dict):
     return base, ladies, section, stage
 
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
-               valid: bool, validation_message: str, required_fields=()) -> tuple[int, int]:
+               valid: bool, validation_message: str, required_fields=(),
+               progress_callback=None) -> tuple[int, int]:
     rows = 0
     quarantined = 0
+    total_rows = 0
+    if progress_callback:
+        # Count CSV records with the CSV parser (not physical lines, since quoted
+        # fields may contain newlines) so progress remains accurate for large files.
+        with path.open("r", encoding="utf-8-sig", newline="") as count_file:
+            total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
+        try:
+            progress_callback(0, total_rows)
+        except Exception:
+            pass
+    progress_interval = max(250, total_rows // 100) if total_rows else 250
     # The trusted validator treats these columns as block-level merged cells:
     # a blank value means "same as the preceding row". Apply the same
     # normalization before staging so continuation pages do not become false
@@ -195,6 +207,12 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                  message)
             )
             rows += 1
+            if progress_callback and (rows % progress_interval == 0 or (total_rows and rows == total_rows)):
+                try:
+                    progress_callback(rows, total_rows)
+                except Exception:
+                    # Telemetry must never interrupt the import itself.
+                    pass
     return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
@@ -290,7 +308,8 @@ def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
 def process_import(conn, job_id: int, pdf_path: Path, *,
                    data_type: str, family: str, year: int, round_name: str,
                    claimed: bool=False, pre_extracted_path: Path | None=None,
-                   extraction_summary: dict | None=None, source_filename: str | None=None, worker_id: str | None=None):
+                   extraction_summary: dict | None=None, source_filename: str | None=None, worker_id: str | None=None,
+                   progress_callback=None):
     """Run extraction/normalization/validation and stop at STAGED/REVIEW_REQUIRED."""
     # Stable per-job work path lets the chunk manifest skip completed parts on retry.
     work = WORK_ROOT / f"job_{job_id}"
@@ -403,7 +422,8 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             # required at row level.
             rows, row_quarantine = _stage_csv(
                 conn, job_id, "CUTOFFS", canonical, valid, validation,
-                ("institution_code", "program_name", "category", "percentage")
+                ("institution_code", "program_name", "category", "percentage"),
+                progress_callback=progress_callback,
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
@@ -492,8 +512,11 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             event(conn, job_id, "VALIDATE", "Running existing validate_seats.py gate", 78)
             valid, validation = _run_validator(SCRIPTS / "validate_seats.py", normalized)
             (work / "validation.txt").write_text(validation, encoding="utf-8")
-            rows, row_quarantine = _stage_csv(conn, job_id, "SEATS", canonical, valid, validation,
-                                                ("institution_code", "choice_code", "allocation_type", "category", "seats"))
+            rows, row_quarantine = _stage_csv(
+                conn, job_id, "SEATS", canonical, valid, validation,
+                ("institution_code", "choice_code", "allocation_type", "category", "seats"),
+                progress_callback=progress_callback,
+            )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
             shutil.copy2(work / "validation.txt", staging / "validation.txt")
