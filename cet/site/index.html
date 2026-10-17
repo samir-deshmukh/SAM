@@ -3146,21 +3146,31 @@ function createTrendsController(ids) {
       }
       renderYearChips(years);
 
-      const branchLabel = id => data.branches[String(id)] || `#${id}`;
+      const seatPayloadForBranches = isEngineeringCourse() ? await loadSeats(state.course, state.college) : null;
+      const seatMetadataForBranches = seatPayloadForBranches && seatPayloadForBranches.course_metadata ? seatPayloadForBranches.course_metadata : {};
+      const seatOnlyLabels = {};
+      const branchLabel = id => data.branches[String(id)] || seatOnlyLabels[String(id)] || `#${id}`;
       const programCodeByBranch = new Map();
       allCollegeRows.forEach(r => {
         const id = String(r.branch);
         const code = String(r.program_code || '');
         if (code && !programCodeByBranch.has(id)) programCodeByBranch.set(id, code);
       });
-      const branchIds = [...new Set(allCollegeRows.map(r => String(r.branch)))]
+      for (const [code, meta] of Object.entries(seatMetadataForBranches)) {
+        if (![...programCodeByBranch.values()].includes(String(code))) {
+          const id = `@choice:${code}`;
+          programCodeByBranch.set(id, String(code));
+          seatOnlyLabels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+        }
+      }
+      const branchIds = [...new Set([...allCollegeRows.map(r => String(r.branch)), ...[...programCodeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
         .sort((a,b) => (programCodeByBranch.get(a) || a).localeCompare(programCodeByBranch.get(b) || b));
       if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
       const activeProgram = String(selectedDrawerProgram || '');
       const yearRows = collegeRows.filter(r => String(r.branch) === activeProgram);
       const activeProgramRow = allCollegeRows.find(r => String(r.branch) === activeProgram && r.program_code)
         || allCollegeRows.find(r => String(r.branch) === activeProgram);
-      state.selectedProgramCode = activeProgramRow ? String(activeProgramRow.program_code || '') : '';
+      state.selectedProgramCode = activeProgramRow ? String(activeProgramRow.program_code || '') : (programCodeByBranch.get(activeProgram) || '');
       /* Section labels are small enough to derive from the raw code using
          the same label map embedded in the course-year payload when present. */
       const SECTION_LABELS = {
@@ -3456,19 +3466,26 @@ function createTrendsController(ids) {
       if (isEngineeringCourse() && state.selectedYear) {
         const yearPayload = await loadCollegeYear(state.course, state.college, state.selectedYear);
         const allRows = Array.isArray(yearPayload.pdf_rows) ? yearPayload.pdf_rows : [];
-        const labels = yearPayload.branches || {};
+        const labels = { ...(yearPayload.branches || {}) };
         const codeByBranch = new Map();
         allRows.forEach(r => {
           const id = String(r.branch);
           const code = String(r.program_code || '');
           if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
         });
-        const branchIds = [...new Set(allRows.map(r => String(r.branch)))]
+        for (const [code, meta] of Object.entries(courseMetadata)) {
+          if (![...codeByBranch.values()].includes(String(code))) {
+            const id = `@choice:${code}`;
+            codeByBranch.set(id, String(code));
+            labels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+          }
+        }
+        const branchIds = [...new Set([...allRows.map(r => String(r.branch)), ...[...codeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
           .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
         if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
         const selectedRow = allRows.find(r => String(r.branch) === String(selectedDrawerProgram) && r.program_code)
           || allRows.find(r => String(r.branch) === String(selectedDrawerProgram));
-        state.selectedProgramCode = selectedRow ? String(selectedRow.program_code || '') : '';
+        state.selectedProgramCode = selectedRow ? String(selectedRow.program_code || '') : (codeByBranch.get(String(selectedDrawerProgram)) || '');
         const branchIndex = branchIds.indexOf(String(selectedDrawerProgram));
         if (branchIds.length > 1) {
           branchSelectorHtml = `
@@ -3597,16 +3614,24 @@ function createTrendsController(ids) {
         const key = `${state.course}:${state.selectedYear}:${state.college}`;
         const cached = collegeYearCache.get(key);
         if (!cached) return;
-        Promise.resolve(cached).then(payload => {
+        Promise.all([Promise.resolve(cached), loadSeats(state.course, state.college)]).then(([payload, seatPayload]) => {
           const rows = Array.isArray(payload.pdf_rows) ? payload.pdf_rows : [];
-          const labels = payload.branches || {};
+          const labels = { ...(payload.branches || {}) };
+          const seatMetadata = seatPayload && seatPayload.course_metadata ? seatPayload.course_metadata : {};
           const codeByBranch = new Map();
           rows.forEach(r => {
             const id = String(r.branch);
             const code = String(r.program_code || '');
             if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
           });
-          const branchIds = [...new Set(rows.map(r => String(r.branch)))]
+          for (const [code, meta] of Object.entries(seatMetadata)) {
+            if (![...codeByBranch.values()].includes(String(code))) {
+              const id = `@choice:${code}`;
+              codeByBranch.set(id, String(code));
+              labels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+            }
+          }
+          const branchIds = [...new Set([...rows.map(r => String(r.branch)), ...[...codeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
             .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
           const index = branchIds.indexOf(String(selectedDrawerProgram));
           const target = Math.max(0, Math.min(branchIds.length - 1, index + (next ? 1 : -1)));

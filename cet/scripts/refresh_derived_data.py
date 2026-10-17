@@ -120,12 +120,16 @@ def refresh(engine, course_family: str | None = None) -> None:
                           AND c.program_code=s.choice_code
                     )
                 """)).scalar_one()
+                # Seat-only branches are valid when the official cutoff PDF has no
+                # rows for that institution/choice code. Keep them in the seat
+                # matrix and expose an explicit empty-cutoff state in the UI.
+                # We still fail on cutoff-only codes above: those indicate a
+                # seat matrix link is missing and would otherwise hide data.
                 if seat_only_branches:
-                    raise RuntimeError(
-                        f"Refusing to mark engineering data complete: {seat_only_branches} latest "
-                        "seat-matrix institution/choice-code records have no exact cutoff program_code. "
-                        "Review whether cutoff rows are missing or the source codes differ; "
-                        "no seat-only branch is silently omitted."
+                    print(
+                        f"SOURCE COVERAGE WARNING: {seat_only_branches} latest engineering "
+                        "seat-matrix choice codes have no exact cutoff rows. They remain "
+                        "available for seat-matrix display; the UI must say cutoff unavailable."
                     )
 
         if course_family:
