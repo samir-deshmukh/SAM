@@ -538,6 +538,66 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 '''
 
 
+def _custom_select_script() -> str:
+    return r'''
+<script>
+(function(){
+  const STYLE_ID='cet-custom-select-style';
+  if(!document.getElementById(STYLE_ID)){
+    const style=document.createElement('style');style.id=STYLE_ID;style.textContent=`
+      .cet-select-wrap{position:relative;display:inline-block;vertical-align:middle;min-width:160px;max-width:100%;font-size:12px;color:#111}
+      .cet-select-native{position:absolute!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;inset:auto!important}
+      .cet-select-trigger{display:flex;width:100%;min-height:37px;align-items:center;justify-content:space-between;gap:14px;padding:8px 11px;background:#fff!important;color:#111!important;border:1px solid #d8d8d8!important;border-radius:7px!important;text-align:left;font:inherit;line-height:1.35;cursor:pointer;box-shadow:none!important}
+      .cet-select-trigger:focus-visible,.cet-select-wrap.open .cet-select-trigger{outline:2px solid #aaa;outline-offset:1px;border-color:#777!important}
+      .cet-select-arrow{width:8px;height:8px;flex:0 0 8px;border-right:1.5px solid #222;border-bottom:1.5px solid #222;transform:rotate(45deg) translateY(-2px);transition:transform .12s}
+      .cet-select-wrap.open .cet-select-arrow{transform:rotate(225deg) translate(-1px,-1px)}
+      .cet-select-menu{position:absolute;top:calc(100% + 5px);left:0;right:0;min-width:100%;max-height:260px;overflow:auto;display:none;z-index:200;background:#fff!important;color:#111!important;border:1px solid #d6d6d6;border-radius:8px;padding:4px;box-shadow:0 8px 22px rgba(0,0,0,.12)}
+      .cet-select-wrap.open .cet-select-menu{display:block}
+      .cet-select-option{display:block;width:100%;padding:9px 10px;border:0;border-radius:5px;background:#fff!important;color:#111!important;text-align:left;font:inherit;line-height:1.35;overflow-wrap:anywhere;cursor:pointer}
+      .cet-select-option:hover,.cet-select-option:focus-visible{background:#eee!important;outline:none}
+      .cet-select-option[aria-selected=true]{background:#e6e6e6!important;font-weight:700}
+      .filters .cet-select-wrap{min-width:160px}
+      .resolver-table .cet-select-wrap{min-width:118px}
+      @media(max-width:720px){.filters .cet-select-wrap{min-width:min(100%,220px)}.cet-select-wrap{max-width:100%}}
+    `;document.head.appendChild(style);
+  }
+  function closeAll(except){document.querySelectorAll('.cet-select-wrap.open').forEach(w=>{if(w!==except){w.classList.remove('open');w.querySelector('.cet-select-trigger')?.setAttribute('aria-expanded','false')}})}
+  function enhance(sel){
+    if(!(sel instanceof HTMLSelectElement)||sel.dataset.cetCustomSelect==='1')return;
+    sel.dataset.cetCustomSelect='1';
+    const wrap=document.createElement('div');wrap.className='cet-select-wrap';
+    const width=sel.style.width;if(width)wrap.style.width=width;
+    sel.parentNode.insertBefore(wrap,sel);wrap.appendChild(sel);sel.classList.add('cet-select-native');sel.setAttribute('aria-hidden','true');sel.tabIndex=-1;
+    const trigger=document.createElement('button');trigger.type='button';trigger.className='cet-select-trigger';trigger.setAttribute('aria-haspopup','listbox');trigger.setAttribute('aria-expanded','false');
+    const label=document.createElement('span');label.className='cet-select-label';label.style.minWidth='0';label.style.overflow='hidden';label.style.textOverflow='ellipsis';label.style.whiteSpace='nowrap';
+    const arrow=document.createElement('span');arrow.className='cet-select-arrow';arrow.setAttribute('aria-hidden','true');trigger.append(label,arrow);
+    const menu=document.createElement('div');menu.className='cet-select-menu';menu.setAttribute('role','listbox');
+    wrap.append(trigger,menu);
+    function sync(){
+      const chosen=sel.options[sel.selectedIndex];label.textContent=chosen?chosen.textContent.trim():'Select…';
+      menu.innerHTML='';
+      [...sel.options].forEach((opt,index)=>{
+        const item=document.createElement('button');item.type='button';item.className='cet-select-option';item.setAttribute('role','option');item.setAttribute('aria-selected',opt.selected?'true':'false');item.textContent=opt.textContent.trim();item.disabled=opt.disabled;
+        item.addEventListener('click',()=>{if(opt.disabled)return;sel.selectedIndex=index;sel.dispatchEvent(new Event('input',{bubbles:true}));sel.dispatchEvent(new Event('change',{bubbles:true}));sync();wrap.classList.remove('open');trigger.setAttribute('aria-expanded','false');trigger.focus()});menu.appendChild(item);
+      });
+    }
+    trigger.addEventListener('click',()=>{const opening=!wrap.classList.contains('open');closeAll(wrap);wrap.classList.toggle('open',opening);trigger.setAttribute('aria-expanded',String(opening));if(opening){const selected=menu.querySelector('[aria-selected=true]');if(selected)selected.scrollIntoView({block:'nearest'})}});
+    trigger.addEventListener('keydown',e=>{if(e.key==='ArrowDown'||e.key==='Enter'||e.key===' '){e.preventDefault();closeAll(wrap);wrap.classList.add('open');trigger.setAttribute('aria-expanded','true');(menu.querySelector('[aria-selected=true]')||menu.querySelector('button:not(:disabled)'))?.focus()}else if(e.key==='Escape'){wrap.classList.remove('open');trigger.setAttribute('aria-expanded','false')}});
+    menu.addEventListener('keydown',e=>{const items=[...menu.querySelectorAll('button:not(:disabled)')],i=items.indexOf(document.activeElement);if(e.key==='ArrowDown'){e.preventDefault();items[Math.min(items.length-1,i+1)]?.focus()}else if(e.key==='ArrowUp'){e.preventDefault();items[Math.max(0,i-1)]?.focus()}else if(e.key==='Escape'){wrap.classList.remove('open');trigger.setAttribute('aria-expanded','false');trigger.focus()}});
+    sel.addEventListener('change',sync);sel.addEventListener('input',sync);
+    new MutationObserver(sync).observe(sel,{childList:true,subtree:true,attributes:true,attributeFilter:['selected','disabled']});
+    sync();
+  }
+  function scan(root){if(root.matches?.('select'))enhance(root);root.querySelectorAll?.('select').forEach(enhance)}
+  scan(document);
+  new MutationObserver(records=>records.forEach(r=>r.addedNodes.forEach(n=>{if(n.nodeType===1)scan(n)}))).observe(document.documentElement,{childList:true,subtree:true});
+  document.addEventListener('click',e=>{if(!e.target.closest('.cet-select-wrap'))closeAll(null)});
+  document.addEventListener('change',e=>{if(e.target instanceof HTMLSelectElement)enhance(e.target)});
+})();
+</script>
+'''
+
+
 def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
     links = [
         ('dashboard','⌂','Dashboard','/admin'),
@@ -554,7 +614,7 @@ def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)} - CET CAP Admin</title><style>{CSS}</style></head><body class="admin-locked">
 <div id="adminTabLock" class="admin-tab-lock"><div class="admin-tab-lock-card"><h2 id="adminTabLockTitle">Checking admin connection</h2><p id="adminTabLockMessage">Verifying the active admin tab with the server.</p><button id="adminTabLockRetry" type="button" onclick="window.__cetAdminTabRetry&&window.__cetAdminTabRetry()">Retry connection</button><small id="adminTabLockHint">A temporary connection failure does not necessarily mean another tab is open.</small></div></div>
 <aside class="side"><div class="brand"><div class="mark">╫</div><div><b>CET CAP PORTAL</b></div></div><nav class="nav">{nav}</nav><div class="sidefoot">CET CAP Portal v1.0.0<br>Maharashtra Admissions System<br><span class="online">● System Online</span></div></aside>
-<main class="main"><section class="content">{body}</section></main><div id="toastbox" class="toastbox"></div>{extra_js}
+<main class="main"><section class="content">{body}</section></main><div id="toastbox" class="toastbox"></div>{extra_js}{_custom_select_script()}
 </body></html>'''
 
 
