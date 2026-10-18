@@ -866,22 +866,31 @@ def derived_data_status(request: Request):
         courses = connection.execute(
             "SELECT DISTINCT program_family FROM programs WHERE program_family IS NOT NULL ORDER BY program_family"
         ).fetchall()
+    return {
+        "jobs": [dict(row) for row in rows],
+        "courses": [str(row['program_family']) for row in courses],
+    }
+
+
+@app.get('/admin/api/derived-data/source-coverage')
+def derived_data_source_coverage(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'})
+    with connect() as connection:
         source_checks = connection.execute("""
             WITH latest AS (
                 SELECT program_family, institution_code, MAX(capture_year) AS capture_year
                 FROM seats GROUP BY program_family, institution_code
             ), latest_seats AS (
-                SELECT s.* FROM seats s JOIN latest l
+                SELECT s.program_family,s.institution_code,s.capture_year,s.choice_code
+                FROM seats s JOIN latest l
                   ON l.program_family=s.program_family
                  AND l.institution_code=s.institution_code
                  AND l.capture_year=s.capture_year
             )
             SELECT s.program_family,
-                   COUNT(DISTINCT s.institution_code || ':' || s.choice_code) AS choice_codes,
-                   COUNT(DISTINCT CASE WHEN m.choice_code IS NOT NULL
-                     THEN s.institution_code || ':' || s.choice_code END) AS metadata_codes,
-                   COUNT(DISTINCT CASE WHEN m.choice_code IS NULL
-                     THEN s.institution_code || ':' || s.choice_code END) AS missing_metadata_codes,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) AS choice_codes,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NOT NULL) AS metadata_codes,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NULL) AS missing_metadata_codes,
                    COUNT(*) AS latest_seat_rows
             FROM latest_seats s
             LEFT JOIN seat_matrix_courses m
@@ -891,36 +900,7 @@ def derived_data_status(request: Request):
              AND m.choice_code=s.choice_code
             GROUP BY s.program_family ORDER BY s.program_family
         """).fetchall()
-        branch_check = connection.execute("""
-            WITH cutoff_codes AS (
-                SELECT DISTINCT c.institution_code, c.program_code
-                FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
-                WHERE p.program_family='BE' AND c.program_code IS NOT NULL AND trim(c.program_code)<>''
-            ), latest_seat_year AS (
-                SELECT institution_code, MAX(capture_year) AS capture_year
-                FROM seats WHERE program_family='BE' GROUP BY institution_code
-            ), seat_codes AS (
-                SELECT DISTINCT s.institution_code, s.choice_code AS program_code
-                FROM seats s JOIN latest_seat_year y
-                  ON y.institution_code=s.institution_code AND y.capture_year=s.capture_year
-                WHERE s.program_family='BE'
-            )
-            SELECT (SELECT COUNT(*) FROM cutoff_codes) AS cutoff_codes,
-                   (SELECT COUNT(*) FROM cutoff_codes c WHERE EXISTS (
-                       SELECT 1 FROM seat_codes s
-                       WHERE s.institution_code=c.institution_code AND s.program_code=c.program_code
-                   )) AS linked_codes,
-                   (SELECT COUNT(*) FROM seat_codes s WHERE NOT EXISTS (
-                       SELECT 1 FROM cutoff_codes c
-                       WHERE c.institution_code=s.institution_code AND c.program_code=s.program_code
-                   )) AS seat_only_codes
-        """).fetchone()
-    return {
-        "jobs": [dict(row) for row in rows],
-        "courses": [str(row['program_family']) for row in courses],
-        "source_checks": [dict(row) for row in source_checks],
-        "engineering_branch_check": dict(branch_check) if branch_check else {"cutoff_codes": 0, "linked_codes": 0, "seat_only_codes": 0},
-    }
+    return {"source_checks": [dict(row) for row in source_checks]}
 
 
 LOCAL_ARTIFACT_MAX_BYTES = 150 * 1024 * 1024
@@ -2054,41 +2034,6 @@ def review_list(request: Request):
             ORDER BY j.id DESC
         """).fetchall()
         response = [dict(r) for r in rows]
-        # Older imports stored the complete file-level validator output on
-        # every row. Count the affected category records from that report
-        # rather than presenting every staged record as an individual error.
-        for item in response:
-            if not item.get("validation_issue_count"):
-                continue
-            repeated = c.execute(
-                "SELECT validation_message FROM import_staging_records WHERE job_id=? "
-                "AND validation_status='REVIEW' LIMIT 1", (item["id"],)
-            ).fetchone()
-            message = str(repeated["validation_message"] or "") if repeated else ""
-            if "Total issues:" not in message:
-                continue
-            result = c.execute(
-                "SELECT summary_json FROM import_results WHERE job_id=? ORDER BY id DESC LIMIT 1",
-                (item["id"],)
-            ).fetchone()
-            try:
-                summary = json.loads(result["summary_json"] or "{}") if result else {}
-                report = str(summary.get("validation", ""))
-                unknown_categories = set(re.findall(r"\[([^\]]+)\]\s*:\s*\d+", report))
-                if unknown_categories:
-                    staged = c.execute(
-                        "SELECT normalized_json FROM import_staging_records WHERE job_id=?",
-                        (item["id"],)
-                    ).fetchall()
-                    item["validation_issue_count"] = sum(
-                        1 for staged_row in staged
-                        if str(json.loads(staged_row["normalized_json"] or "{}").get("category", "")).strip().upper() in unknown_categories
-                    )
-                else:
-                    item["validation_issue_count"] = 0
-            except (TypeError, ValueError, json.JSONDecodeError):
-                # Preserve the conservative count if an old report is malformed.
-                pass
         return response
 
 @app.post('/admin/api/imports/{job_id}/revalidate-legacy-mh')

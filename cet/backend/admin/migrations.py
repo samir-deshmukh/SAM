@@ -30,6 +30,9 @@ def ensure_part4_schema():
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted BOOLEAN NOT NULL DEFAULT FALSE")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted_at TIMESTAMPTZ")
         c.execute("CREATE INDEX IF NOT EXISTS idx_import_jobs_queue ON import_jobs(status,created_at)")
+        # Indexes used by Review Center counts and latest-seat source coverage.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_import_staging_job_validation ON import_staging_records(job_id, validation_status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_seats_coverage_latest ON seats(program_family, institution_code, capture_year, choice_code)")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS published_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP")
         c.execute("ALTER TABLE data_releases ADD COLUMN IF NOT EXISTS manifest_json TEXT")

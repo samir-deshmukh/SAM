@@ -550,6 +550,7 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 
 /* Import workspace: processing sits directly under RAM and CPU, beside upload. */
 .build-loading{align-items:center;gap:12px;min-height:68px}
+.source-loading{display:flex;align-items:center;gap:10px;min-height:52px}
 .build-loading .activityspin{width:23px;height:23px;flex:0 0 23px;border-width:3px}
 .import-workspace{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.6fr);gap:14px;align-items:stretch;margin-bottom:14px}
 .import-workspace>.upload-quick{padding:16px;min-width:0;height:100%;align-self:stretch}
@@ -637,11 +638,11 @@ def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
         ('imports','⇧','Import Center','/admin/imports'),
         ('review','▤','Review Center','/admin/review'),
         ('releases','◉','Releases','/admin/releases'),
-        ('health','♡','Data Health','/admin/health'),
         ('derived','▦','CET Data Calculator','/admin/derived-data'),
-        ('audit','◷','Audit Log','/admin/audit'),
-        ('feedback','✦','Feedback','/admin/feedback'),
         ('resolver','⌁','Website Resolver','/admin/resolver'),
+        ('health','♡','Data Health','/admin/health'),
+        ('feedback','✦','Feedback','/admin/feedback'),
+        ('audit','◷','Audit Log','/admin/audit'),
     ]
     nav=''.join(f'<a class="{"active" if active==k else ""}" href="{href}">{icon} &nbsp; {label}</a>' for k,icon,label,href in links)
     # Standardize the upper-right live indicator across every admin section.
@@ -1021,9 +1022,21 @@ def derived_data() -> str:
 <div class="card panel" id="sourceFidelity" style="margin-top:14px"><div class="toolbar"><h2>Source Coverage & Branch Mapping</h2></div><div id="sourceFidelityBody" class="small muted" style="margin-top:10px">Loading source coverage…</div></div>
 <div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Build history</h2></div><div class="tablewrap"><table class="table"><thead><tr><th>ID</th><th>Course</th><th>Status</th><th>Progress</th><th>Message</th><th>Started</th><th>Finished</th><th>Actions</th></tr></thead><tbody id="history"></tbody></table></div></div>'''
     js=_common_js()+r'''<script>
-let jobs=[];
+let jobs=[];window.__sourceCoverageLoaded=false;
 const activeStates=['QUEUED','RUNNING'];
 const terminalStates=['COMPLETED','FAILED','CANCELLED'];
+async function loadSourceCoverage(){
+  const sourceBody=document.querySelector('#sourceFidelityBody');
+  sourceBody.innerHTML='<div class="source-loading"><span class="activityspin" aria-hidden="true"></span><span>Loading source coverage…</span></div>';
+  try{
+    const d=await api('/admin/api/derived-data/source-coverage');
+    const coverageRows=(d.source_checks||[]).map(x=>{
+      const total=Number(x.choice_codes||0),covered=Number(x.metadata_codes||0),missing=Number(x.missing_metadata_codes||0),complete=total>0&&missing===0;
+      return '<tr><td>'+esc(displayCourseFamily(x.program_family))+'</td><td>'+Number(x.latest_seat_rows||0).toLocaleString()+'</td><td>'+covered.toLocaleString()+' / '+total.toLocaleString()+'</td><td><span class="status '+(complete?'green':'red')+'">'+(complete?'PDF metadata complete':missing.toLocaleString()+' missing')+'</span></td></tr>';
+    }).join('');
+    sourceBody.innerHTML='<div style="overflow-x:auto"><table class="table"><thead><tr><th>Course</th><th>Latest seat rows</th><th>Choice codes with PDF metadata</th><th>Coverage</th></tr></thead><tbody>'+(coverageRows||'<tr><td colspan="4">No seat data found.</td></tr>')+'</tbody></table></div>';
+  }catch(e){sourceBody.innerHTML='<div class="small muted">Source coverage failed to load. <button class="btn secondary" onclick="window.__sourceCoverageLoaded=false;loadSourceCoverage()">Retry</button></div>';}
+}
 function actionButtons(j){
   const s=String(j.status||'').toUpperCase();
   if(activeStates.includes(s)) return '<span class="small muted">Running…</span>';
@@ -1035,14 +1048,7 @@ function actionButtons(j){
 async function load(){
   try{
     const d=await api('/admin/api/derived-data/status');jobs=d.jobs||[];
-    const sourceChecks=d.source_checks||[];
-    const sourceBody=document.querySelector('#sourceFidelityBody');
-    const coverageRows=sourceChecks.map(x=>{
-      const total=Number(x.choice_codes||0),covered=Number(x.metadata_codes||0),missing=Number(x.missing_metadata_codes||0);
-      const complete=total>0&&missing===0;
-      return '<tr><td>'+esc(displayCourseFamily(x.program_family))+'</td><td>'+Number(x.latest_seat_rows||0).toLocaleString()+'</td><td>'+covered.toLocaleString()+' / '+total.toLocaleString()+'</td><td><span class="status '+(complete?'green':'red')+'">'+(complete?'PDF metadata complete':missing.toLocaleString()+' missing')+'</span></td></tr>';
-    }).join('');
-    sourceBody.innerHTML='<div style="overflow-x:auto"><table class="table"><thead><tr><th>Course</th><th>Latest seat rows</th><th>Choice codes with PDF metadata</th><th>Coverage</th></tr></thead><tbody>'+ (coverageRows||'<tr><td colspan="4">No seat data found.</td></tr>')+'</tbody></table></div>';
+    if(!window.__sourceCoverageLoaded){window.__sourceCoverageLoaded=true;loadSourceCoverage()}
     const sel=document.querySelector('#course'),current=sel.value;
     sel.innerHTML='<option value="">All courses in production DB</option>'+d.courses.map(c=>'<option value="'+esc(c)+'">'+esc(displayCourseFamily(c))+'</option>').join('');
     if([...sel.options].some(o=>o.value===current))sel.value=current;
