@@ -168,8 +168,8 @@ def main() -> int:
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-name", default=None, help="Original uploaded filename for provenance fields")
-    parser.add_argument("--chunk-pages", type=int, default=10,
-                        help="Maximum pages per temporary PDF part (default: 10)")
+    parser.add_argument("--chunk-pages", type=int, default=5,
+                        help="Maximum pages per temporary PDF part (default: 5)")
     parser.add_argument("--keep-parts", action="store_true",
                         help="Keep temporary split PDFs for inspection")
     parser.add_argument("--hybrid", action="store_true",
@@ -239,6 +239,9 @@ def main() -> int:
 
     write_progress("RUNNING", 0, 0, "Preparing extraction")
 
+    # Keep one read-only source document open for the full split loop. Reopening
+    # a multi-thousand-page PDF for every chunk adds avoidable parse/index work.
+    split_source = fitz.open(source)
     for idx in range(count):
         start = idx * args.chunk_pages
         end = min(start + args.chunk_pages, total_pages)
@@ -263,8 +266,7 @@ def main() -> int:
         write_progress("RUNNING", start + 1, number - 1, f"Extracting pages {start+1}-{end}")
         print(f"[{number}/{count}] pages {start+1}-{end}: creating bounded PDF part")
         if not chunk_pdf.exists():
-            with fitz.open(source) as split_source:
-                split_pdf(split_source, chunk_pdf, start, end)
+            split_pdf(split_source, chunk_pdf, start, end)
 
         env = os.environ.copy()
         env["CAPFIND_PAGE_OFFSET"] = str(start)
@@ -338,6 +340,7 @@ def main() -> int:
             chunk_pdf.unlink(missing_ok=True)
         print(f"    completed: {rows:,} rows")
 
+    split_source.close()
     manifest["parts"] = sorted(parts, key=lambda p: p["index"])
     manifest["status"] = "COMBINING"
     atomic_json(manifest_path, manifest)
