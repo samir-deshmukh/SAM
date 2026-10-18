@@ -83,18 +83,28 @@ def detect_course_family(value):
     # Official CAP PDFs often mention the institution's engineering college in
     # every row. Do not let that incidental wording override the degree named
     # in the document heading.
-    if "MASTER OF ARCHITECTURE" in text:
+    # Some official CAP lists combine closely related programs in one PDF.
+    # Select the primary course named in the heading, rather than letting
+    # program names repeated in individual college rows override the heading.
+    if "M.PHARM" in text and "PHARM.D" in text and "POST BACCALAUREATE" in text:
+        return "MPHARM"
+    if "B.PHARMACY" in text and "PHARM.D" in text and "POST GRADUATE" in text:
+        return "BPHARM"
+    if "MASTER OF ARCHITECTURE" in text or "POST GRADUATE COURSE IN ARCHITECTURE" in text:
         return "MARCH"
-    if "MASTER OF PHARMACY" in text:
+    if "MASTER OF PHARMACY" in text or "POST GRADUATE DEGREE COURSE IN PHARMACY" in text:
         return "MPHARM"
     if "DEGREE COURSE IN ARCHITECTURE" in text or "BACHELOR OF ARCHITECTURE" in text:
         return "BARCH"
+    if "DEGREE COURSE IN PHARMACY" in text and "POST GRADUATE" not in text:
+        return "BPHARM"
     if (
         "POST GRADUATE DEGREE COURSE IN ENGINEERING AND TECHNOLOGY" in text
         or "POST GRADUATE TECHNICAL COURSES IN ENGINEERING AND TECHNOLOGY" in text
         or "POST GRADUATE DEGREE COURSE IN ENGINEERING" in text
         or "MASTER OF ENGINEERING" in text
         or "MASTER OF TECHNOLOGY" in text
+        or re.search(r"\bM\s*\.?\s*E\s*\.?\s*/\s*M\s*\.?\s*TECH\b", text)
         or "M.E. M.TECH" in text
         or "M.E. M TECH" in text
     ):
