@@ -24,7 +24,7 @@ _FAMILY_PATTERNS = (
     ("MPLAN", re.compile(r"\b(?:M\s*\.?\s*PLAN(?:NING)?|MASTER OF PLANNING)\b")),
     ("ME", re.compile(r"\bM\s*\.?\s*E\.?\b")),
     ("PHARMD", re.compile(r"\b(?:PHARM\s*\.?D|DOCTOR OF PHARMACY)\b")),
-    ("BARCH", re.compile(r"\b(?:B\s*\.?\s*ARCH(?:ITECTURE)?|BACHELOR OF ARCHITECTURE)\b")),
+    ("BARCH", re.compile(r"\b(?:B\s*\.?\s*ARCH(?:ITECTURE)?|BACHELOR OF ARCHITECTURE|(?:FIVE YEAR FULL TIME )?DEGREE COURSE IN ARCHITECTURE)\b")),
     ("BPLAN", re.compile(r"\b(?:B\s*\.?\s*PLAN(?:NING)?|BACHELOR OF PLANNING)\b")),
     ("MHMCT", re.compile(r"\b(?:M\s*HMCT|MASTER OF HOTEL MANAGEMENT)\b")),
     ("HMCT", re.compile(r"\b(?:HMCT|HOTEL MANAGEMENT AND CATERING TECHNOLOGY)\b")),
