@@ -836,7 +836,7 @@ def import_center() -> str:
     <div class="card panel" id="liveExtractionCard"><div class="toolbar"><h2>Processing</h2><span class="small muted" id="liveExtractionState">Checking worker…</span></div><div id="liveExtractionEmpty" class="small muted">Waiting for an active extraction.</div><div id="liveExtractionDetails" style="display:none"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap"><div style="min-width:0;flex:1"><b id="liveExtractionFile" style="overflow-wrap:anywhere">—</b><div class="small muted" id="liveExtractionStep" style="margin-top:5px">—</div></div><b id="liveExtractionPercent" style="font-size:22px;white-space:nowrap">0%</b></div><div class="commit-track" style="margin:12px 0 10px"><div class="commit-bar" id="liveExtractionBar"></div></div><div class="commit-progress-stats"><span id="liveExtractionPages">Pages: —</span><span id="liveExtractionChunks">Chunks: —</span></div></div></div>
   </div>
 </div>
-<div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Import queue</h2></div><div class="tablewrap"><table class="table import-queue"><thead><tr><th>Metadata</th><th>Status</th><th>Updated</th><th>Controls</th></tr></thead><tbody id="list"></tbody></table></div></div>"""
+<div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Imports</h2></div><div class="tablewrap"><table class="table import-queue"><thead><tr><th>Metadata</th><th>Status</th><th>Updated</th><th>Controls</th></tr></thead><tbody id="list"></tbody></table></div></div>"""
     js=_common_js()+r'''<script>
 const form=document.querySelector('#uploadForm'),fileInput=document.querySelector('#file'),uploadBtn=document.querySelector('#uploadBtn'),uploadState=document.querySelector('#uploadState'),uploadMetadata=document.querySelector('#uploadMetadata');
 function parseCsvLine(line){const out=[];let value='',quoted=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'&&quoted&&line[i+1]==='"'){value+='"';i++}else if(ch==='"'){quoted=!quoted}else if(ch===','&&!quoted){out.push(value);value=''}else value+=ch}out.push(value);return out}
@@ -932,7 +932,7 @@ async function load(){
       }
       if(canDelete)controls+='<button class="iconbtn" title="Delete import and source file" aria-label="Delete import and source file" onclick="removeJob('+x.id+')">🗑</button>';
       const detail=queueStatusDetail(x,s);
-      const statusCell=badge(s)+(detail?'<div class="small muted status-detail">'+esc(detail)+'</div>':'');
+      const statusCell=badge(s==='QUEUED'?'PROCESSING':s)+(detail?'<div class="small muted status-detail">'+esc(detail)+'</div>':'');
       return '<tr><td><b>'+esc(meta||'Awaiting identification')+'</b>'+(sourceLabel?'<div class="small muted import-source-name">'+esc(sourceLabel)+'</div>':'')+'</td><td>'+statusCell+'</td><td>'+fmtTime(x.updated_at||x.created_at)+'</td><td><div class="rowactions">'+controls+'</div></td></tr>';
     }).join('')||'<tr><td colspan="4" class="empty">No imports yet.</td></tr>';
   }catch(e){toast(e.message,'err')}
