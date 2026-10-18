@@ -79,6 +79,26 @@ def detect_course_family(value):
     equally strong evidence, return None so preflight stops instead of guessing.
     """
     text = re.sub(r"[_-]+", " ", str(value or "").upper())
+
+    # Official CAP PDFs often mention the institution's engineering college in
+    # every row. Do not let that incidental wording override the degree named
+    # in the document heading.
+    if "MASTER OF ARCHITECTURE" in text:
+        return "MARCH"
+    if "MASTER OF PHARMACY" in text:
+        return "MPHARM"
+    if "DEGREE COURSE IN ARCHITECTURE" in text or "BACHELOR OF ARCHITECTURE" in text:
+        return "BARCH"
+    if (
+        "POST GRADUATE DEGREE COURSE IN ENGINEERING AND TECHNOLOGY" in text
+        or "POST GRADUATE DEGREE COURSE IN ENGINEERING" in text
+        or "MASTER OF ENGINEERING" in text
+        or "MASTER OF TECHNOLOGY" in text
+        or "M.E. M.TECH" in text
+        or "M.E. M TECH" in text
+    ):
+        return "ME"
+
     scores = {}
     for family, pattern in _FAMILY_PATTERNS:
         hits = len(list(pattern.finditer(text)))
