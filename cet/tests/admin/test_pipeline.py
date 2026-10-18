@@ -2,13 +2,31 @@ import hashlib
 
 import pytest
 
-from backend.admin.pipeline import MAX_PDF_BYTES, detect_data_type, extract_pdf_metadata, identify, security_check
+from backend.admin.pipeline import MAX_PDF_BYTES, detect_course_family, detect_data_type, extract_pdf_metadata, identify, security_check
 from backend.admin.processing import _resolve_cutoff_dimensions
 
 
 def test_identify_cutoff_and_seat_filenames():
     assert identify("BCA_2026_C1.pdf") == ("CUTOFFS", "BCA", 2026, "C1", 1.0)
     assert identify("MCA_26_C2_SM.pdf") == ("SEATS", "MCA", 2026, "C2", 1.0)
+
+
+def test_identifies_architecture_before_incidental_mba_reference(monkeypatch, tmp_path):
+    pdf = tmp_path / "MBA_26_C1.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    monkeypatch.setattr(
+        "backend.admin.pipeline._pdf_text_probe",
+        lambda path: "Bachelor of Architecture CAP Round 1 2026-27. Other admissions include MBA.",
+    )
+    assert identify(pdf.name) == ("CUTOFFS", "MBA", 2026, "C1", 1.0)
+    assert extract_pdf_metadata(pdf, pdf.name) == ("BARCH", 2026, "C1")
+
+
+def test_detects_common_course_families_without_substring_guessing():
+    assert detect_course_family("BACHELOR OF ARCHITECTURE") == "BARCH"
+    assert detect_course_family("B.Pharmacy CAP Seat Matrix") == "BPHARM"
+    assert detect_course_family("MCA 2026 C1") == "MCA"
+    assert detect_course_family("generic admission document") is None
 
 
 def test_identify_partial_filename_has_partial_confidence():

@@ -666,7 +666,9 @@ const ADMIN_AUTH_KEY='cet-cap-admin-auth-v1';
 function displayCourseFamily(value){
   const raw=String(value??'').trim();
   const normalized=raw.toUpperCase().replace(/[.\s]/g,'');
-  return ['BE','BTECH','BE/BTECH'].includes(normalized)?'BE / BTech':raw;
+  if(['BE','BTECH','BE/BTECH'].includes(normalized))return 'BE / BTech';
+  const labels={BARCH:'B.Architecture',MARCH:'M.Architecture',BPLAN:'B.Planning',MPLAN:'M.Planning',BPHARM:'B.Pharmacy',MPHARM:'M.Pharmacy',PHARMD:'Pharm.D',ME:'M.E.',LLB3:'3-Year LLB',LLB5:'5-Year Law',BED:'B.Ed',BPED:'B.P.Ed',MED:'M.Ed',MPED:'M.P.Ed',HMCT:'HMCT',MHMCT:'MHMCT',BDES:'B.Des',MTECH:'M.Tech'};
+  return labels[normalized]||raw;
 }
 if(sessionStorage.getItem(ADMIN_AUTH_KEY)!=='1'){
   window.location.replace('/admin/login');
@@ -859,7 +861,7 @@ function detectCsvMetadata(file,header,line){
   const row={};cols.forEach((k,i)=>row[k]=String(values[i]??'').trim());
   const type=cols.includes('institution_name')&&cols.includes('program_name')&&cols.includes('program_code')?'CUTOFFS':cols.includes('choice_code')&&cols.includes('seats')&&cols.includes('allocation_type')?'SEATS':'';
   const names=(String(row.source_pdf||'')+' '+file.name).toUpperCase();
-  const family=/\bBCA\b/.test(names)?'BCA':/\bBBA\b/.test(names)?'BBA':/\bMBA\b/.test(names)?'MBA':/\bMCA\b/.test(names)?'MCA':(/\bB\.?E\.?\b|(?:^|[_\W])BE(?:[_\W]|$)|BTECH|B\.?TECH|ENGG|SEATMATRIX|SEAT_MATRIX|(?:^|[_\W])SM(?:[_\W]|$)|(?:^|[_\W])FE(?:[_\W]|$)/.test(names)?'BE':'');
+  const family=/M\s*\.?\s*ARCH(?:ITECTURE)?|MASTER OF ARCHITECTURE/.test(names)?'MARCH':/B\s*\.?\s*ARCH(?:ITECTURE)?|BACHELOR OF ARCHITECTURE/.test(names)?'BARCH':/M\s*\.?\s*PLAN(?:NING)?|MASTER OF PLANNING/.test(names)?'MPLAN':/B\s*\.?\s*PLAN(?:NING)?|BACHELOR OF PLANNING/.test(names)?'BPLAN':/PHARM\s*\.?\s*D|DOCTOR OF PHARMACY/.test(names)?'PHARMD':/M\s*\.?\s*PHARM(?:ACY)?|MASTER OF PHARMACY/.test(names)?'MPHARM':/B\s*\.?\s*PHARM(?:ACY)?|BACHELOR OF PHARMACY/.test(names)?'BPHARM':/\bBCA\b/.test(names)?'BCA':/\bBBA\b|\bBMS\b|\bBBM\b/.test(names)?'BBA':/\bMBA\b|\bMMS\b/.test(names)?'MBA':/\bMCA\b/.test(names)?'MCA':/\bLLB\b/.test(names)?'LLB3':/\bM\s*\.?\s*E\.?\b/.test(names)?'ME':/\bMTECH\b|MASTER OF TECHNOLOGY/.test(names)?'MTECH':(/\bB\.?E\.?\b|(?:^|[_\W])BE(?:[_\W]|$)|BTECH|B\.?TECH|ENGG|SEATMATRIX|SEAT_MATRIX|(?:^|[_\W])SM(?:[_\W]|$)|(?:^|[_\W])FE(?:[_\W]|$)/.test(names)?'BE':'');
   const year=(names.match(/20[0-9]{2}/)||[])[0]||'';
   const m=names.match(/CAP[ _-]*(?:ROUND[ _-]*)?([1-4])|\bC([1-4])\b/),round=m?'C'+(m[1]||m[2]):'';
   return {type,family,year,round,ready:Boolean(type&&family&&year&&(type==='SEATS'||round))};

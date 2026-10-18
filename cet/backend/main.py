@@ -1435,7 +1435,7 @@ def upload_csv(request: Request, background_tasks: BackgroundTasks, file: Upload
     if not name.lower().endswith('.csv'): raise HTTPException(400,'Only .csv files are accepted in CSV Import')
     data_type = str(data_type or '').strip().upper(); family = str(course_family or '').strip().upper()
     if data_type not in {'CUTOFFS','SEATS'}: raise HTTPException(400,'Choose Cutoff data or Seat matrix data')
-    if family not in {'BCA','BBA','MBA','MCA','BE','BTECH'}: raise HTTPException(400,'Unsupported course family')
+    if family not in {'BCA','BBA','MBA','MCA','BE','BTECH','BARCH','MARCH','BPLAN','MPLAN','BPHARM','MPHARM','PHARMD','ME','LLB3','LLB5','BED','BPED','MED','MPED','HMCT','MHMCT','BDES','MTECH'}: raise HTTPException(400,'Unsupported course family')
     if year < 2000 or year > 2100: raise HTTPException(400,'Academic year must be a four-digit year')
     round_name = str(round_name or '').strip().upper()
     if data_type == 'CUTOFFS' and round_name not in {'C1','C2','C3','C4'}: raise HTTPException(400,'Select CAP cutoff round C1, C2, C3 or C4')
