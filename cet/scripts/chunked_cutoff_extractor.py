@@ -42,7 +42,10 @@ def split_pdf(source: fitz.Document, destination: Path, start: int, end: int) ->
     chunk = fitz.open()
     try:
         chunk.insert_pdf(source, from_page=start, to_page=end - 1, links=True, annots=True)
-        chunk.save(destination, garbage=3, deflate=True)
+        # Temporary chunks are short-lived local work files. Avoid expensive full garbage
+        # collection/deflation here; the source PDF is unchanged and extraction quality
+        # comes from the page text, not recompressing the temporary copy.
+        chunk.save(destination, garbage=0, deflate=False)
     finally:
         chunk.close()
 
@@ -168,8 +171,8 @@ def main() -> int:
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-name", default=None, help="Original uploaded filename for provenance fields")
-    parser.add_argument("--chunk-pages", type=int, default=5,
-                        help="Maximum pages per temporary PDF part (default: 5)")
+    parser.add_argument("--chunk-pages", type=int, default=25,
+                        help="Maximum pages per temporary PDF part (default: 25)")
     parser.add_argument("--keep-parts", action="store_true",
                         help="Keep temporary split PDFs for inspection")
     parser.add_argument("--hybrid", action="store_true",
