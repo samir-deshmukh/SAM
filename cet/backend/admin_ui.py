@@ -525,8 +525,8 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 .health-metrics{grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch}
 .detected-issues .value{font-size:22px;margin-top:4px}
 .issue-summary{display:block;line-height:1.35;margin-top:5px;overflow-wrap:anywhere}
-.derived-grid{grid-template-columns:minmax(310px,410px) minmax(0,1fr)}
-.derived-build-card{align-self:start;padding:14px}
+.derived-grid{grid-template-columns:minmax(0,1fr)}
+.derived-build-card{align-self:stretch;padding:14px}
 .derived-build-card .toolbar{margin-bottom:10px;align-items:center}
 .derived-build-card .filters{display:grid;grid-template-columns:minmax(0,1fr);gap:9px;margin-top:8px!important}
 .derived-build-card #buildBtn{width:100%;min-height:38px}
@@ -547,6 +547,22 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 .resolver-table td:last-child{min-width:225px}
 @media(max-width:1050px){.derived-grid{grid-template-columns:1fr}.runtime-metrics{grid-template-columns:repeat(3,minmax(0,1fr))!important}.health-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){.runtime-metrics,.health-metrics{grid-template-columns:1fr!important}.derived-build-card .filters{grid-template-columns:1fr}}
+
+/* Import workspace: processing sits directly under RAM and CPU, beside upload. */
+.import-workspace{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.6fr);gap:14px;align-items:start;margin-bottom:14px}
+.import-workspace>.upload-quick{padding:16px;min-width:0}
+.import-runtime-column{display:grid;gap:10px;min-width:0}
+.import-runtime-column .runtime-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.import-runtime-column .resource-metric{padding:10px 12px;min-width:0}
+.import-runtime-column #liveExtractionCard{margin-top:0!important;min-width:0}
+.import-source-name{margin-top:4px;overflow-wrap:anywhere;line-height:1.35}
+.btn.dangerbtn{background:#111111!important;color:#FFFFFF!important;border:1px solid #111111!important;box-shadow:0 2px 5px rgba(0,0,0,.12)}
+.btn.dangerbtn:hover{background:#333333!important;color:#FFFFFF!important;box-shadow:0 4px 9px rgba(0,0,0,.18)}
+#clearBuildBtn{background:#FFFFFF!important;color:#111111!important;border:1px solid #777777!important;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+#clearBuildBtn:hover{background:#EEEEEE!important;border-color:#111111!important}
+@media(max-width:1050px){.import-workspace{grid-template-columns:minmax(0,1fr)}.derived-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:720px){.import-runtime-column .runtime-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.import-workspace{grid-template-columns:minmax(0,1fr)}}
+
 
 '''
 
@@ -798,12 +814,14 @@ async function load(){loadSiteUsage();try{const [o,j]=await Promise.all([api('/a
 
 def import_center() -> str:
     body="""<div class="title"><div><h1>Import Center</h1></div><div class="live"><span class="dot"></span>Server-side processing</div></div>
-<div class="grid4 runtime-metrics" style="margin-bottom:14px">
+<div class="import-workspace">
   <div class="card metric upload-quick"><div class="label">Upload files</div><form id="uploadForm" style="margin-top:8px"><input id="file" type="file" accept="application/pdf,.pdf,.csv,text/csv" multiple required style="display:block;margin:0 0 8px"><div id="selectedFiles" class="small muted" style="margin-bottom:8px">No files selected.</div><div id="uploadMetadata" class="small muted" style="margin-bottom:8px"></div><button class="btn primary" id="uploadBtn">Upload</button><div id="uploadState" class="small muted" style="margin-top:6px"></div></form></div>
-  <div class="card metric resource-metric"><div class="label">Backend RAM</div><div class="value" id="ramValue">—</div><div class="small muted" id="ramDetail">Reading cgroup metrics</div></div>
-  <div class="card metric resource-metric"><div class="label">CPU usage</div><div class="value" id="cpuValue">—</div><div class="small muted" id="cpuDetail">Measured between polls</div></div>
- </div>
-<div class="card panel" id="liveExtractionCard" style="margin-top:8px"><div class="toolbar"><h2>Processing</h2><span class="small muted" id="liveExtractionState">Checking worker…</span></div><div id="liveExtractionEmpty" class="small muted">Waiting for an active extraction.</div><div id="liveExtractionDetails" style="display:none"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap"><div style="min-width:0;flex:1"><b id="liveExtractionFile" style="overflow-wrap:anywhere">—</b><div class="small muted" id="liveExtractionStep" style="margin-top:5px">—</div></div><b id="liveExtractionPercent" style="font-size:22px;white-space:nowrap">0%</b></div><div class="commit-track" style="margin:12px 0 10px"><div class="commit-bar" id="liveExtractionBar"></div></div><div class="commit-progress-stats"><span id="liveExtractionPages">Pages: —</span><span id="liveExtractionChunks">Chunks: —</span><span id="liveExtractionQueue">Queued: 0</span></div><div class="small muted" id="liveExtractionHint" style="margin-top:9px">Progress refreshes automatically.</div></div></div>
+  <div class="import-runtime-column">
+    <div class="runtime-metrics"><div class="card metric resource-metric"><div class="label">Backend RAM</div><div class="value" id="ramValue">—</div><div class="small muted" id="ramDetail">Reading cgroup metrics</div></div>
+    <div class="card metric resource-metric"><div class="label">CPU usage</div><div class="value" id="cpuValue">—</div><div class="small muted" id="cpuDetail">Measured between polls</div></div></div>
+    <div class="card panel" id="liveExtractionCard"><div class="toolbar"><h2>Processing</h2><span class="small muted" id="liveExtractionState">Checking worker…</span></div><div id="liveExtractionEmpty" class="small muted">Waiting for an active extraction.</div><div id="liveExtractionDetails" style="display:none"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap"><div style="min-width:0;flex:1"><b id="liveExtractionFile" style="overflow-wrap:anywhere">—</b><div class="small muted" id="liveExtractionStep" style="margin-top:5px">—</div></div><b id="liveExtractionPercent" style="font-size:22px;white-space:nowrap">0%</b></div><div class="commit-track" style="margin:12px 0 10px"><div class="commit-bar" id="liveExtractionBar"></div></div><div class="commit-progress-stats"><span id="liveExtractionPages">Pages: —</span><span id="liveExtractionChunks">Chunks: —</span><span id="liveExtractionQueue">Queued: 0</span></div><div class="small muted" id="liveExtractionHint" style="margin-top:9px">Progress refreshes automatically.</div></div></div>
+  </div>
+</div>
 <div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Import queue</h2></div><div class="tablewrap"><table class="table import-queue"><thead><tr><th>Metadata</th><th>Status</th><th>Updated</th><th>Controls</th></tr></thead><tbody id="list"></tbody></table></div></div>"""
     js=_common_js()+r'''<script>
 const form=document.querySelector('#uploadForm'),fileInput=document.querySelector('#file'),uploadBtn=document.querySelector('#uploadBtn'),uploadState=document.querySelector('#uploadState'),uploadMetadata=document.querySelector('#uploadMetadata');
@@ -887,7 +905,10 @@ async function load(){
       const active=['QUEUED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING','PAUSED'].includes(s);
       const canDelete=['RECEIVED','IDENTIFIED','REVIEW_REQUIRED','STAGED','FAILED','CANCELLED','QUARANTINED'].includes(s);
       const isDrive=String(x.stored_path||'').startsWith('gdrive://');
-      const meta=[x.original_filename,x.job_key?'Job '+x.job_key:null,'#'+x.id,x.data_type,displayCourseFamily(x.course_family),x.year,x.round,isDrive?'Google Drive source':null].filter(Boolean).join(' · ');
+      const kind=String(x.data_type||'').toUpperCase();
+      const family=displayCourseFamily(x.course_family||'');
+      const meta=[kind,family,x.year,x.round&&kind!=='SEATS'?x.round:null].filter(Boolean).join(' · ');
+      const sourceLabel=[x.original_filename,isDrive?'Google Drive source':null].filter(Boolean).join(' · ');
       let controls='';
       if(active){
         const pauseState=s==='PAUSED'||(window.activeRuntimeJob&&Number(window.activeRuntimeJob.id)===Number(x.id)&&(window.activeRuntimeJob.pause_requested||window.activeRuntimeJob.paused_at_checkpoint));
@@ -898,7 +919,7 @@ async function load(){
       if(canDelete)controls+='<button class="iconbtn" title="Delete import and source file" aria-label="Delete import and source file" onclick="removeJob('+x.id+')">🗑</button>';
       const detail=queueStatusDetail(x,s);
       const statusCell=badge(s)+(detail?'<div class="small muted status-detail">'+esc(detail)+'</div>':'');
-      return '<tr><td><b>'+esc(meta||'Awaiting identification')+'</b></td><td>'+statusCell+'</td><td>'+fmtTime(x.updated_at||x.created_at)+'</td><td><div class="rowactions">'+controls+'</div></td></tr>';
+      return '<tr><td><b>'+esc(meta||'Awaiting identification')+'</b>'+(sourceLabel?'<div class="small muted import-source-name">'+esc(sourceLabel)+'</div>':'')+'</td><td>'+statusCell+'</td><td>'+fmtTime(x.updated_at||x.created_at)+'</td><td><div class="rowactions">'+controls+'</div></td></tr>';
     }).join('')||'<tr><td colspan="4" class="empty">No imports yet.</td></tr>';
   }catch(e){toast(e.message,'err')}
 }
