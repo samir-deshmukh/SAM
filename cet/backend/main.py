@@ -1682,9 +1682,11 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
                 else 'Source metadata is incomplete; identify year, round and course before processing',
             )
 
+        # A review-required PDF must be re-queued after validator/reference fixes.
+        # Keep the expected prior status in the predicate to avoid racing another worker.
         claimed = connection.execute(
-            "UPDATE import_jobs SET status='QUEUED',current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
-            (job_id,),
+            "UPDATE import_jobs SET status='QUEUED',current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=?",
+            (job_id, job['status']),
         ).rowcount
         if not claimed:
             raise HTTPException(409, 'Import is already being processed')
