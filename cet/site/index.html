@@ -2185,6 +2185,18 @@ function populateSelects() {
 function courseDisplayLabel(value) {
   const raw = String(value ?? "").trim();
   const normalized = raw.toUpperCase().replace(/[.\s]/g, "");
+  const labels = {
+    BARCH: "B.Architecture",
+    MARCH: "M.Architecture",
+    BPLAN: "B.Planning",
+    MPLAN: "M.Planning",
+    BPHARM: "B.Pharmacy",
+    MPHARM: "M.Pharmacy",
+    PHARMD: "Pharm.D",
+    MTECH: "M.Tech",
+    ME: "M.E."
+  };
+  if (labels[normalized]) return labels[normalized];
   return ["BE", "BTECH", "BE/BTECH"].includes(normalized) ? "BE / BTech" : raw;
 }
 
