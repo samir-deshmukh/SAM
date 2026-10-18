@@ -721,9 +721,35 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
             timeout=1800,
         )
         with connect() as connection:
+            missing_metadata = connection.execute("""
+                WITH latest AS (
+                    SELECT program_family, institution_code, MAX(capture_year) AS capture_year
+                    FROM seats
+                    WHERE (? IS NULL OR program_family=?)
+                    GROUP BY program_family, institution_code
+                )
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT s.program_family, s.institution_code, s.capture_year, s.choice_code
+                    FROM seats s
+                    JOIN latest l ON l.program_family=s.program_family
+                        AND l.institution_code=s.institution_code AND l.capture_year=s.capture_year
+                    LEFT JOIN seat_matrix_courses m ON m.program_family=s.program_family
+                        AND m.institution_code=s.institution_code AND m.capture_year=s.capture_year
+                        AND m.choice_code=s.choice_code
+                    WHERE m.choice_code IS NULL AND (? IS NULL OR s.program_family=?)
+                ) missing
+            """, (course_family, course_family, course_family, course_family)).fetchone()[0]
+            if missing_metadata:
+                completion_message = (
+                    f'Calculated data is ready with legacy seat-matrix fallback; '
+                    f'{missing_metadata} latest institution/choice-code records lack full PDF metadata. '
+                    'See Source Coverage; re-import the canonical seat CSV to restore full source details.'
+                )
+            else:
+                completion_message = 'Graph, category and full PDF-backed seat-matrix data is ready'
             connection.execute(
-                "UPDATE derived_data_build_jobs SET status='COMPLETED',progress=100,message='Graph, category and seat-matrix data is ready',finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                (job_id,),
+                "UPDATE derived_data_build_jobs SET status='COMPLETED',progress=100,message=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (completion_message, job_id),
             )
             connection.commit()
     except Exception as exc:
