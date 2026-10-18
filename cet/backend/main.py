@@ -728,7 +728,7 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
                     WHERE (? IS NULL OR program_family=?)
                     GROUP BY program_family, institution_code
                 )
-                SELECT COUNT(*) FROM (
+                SELECT COUNT(*) AS missing_count FROM (
                     SELECT DISTINCT s.program_family, s.institution_code, s.capture_year, s.choice_code
                     FROM seats s
                     JOIN latest l ON l.program_family=s.program_family
@@ -738,7 +738,7 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
                         AND m.choice_code=s.choice_code
                     WHERE m.choice_code IS NULL AND (? IS NULL OR s.program_family=?)
                 ) missing
-            """, (course_family, course_family, course_family, course_family)).fetchone()[0]
+            """, (course_family, course_family, course_family, course_family)).fetchone()["missing_count"]
             if missing_metadata:
                 completion_message = (
                     f'Calculated data is ready with legacy seat-matrix fallback; '
