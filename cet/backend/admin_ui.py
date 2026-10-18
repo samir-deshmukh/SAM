@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from html import escape
 
 
@@ -619,10 +620,12 @@ def _shell(title: str, active: str, body: str, extra_js: str = '') -> str:
         ('resolver','⌁','Website Resolver','/admin/resolver'),
     ]
     nav=''.join(f'<a class="{"active" if active==k else ""}" href="{href}">{icon} &nbsp; {label}</a>' for k,icon,label,href in links)
+    # Standardize the upper-right live indicator across every admin section.
+    body = re.sub(r'<div class="live">.*?</div>', '<div class="live"><span class="dot"></span>Live · <span id="lastRefresh" class="admin-live-time">--:--:--</span></div>', body, flags=re.DOTALL)
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)} - CET CAP Admin</title><style>{CSS}</style></head><body class="admin-locked">
 <div id="adminTabLock" class="admin-tab-lock"><div class="admin-tab-lock-card"><h2 id="adminTabLockTitle">Checking admin connection</h2><p id="adminTabLockMessage">Verifying the active admin tab with the server.</p><button id="adminTabLockRetry" type="button" onclick="window.__cetAdminTabRetry&&window.__cetAdminTabRetry()">Retry connection</button><small id="adminTabLockHint">A temporary connection failure does not necessarily mean another tab is open.</small></div></div>
 <aside class="side"><div class="brand"><div class="mark">╫</div><div><b>CET CAP PORTAL</b></div></div><nav class="nav">{nav}</nav><div class="sidefoot">CET CAP Portal v1.0.0<br>Maharashtra Admissions System<br><span class="online">● System Online</span></div></aside>
-<main class="main"><section class="content">{body}</section></main><div id="toastbox" class="toastbox"></div>{extra_js}{_custom_select_script()}
+<main class="main"><section class="content">{body}</section></main><div id="toastbox" class="toastbox"></div>{extra_js}<script>(function(){{const update=()=>{{const time=new Date().toLocaleTimeString([],{{hour:'2-digit',minute:'2-digit',second:'2-digit'}});document.querySelectorAll('.admin-live-time').forEach(el=>el.textContent=time)}};update();setInterval(update,1000)}})();</script>{_custom_select_script()}
 </body></html>'''
 
 
