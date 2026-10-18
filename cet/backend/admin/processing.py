@@ -461,6 +461,11 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env.setdefault("OMP_THREAD_LIMIT", "1")
                 env.setdefault("OPENBLAS_NUM_THREADS", "1")
                 env.setdefault("MKL_NUM_THREADS", "1")
+                # The seat extractor uses cooperative checkpoints too; expose the
+                # same progress/control channel used by the chunked cutoff worker.
+                env["CAPFIND_JOB_CONTROL_DIR"] = str(staging)
+                env["CAPFIND_JOB_ID"] = str(job_id)
+                env["CAPFIND_WORKER_ID"] = str(worker_id or "")
                 # The extractor closes each PDF page after processing and streams seat rows
                 # to disk, so long files need a length-aware watchdog rather than a
                 # fixed 30-minute cutoff. Keep a hard ceiling for genuinely stuck jobs.
@@ -471,6 +476,11 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 except Exception:
                     expected_pages = 0
                 timeout_seconds = max(1800, min(4 * 60 * 60, expected_pages * 15))
+                env["CAPFIND_TOTAL_PAGES"] = str(expected_pages)
+                # Seat matrices currently run as one page-checkpointed extraction
+                # rather than cutoff-style page chunks.
+                env["CAPFIND_CHUNK_INDEX"] = "1"
+                env["CAPFIND_TOTAL_CHUNKS"] = "1"
                 log_path = work / "seat_extractor.log"
                 with log_path.open("w", encoding="utf-8") as log:
                     p = subprocess.Popen(
