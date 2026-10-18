@@ -548,6 +548,12 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 @media(max-width:1050px){.derived-grid{grid-template-columns:1fr}.runtime-metrics{grid-template-columns:repeat(3,minmax(0,1fr))!important}.health-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){.runtime-metrics,.health-metrics{grid-template-columns:1fr!important}.derived-build-card .filters{grid-template-columns:1fr}}
 
+/* Keep Upload anchored to the lower-right corner of the upload panel. */
+.import-workspace>.upload-quick{display:flex;flex-direction:column}
+.import-workspace>.upload-quick form{display:flex;flex:1;flex-direction:column;min-height:0}
+.import-workspace>.upload-quick #uploadState{margin-top:auto!important;padding-top:8px}
+.import-workspace>.upload-quick #uploadBtn{align-self:flex-end;margin-top:10px}
+
 /* Import workspace: processing sits directly under RAM and CPU, beside upload. */
 .build-loading{align-items:center;gap:12px;min-height:68px}
 .source-loading{display:flex;align-items:center;gap:10px;min-height:52px}
