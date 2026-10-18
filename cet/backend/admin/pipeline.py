@@ -91,6 +91,7 @@ def detect_course_family(value):
         return "BARCH"
     if (
         "POST GRADUATE DEGREE COURSE IN ENGINEERING AND TECHNOLOGY" in text
+        or "POST GRADUATE TECHNICAL COURSES IN ENGINEERING AND TECHNOLOGY" in text
         or "POST GRADUATE DEGREE COURSE IN ENGINEERING" in text
         or "MASTER OF ENGINEERING" in text
         or "MASTER OF TECHNOLOGY" in text

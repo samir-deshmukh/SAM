@@ -27,6 +27,7 @@ def test_detects_common_course_families_without_substring_guessing():
     assert detect_course_family("First Year of Five Year Full Time Degree Course in Architecture") == "BARCH"
     assert detect_course_family("First Year of Five Year Full Time Degree Course in Architecture at College of Engineering and Technology") == "BARCH"
     assert detect_course_family("Two Years Full Time Post Graduate Degree Course in Engineering and Technology") == "ME"
+    assert detect_course_family("Post Graduate Technical Courses in Engineering and Technology for working Professionals") == "ME"
     assert detect_course_family("B.Pharmacy CAP Seat Matrix") == "BPHARM"
     assert detect_course_family("MCA 2026 C1") == "MCA"
     assert detect_course_family("generic admission document") is None
