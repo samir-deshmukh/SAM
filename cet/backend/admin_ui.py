@@ -574,6 +574,12 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 @media(max-width:1050px){.import-workspace{grid-template-columns:minmax(0,1fr)}.derived-grid{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:720px){.import-runtime-column .runtime-metrics{grid-template-columns:repeat(2,minmax(0,1fr))!important}.import-workspace{grid-template-columns:minmax(0,1fr)}}
 
+/* Make admin controls dependable on touch screens: hover transforms can move
+   a target under the user's finger during the first tap in mobile browsers. */
+button,a.btn,.nav a{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+@media (hover:none),(pointer:coarse){
+  button:hover,.btn:hover,.nav a:hover,.card:hover{transform:none!important}
+}
 
 '''
 
