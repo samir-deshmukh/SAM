@@ -2182,6 +2182,12 @@ function populateSelects() {
   courseSelect.value = CONFIG.unselected;
 }
 
+function courseDisplayLabel(value) {
+  const raw = String(value ?? "").trim();
+  const normalized = raw.toUpperCase().replace(/[.\s]/g, "");
+  return ["BE", "BTECH", "BE/BTECH"].includes(normalized) ? "BE / BTech" : raw;
+}
+
 /* ── loadRealCollegeData() ──────────────────────────────────
    Fetches site/data/search_index.json (real ingested CET CAP data,
    built by scripts/export_search_index.py) and replaces the
@@ -2207,7 +2213,7 @@ async function loadRealCollegeData() {
     // Keep the API value unchanged so existing filters and endpoints continue to work.
     CONFIG.courseOptions = courses.map(v => ({
       value: v,
-      label: v === "BE" ? "BE / BTech" : v
+      label: courseDisplayLabel(v)
     }));
 
     populateSelects();
@@ -2328,7 +2334,7 @@ function renderResultsTable() {
       <tr data-id="${c.id}" class="${openId === c.id ? "active" : ""}">
         <td>
           <span class="college-name">${c.name}</span>
-          <span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${c.course}</span>
+          <span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${courseDisplayLabel(c.course)}</span>
         </td>
         <td><span class="cutoff-num">${c.cutoff}</span></td>
         <td><span class="pct-num">${hi.toFixed(2)}–${lo.toFixed(2)}%</span></td>
@@ -2436,7 +2442,7 @@ function showDrawer(college) {
 
   /* Fill header */
   drawerBadge.textContent  = college.institution_code;
-  drawerEyebrow.textContent = `${college.city ?? "City unknown"} · ${college.course}`;
+  drawerEyebrow.textContent = `${college.city ?? "City unknown"} · ${courseDisplayLabel(college.course)}`;
   drawerTitle.textContent  = college.name;
 
   /* Fill body (the renderSlide function builds the HTML) */
@@ -3398,7 +3404,7 @@ function createTrendsController(ids) {
     return `
       <div class="seat-pdf-head">
         <div class="seat-pdf-institution">${escapeHtml(meta.institution_name || collegeName || "College")}</div>
-        <div class="seat-pdf-subline">Seat Matrix · ${escapeHtml(course)}${choiceCount > 1 ? ` · ${choiceCount} choice codes in this college` : ""}</div>
+        <div class="seat-pdf-subline">Seat Matrix · ${escapeHtml(courseDisplayLabel(course))}${choiceCount > 1 ? ` · ${choiceCount} choice codes in this college` : ""}</div>
         ${detailHtml}${summaryHtml}
       </div>`;
   }
@@ -3531,7 +3537,7 @@ function createTrendsController(ids) {
   function wire() {
     COURSES.forEach(c => {
       const opt = document.createElement("option");
-      opt.value = c; opt.textContent = c;
+      opt.value = c; opt.textContent = courseDisplayLabel(c);
       els.tCourse.appendChild(opt);
     });
 
