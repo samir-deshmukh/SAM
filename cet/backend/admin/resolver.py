@@ -379,7 +379,7 @@ def _update_institute_resolution(conn, code, city=None, address=None, website=No
     )
 
 
-def resolve_import_job(job_id=None, limit=None):
+def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_codes=None):
     """Resolve a bounded number of colleges without running a long background loop.
 
     When job_id is supplied, only colleges from that import are considered.
@@ -404,14 +404,26 @@ def resolve_import_job(job_id=None, limit=None):
             c.commit()
 
         if job_id is None:
-            rows = [
-                dict(r) for r in c.execute(
-                    "SELECT institution_code,institution_name,city,website,status,source "
-                    "FROM college_website_resolver "
-                    "WHERE status IN ('PENDING','CANDIDATE') "
-                    "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name)"
-                )
-            ]
+            excluded = sorted({str(code).strip() for code in (exclude_codes or []) if str(code or '').strip()})
+            query = (
+                "SELECT institution_code,institution_name,city,website,status,source "
+                "FROM college_website_resolver"
+            )
+            clauses = []
+            params = []
+            if status_filter:
+                clauses.append("status = ?")
+                params.append(str(status_filter))
+            else:
+                # The empty/All filter deliberately includes every resolver status.
+                pass
+            if excluded:
+                clauses.append("institution_code NOT IN (" + ",".join("?" for _ in excluded) + ")")
+                params.extend(excluded)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name)"
+            rows = [dict(r) for r in c.execute(query, params)]
         else:
             source_rows = c.execute(
                 "SELECT normalized_json FROM import_staging_records "
@@ -630,10 +642,19 @@ def resolve_import_job(job_id=None, limit=None):
                 c.commit()
 
     with connect() as c:
-        remaining = c.execute(
-            "SELECT COUNT(*) AS n FROM college_website_resolver "
-            "WHERE status IN ('PENDING','CANDIDATE')"
-        ).fetchone()['n']
+        excluded = sorted({str(code).strip() for code in (exclude_codes or []) if str(code or '').strip()})
+        remaining_sql = "SELECT COUNT(*) AS n FROM college_website_resolver"
+        remaining_clauses = []
+        remaining_params = []
+        if status_filter:
+            remaining_clauses.append("status = ?")
+            remaining_params.append(str(status_filter))
+        if excluded:
+            remaining_clauses.append("institution_code NOT IN (" + ",".join("?" for _ in excluded) + ")")
+            remaining_params.extend(excluded)
+        if remaining_clauses:
+            remaining_sql += " WHERE " + " AND ".join(remaining_clauses)
+        remaining = c.execute(remaining_sql, remaining_params).fetchone()['n']
     return {
         'ok': True,
         'seeded': seeded,

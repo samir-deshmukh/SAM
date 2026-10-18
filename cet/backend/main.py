@@ -2348,8 +2348,19 @@ def resolver_github_seed(request: Request):
     raise HTTPException(410, 'GitHub seed is disabled; resolver scope is the CAP institutes table')
 
 @app.post('/admin/api/resolver/next')
-def resolver_next(request: Request):
+async def resolver_next(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status_filter = str(body.get('status') or '').strip().upper()
+    if status_filter == 'UNVERIFIED':
+        status_filter = 'CANDIDATE'
+    allowed_statuses = {'PENDING', 'CANDIDATE', 'VERIFIED', 'NEEDS_REVIEW', 'FAILED'}
+    if status_filter and status_filter not in allowed_statuses:
+        raise HTTPException(400, 'Invalid resolver status filter')
+    exclude_codes = [str(x).strip() for x in body.get('exclude_codes', []) if str(x).strip()][:5000]
     if not os.getenv('GEMINI_API_KEY', '').strip():
         return {
             'ok': True,
@@ -2362,19 +2373,53 @@ def resolver_next(request: Request):
     busy, reason = _resolver_server_busy()
     if busy:
         with connect() as c:
-            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE')").fetchone()['n']
-        return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(pending)}
+            sql = 'SELECT COUNT(*) AS n FROM college_website_resolver'
+            clauses, params = [], []
+            if status_filter:
+                clauses.append('status=?')
+                params.append(status_filter)
+            if exclude_codes:
+                clauses.append('institution_code NOT IN (' + ','.join('?' for _ in exclude_codes) + ')')
+                params.extend(exclude_codes)
+            if clauses:
+                sql += ' WHERE ' + ' AND '.join(clauses)
+            remaining = c.execute(sql, params).fetchone()['n']
+        return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(remaining)}
     try:
         with connect() as c:
-            current = c.execute(
-                "SELECT institution_code,institution_name,status FROM college_website_resolver "
-                "WHERE status IN ('PENDING','CANDIDATE') "
-                "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name) LIMIT 1"
-            ).fetchone()
-        result = resolve_import_job(None, limit=1)
+            sql = 'SELECT institution_code,institution_name,status FROM college_website_resolver'
+            clauses, params = [], []
+            if status_filter:
+                clauses.append('status=?')
+                params.append(status_filter)
+            if exclude_codes:
+                clauses.append('institution_code NOT IN (' + ','.join('?' for _ in exclude_codes) + ')')
+                params.extend(exclude_codes)
+            if clauses:
+                sql += ' WHERE ' + ' AND '.join(clauses)
+            sql += " ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name) LIMIT 1"
+            current = c.execute(sql, params).fetchone()
+        if not current:
+            return {'ok': True, 'busy': False, 'current': None, 'processed': 0, 'remaining': 0}
+        current_code = str(current['institution_code'])
+        result = resolve_import_job(None, limit=1, status_filter=status_filter or None, exclude_codes=exclude_codes)
+        # Count only not-yet-attempted colleges, including for the All-status scan.
+        scanned = list(dict.fromkeys([*exclude_codes, current_code]))
+        with connect() as c:
+            remaining_sql = 'SELECT COUNT(*) AS n FROM college_website_resolver'
+            remaining_clauses, remaining_params = [], []
+            if status_filter:
+                remaining_clauses.append('status=?')
+                remaining_params.append(status_filter)
+            if scanned:
+                remaining_clauses.append('institution_code NOT IN (' + ','.join('?' for _ in scanned) + ')')
+                remaining_params.extend(scanned)
+            if remaining_clauses:
+                remaining_sql += ' WHERE ' + ' AND '.join(remaining_clauses)
+            result['remaining'] = int(c.execute(remaining_sql, remaining_params).fetchone()['n'])
         return {'ok': True, 'busy': False,
-                'current': dict(current) if current else None,
-                'processed': result.get('resolved', 0) + result.get('failed', 0), **result}
+                'current': dict(current),
+                'processed': result.get('resolved', 0) + result.get('failed', 0) + result.get('searched', 0), **result}
     except Exception as exc:
         log.exception('Single resolver step failed')
         raise HTTPException(500, f'Resolver step failed: {str(exc)[:300]}')
