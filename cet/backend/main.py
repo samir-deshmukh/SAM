@@ -2302,40 +2302,14 @@ async def feedback_status(request: Request, feedback_id: int):
 @app.get('/admin/resolver', response_class=HTMLResponse)
 def resolver_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
-    with connect() as c:
-        sync_institutes_to_resolver(c)
-        c.commit()
-        rows=[dict(r) for r in c.execute(
-            """SELECT i.institution_code,
-                      COALESCE(NULLIF(r.institution_name,''),NULLIF(i.institution_name,'')) AS institution_name,
-                      COALESCE(r.city,i.city) AS city,
-                      COALESCE(r.website,i.website) AS website,
-                      COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(NULLIF(r.source,''),NULLIF(i.website_source,''),
-                        (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
-                         WHERE c.institution_code=i.institution_code
-                         ORDER BY c.year DESC, c.id DESC LIMIT 1),
-                        (SELECT 'Seat matrix: ' || s.source_pdf FROM seats s
-                         WHERE s.institution_code=i.institution_code
-                         ORDER BY s.capture_year DESC, s.id DESC LIMIT 1),
-                        'CAP data (source file unavailable)') AS source,
-                      COALESCE(r.source_url,i.website) AS source_url,
-                      r.address, r.city_source, r.website_source, r.address_source,
-                      r.verification_note, r.last_checked_at, r.updated_at
-               FROM institutes i
-               LEFT JOIN college_website_resolver r
-                 ON r.institution_code=i.institution_code
-              ORDER BY LOWER(COALESCE(r.institution_name,i.institution_name))
-              LIMIT 5000"""
-        )]
-    return resolver_page(rows)
+    # Rows are loaded once by the page's API call. Do not sync or query all
+    # colleges while constructing the HTML response.
+    return resolver_page([])
 
 @app.get('/admin/api/resolver')
 def resolver_api(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
     with connect() as c:
-        sync_institutes_to_resolver(c)
-        c.commit()
         return [dict(r) for r in c.execute(
             """SELECT i.institution_code,
                       COALESCE(NULLIF(r.institution_name,''),NULLIF(i.institution_name,'')) AS institution_name,
