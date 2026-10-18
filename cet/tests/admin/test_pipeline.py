@@ -31,6 +31,8 @@ def test_detects_common_course_families_without_substring_guessing():
     assert detect_course_family("Provisional Cutoff List for First Year of Full Time Master Program in M.PHARM & PHARM.D (Post Baccalaureate)") == "MPHARM"
     assert detect_course_family("Cut Off Merit for First Year Under Graduate Technical Course in B.Pharmacy & Post Graduate Pharm.D") == "BPHARM"
     assert detect_course_family("Admission to First Year of Post Graduate Technical Courses in Engineering/Technology (M.E./M.Tech.)") == "ME"
+    assert detect_course_family("Cut Off List for Four Year Degree Courses in Engineering and Technology; M.E./M.Tech is mentioned elsewhere") == "BE"
+    assert detect_course_family("Cut Off Merit for Post Graduate Technical Courses in Engineering/Technology (M.E./M.Tech.)") == "ME"
     assert detect_course_family("Admission to First Year of Four Years Full Time Degree Course in Pharmacy (B.Pharm)") == "BPHARM"
     assert detect_course_family("B.Pharmacy CAP Seat Matrix") == "BPHARM"
     assert detect_course_family("MCA 2026 C1") == "MCA"

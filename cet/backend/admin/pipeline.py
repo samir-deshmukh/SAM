@@ -78,7 +78,7 @@ def detect_course_family(value):
     Full degree titles outweigh incidental acronyms. If multiple families have
     equally strong evidence, return None so preflight stops instead of guessing.
     """
-    text = re.sub(r"[_-]+", " ", str(value or "").upper())
+    text = re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", str(value or "").upper())).strip()
 
     # Official CAP PDFs often mention the institution's engineering college in
     # every row. Do not let that incidental wording override the degree named
@@ -99,14 +99,8 @@ def detect_course_family(value):
     if "DEGREE COURSE IN PHARMACY" in text and "POST GRADUATE" not in text:
         return "BPHARM"
     if (
-        "POST GRADUATE DEGREE COURSE IN ENGINEERING AND TECHNOLOGY" in text
-        or "POST GRADUATE TECHNICAL COURSES IN ENGINEERING AND TECHNOLOGY" in text
-        or "POST GRADUATE DEGREE COURSE IN ENGINEERING" in text
-        or "MASTER OF ENGINEERING" in text
-        or "MASTER OF TECHNOLOGY" in text
-        or re.search(r"\bM\s*\.?\s*E\s*\.?\s*/\s*M\s*\.?\s*TECH\b", text)
-        or "M.E. M.TECH" in text
-        or "M.E. M TECH" in text
+        "POST GRADUATE DEGREE COURSE IN ENGINEERING" in text
+        or "POST GRADUATE TECHNICAL COURSES IN ENGINEERING" in text
     ):
         return "ME"
 
