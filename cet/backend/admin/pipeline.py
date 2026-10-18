@@ -86,6 +86,11 @@ def detect_course_family(value):
     # Some official CAP lists combine closely related programs in one PDF.
     # Select the primary course named in the heading, rather than letting
     # program names repeated in individual college rows override the heading.
+    # One 2026 CAP Round-IV MBA PDF has a known contradictory heading:
+    # "Master of Computer Applications (MBA)" while its college rows say M.B.A.
+    # In this specific case, the explicit MBA acronym and row program win.
+    if "MASTER OF COMPUTER APPLICATIONS (MBA)" in text and re.search(r"\bM\.?\s*B\.?\s*A\.?\b", text):
+        return "MBA"
     if "M.PHARM" in text and "PHARM.D" in text and "POST BACCALAUREATE" in text:
         return "MPHARM"
     if "B.PHARMACY" in text and "PHARM.D" in text and "POST GRADUATE" in text:
