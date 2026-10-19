@@ -18,3 +18,16 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Findings:** Identified high-risk memory candidates in whole-file seat comparison and page-audit accumulation, a missing child-process timeout, duplicate CSV reading for progress totals, stale Streamlit-era instructions, and a CI workflow that does not trigger on the new branch's pushes.
 - **Validation:** Documentation-only change; source files and production were not modified. Findings are explicitly labeled for further review and measurement, not asserted as confirmed production root causes.
 - **Production impact:** None.
+
+### Enable CI push checks on the rebuild branch
+- **Commit:** `bcb4f84b977eda63503d97764b29d9cd9aef2bc9`
+- **Scope:** Added the isolated rebuild branch to the existing backend-test workflow's push trigger.
+- **Purpose:** Make subsequent branch pushes eligible for the repository's existing test workflow without changing the test command or dependencies.
+- **Validation:** Workflow file inspected after update. No GitHub Actions run or commit status was returned for this commit, so CI execution is **not verified**; do not treat this as a passing test run.
+- **Production impact:** None.
+
+### Align contributor instructions with current architecture
+- **Commit:** `9956ca5bb97357f0299b2dd1216bca2298d02764`
+- **Scope:** Replaced outdated Streamlit-first contributor instructions with current static frontend + FastAPI + PostgreSQL guidance, data-safety invariants, test commands, security rules, and one-change-per-commit requirements.
+- **Validation:** Documentation reviewed against the inspected current architecture and workflow files. Application tests were not run because this was a documentation-only change.
+- **Production impact:** None.
