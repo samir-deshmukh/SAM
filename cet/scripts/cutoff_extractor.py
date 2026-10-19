@@ -117,7 +117,7 @@ def _ensure_ocr_loaded() -> bool:
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
     else:
         # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
-        windows_tesseract = Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+        windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
         if windows_tesseract.is_file():
             pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
     return True
