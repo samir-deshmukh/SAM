@@ -35,9 +35,26 @@ def _recover_interrupted_imports():
             source_exists = source.startswith('s3://') or (
                 not source.startswith('local://') and (BASE / source).is_file()
             )
-            connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
-            connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
-            if source_exists:
+            staged_count = connection.execute(
+                'SELECT COUNT(*) AS n FROM import_staging_records WHERE job_id=?', (job_id,)
+            ).fetchone()['n']
+            result_count = connection.execute(
+                'SELECT COUNT(*) AS n FROM import_results WHERE job_id=?', (job_id,)
+            ).fetchone()['n']
+            if staged_count or result_count:
+                # Never destroy reviewable rows/results during automatic crash recovery.
+                # Inspect the preserved state before explicitly retrying this import.
+                message = ('Worker stopped after producing staged records or results. '
+                           'Existing data was preserved; inspect this import before retrying.')
+                connection.execute(
+                    "UPDATE import_jobs SET status='REVIEW_REQUIRED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (message, job_id),
+                )
+                event(connection, job_id, 'RECOVERY_REVIEW',
+                      'Interrupted import has existing staging/results; preserved for review', None)
+            elif source_exists:
+                # No staging/results exist, so replay is safe. Retained source and chunk
+                # manifest let completed extraction chunks be reused.
                 connection.execute(
                     "UPDATE import_jobs SET status='QUEUED',worker_id=NULL,worker_lease_until=NULL,current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (job_id,),

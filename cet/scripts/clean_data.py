@@ -21,7 +21,6 @@ import sys
 import csv
 from pathlib import Path
 
-import pandas as pd
 
 REQUIRED_COLUMNS = [
     'source_pdf', 'page', 'institution_code', 'institution_name',
@@ -35,51 +34,85 @@ CATEGORY_WHITELIST_PATH = Path('data/reference/category_whitelist.csv')
 
 
 def ensure_pwd_in_whitelist():
-    """Add bare PWD as a valid base category if it's not already there."""
-    df = pd.read_csv(CATEGORY_WHITELIST_PATH)
-    if 'PWD' in set(df['base_code']):
+    """Add bare PWD as a valid base category without loading pandas."""
+    path = CATEGORY_WHITELIST_PATH
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)  # Reference whitelist is small; cutoff CSVs are not.
+    if "base_code" not in fieldnames:
+        raise ValueError(f"Whitelist is missing base_code column: {path}")
+    if any(row.get("base_code", "") == "PWD" for row in rows):
         return False
-    new_row = pd.DataFrame([{
-        'base_code': 'PWD',
-        'category_full': 'Persons with Disability (unspecified sub-category)',
-        'category_group': 'Special',
-    }])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(CATEGORY_WHITELIST_PATH, index=False)
+    if not fieldnames:
+        raise ValueError(f"Whitelist has no header: {path}")
+    rows.append({"base_code": "PWD", "category_full": "Persons with Disability (unspecified sub-category)", "category_group": "Special"})
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return True
 
 
 def clean_file(path: Path, out_dir: Path, rejects_dir: Path):
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding='utf-8-sig')
+    """Stream a cutoff CSV row by row to keep peak memory independent of file size.
 
-    if any(c not in df.columns for c in REQUIRED_COLUMNS):
-        print(f'  SKIP (not a cutoffs-schema file): {path.name}')
-        return None
-
-    is_blank_category = df['category'].str.strip() == ''
-    clean_df = df[~is_blank_category].copy()
-    reject_df = df[is_blank_category].copy()
-    reject_df['reject_reason'] = 'blank_category_upstream_pdf_extraction'
-
+    Outputs are first written to temporary files and atomically replaced only after
+    the complete input has been read. If processing fails, previous output files
+    remain intact and incomplete temporary files are removed.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     rejects_dir.mkdir(parents=True, exist_ok=True)
-
     out_path = out_dir / path.name
-    clean_df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
+    reject_path = rejects_dir / f"{path.stem}_rejects.csv"
+    out_tmp = out_path.with_name(out_path.name + ".tmp")
+    reject_tmp = reject_path.with_name(reject_path.name + ".tmp")
+    rows_in = rows_kept = rows_quarantined = 0
 
-    if len(reject_df):
-        reject_path = rejects_dir / f'{path.stem}_rejects.csv'
-        reject_df.to_csv(reject_path, index=False, quoting=csv.QUOTE_MINIMAL)
-    else:
-        reject_path = None
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            fieldnames = list(reader.fieldnames or [])
+            if any(column not in fieldnames for column in REQUIRED_COLUMNS):
+                print(f"  SKIP (not a cutoffs-schema file): {path.name}")
+                return None
 
-    return {
-        'file': path.name,
-        'rows_in': len(df),
-        'rows_kept': len(clean_df),
-        'rows_quarantined': len(reject_df),
-        'reject_path': str(reject_path) if reject_path else None,
-    }
+            with out_tmp.open("w", encoding="utf-8", newline="") as clean_stream, \
+                    reject_tmp.open("w", encoding="utf-8", newline="") as reject_stream:
+                clean_writer = csv.DictWriter(clean_stream, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
+                reject_fields = fieldnames + ["reject_reason"]
+                reject_writer = csv.DictWriter(reject_stream, fieldnames=reject_fields, quoting=csv.QUOTE_MINIMAL)
+                clean_writer.writeheader()
+                reject_writer.writeheader()
+                for row in reader:
+                    rows_in += 1
+                    if not (row.get("category") or "").strip():
+                        row["reject_reason"] = "blank_category_upstream_pdf_extraction"
+                        reject_writer.writerow(row)
+                        rows_quarantined += 1
+                    else:
+                        clean_writer.writerow(row)
+                        rows_kept += 1
+
+        out_tmp.replace(out_path)
+        if rows_quarantined:
+            reject_tmp.replace(reject_path)
+        else:
+            reject_tmp.unlink(missing_ok=True)
+            reject_path.unlink(missing_ok=True)
+        return {"file": path.name, "rows_in": rows_in, "rows_kept": rows_kept,
+                "rows_quarantined": rows_quarantined,
+                "reject_path": str(reject_path) if rows_quarantined else None}
+    except Exception:
+        out_tmp.unlink(missing_ok=True)
+        reject_tmp.unlink(missing_ok=True)
+        raise
 
 
 def main(raw_dir: str, out_dir: str):

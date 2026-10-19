@@ -246,78 +246,90 @@ def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
 
 
 def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) -> dict:
-    import pandas as pd
+    """Compare a CSV incrementally; do not materialize the whole file as a DataFrame."""
+    import csv
     sys.path.insert(0, str(SCRIPTS))
-    from validate_data import SECTION_MAP, STAGE_MAP, parse_category, forward_fill_block_columns
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-    forward_fill_block_columns(df)
-    existing = set()
+    from validate_data import FILL_COLUMNS
+
+    # Keep one index keyed by row identity instead of retaining both an exact-key
+    # set and a second identity index. The CSV itself is read one row at a time.
+    existing_by_identity = {}
     q = conn.execute("""SELECT c.institution_code,p.program_name_raw,c.base_category,
                                c.is_ladies,c.section_code,c.stage_code,c.rank_number,c.rank_suffix,c.percentile
                         FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
                         WHERE c.year=? AND c.round=? AND p.program_family=?""",
                      (year, int(round_name[1:]), family))
     for r in q:
-        existing.add(tuple(r))
+        identity = tuple(r[:6])
+        existing_by_identity.setdefault(identity, set()).add(tuple(r[6:9]))
+
     new_rows = changed = duplicates = 0
     seen = set()
-    # A changed cutoff keeps the same institute/program/category/section/stage
-    # identity but has a different rank/percentile. It must be surfaced for
-    # review, never silently treated as an ordinary new row.
-    identity_existing = {}
-    for r in existing:
-        identity = r[:6]
-        identity_existing.setdefault(identity, set()).add((r[6], r[7], r[8]))
     changed_examples = []
     duplicate_in_stage = 0
     uncomparable_rows = 0
-    for _, row in df.iterrows():
-        # A malformed category has already been quarantined by _stage_csv.
-        # Do not let one bad extracted row abort comparison of a large PDF.
-        try:
-            base, ladies, section, stage = _resolve_cutoff_dimensions(row)
-        except (ValueError, KeyError):
-            uncomparable_rows += 1
-            continue
-        rs = row["rank_suffix"].strip() or None
-        rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
-        pct = float(row["percentage"]) if row["percentage"].strip() else None
-        key = (row["institution_code"].strip(), row["program_name"].strip(), base,
-               int(bool(ladies)), section, stage, rn, rs, pct)
-        identity = key[:6]
-        if key in seen:
-            duplicate_in_stage += 1
-        seen.add(key)
-        if key in existing:
-            duplicates += 1
-        elif identity in identity_existing:
-            changed += 1
-            if len(changed_examples) < 100:
-                changed_examples.append({"identity": identity, "new": key[6:]})
-        else:
-            new_rows += 1
-    return {"rows_compared": len(df), "rows_uncomparable_quarantined": uncomparable_rows,
+    rows_compared = 0
+    last_values = {column: "" for column in FILL_COLUMNS}
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        for row in reader:
+            rows_compared += 1
+            # Match forward_fill_block_columns semantics without a DataFrame.
+            for column in FILL_COLUMNS:
+                value = (row.get(column) or "").strip()
+                if value:
+                    last_values[column] = value
+                elif last_values[column]:
+                    row[column] = last_values[column]
+            try:
+                base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+            except (ValueError, KeyError):
+                uncomparable_rows += 1
+                continue
+            rs = row["rank_suffix"].strip() or None
+            rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
+            pct = float(row["percentage"]) if row["percentage"].strip() else None
+            key = (row["institution_code"].strip(), row["program_name"].strip(), base,
+                   int(bool(ladies)), section, stage, rn, rs, pct)
+            identity, rank_values = key[:6], key[6:]
+            if key in seen:
+                duplicate_in_stage += 1
+            seen.add(key)
+            known_values = existing_by_identity.get(identity)
+            if known_values is None:
+                new_rows += 1
+            elif rank_values in known_values:
+                duplicates += 1
+            else:
+                changed += 1
+                if len(changed_examples) < 100:
+                    changed_examples.append({"identity": identity, "new": rank_values})
+    return {"rows_compared": rows_compared, "rows_uncomparable_quarantined": uncomparable_rows,
             "already_present_exact_key": duplicates, "new_candidates": new_rows,
             "changed_candidates": changed, "duplicate_in_staged_input": duplicate_in_stage,
             "changed_examples": changed_examples}
 
+
 def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
-    import pandas as pd
+    import csv
     from scripts.ingest_seats import load_whitelists
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     valid_cats, lane_map, alias_map = load_whitelists(BASE / "data" / "reference")
     existing = set(tuple(r) for r in conn.execute(
         """SELECT institution_code,choice_code,allocation_lane,raw_category,raw_gender
-           FROM seats WHERE capture_year=? AND program_family=?""", (year,family)))
-    duplicates = 0
-    for _, row in df.iterrows():
-        cat = row["category"].strip()
-        base = alias_map.get(cat, cat)
-        lane = lane_map.get(row["allocation_type"].strip(), row["allocation_type"].strip())
-        key=(row["institution_code"].strip(),row["choice_code"].strip(),lane,cat,row.get("gender","").strip())
-        if key in existing: duplicates += 1
-    return {"rows_compared":len(df),"already_present_exact_key":duplicates,
-            "new_candidates":len(df)-duplicates}
+           FROM seats WHERE capture_year=? AND program_family=?""", (year, family)))
+    duplicates = rows_compared = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            rows_compared += 1
+            cat = row["category"].strip()
+            lane = lane_map.get(row["allocation_type"].strip(), row["allocation_type"].strip())
+            key = (row["institution_code"].strip(), row["choice_code"].strip(), lane,
+                   cat, row.get("gender", "").strip())
+            if key in existing:
+                duplicates += 1
+    return {"rows_compared": rows_compared, "already_present_exact_key": duplicates,
+            "new_candidates": rows_compared - duplicates}
+
 
 def process_import(conn, job_id: int, pdf_path: Path, *,
                    data_type: str, family: str, year: int, round_name: str,

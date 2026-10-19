@@ -4,12 +4,17 @@ Run: python scripts/validate_data.py data/raw/
 Exit 0 = clean. Exit 1 = issues found.
 """
 
+from __future__ import annotations
+
 import re
 import sys
+import csv
+import sqlite3
+import tempfile
 from pathlib import Path
+from typing import Any
 from collections import Counter, defaultdict
 
-import pandas as pd
 
 FILL_COLUMNS = [
     'institution_code', 'institution_name', 'program_code',
@@ -88,7 +93,7 @@ def parse_filename(path: Path):
     }
 
 
-def forward_fill_block_columns(df: pd.DataFrame) -> tuple[int, list[str]]:
+def forward_fill_block_columns(df: Any) -> tuple[int, list[str]]:
     """Forward-fill FILL_COLUMNS in place (see that constant's comment for
     why these columns and not others). Returns (fill_count,
     first_row_blank_cols) — the latter is non-empty only if some column
@@ -169,9 +174,123 @@ def parse_category(raw: str):
     return body, is_ladies, section
 
 
-def hash_rows(df: pd.DataFrame) -> str:
+def hash_rows(df: Any) -> str:
     cols = [c for c in df.columns if c not in ('source_pdf', 'page')]
     return df[cols].astype(str).sort_values(by=cols).to_csv(index=False)
+
+
+def validate_single_file_streaming(path: Path, valid_cats: set, valid_sections: set,
+                                   valid_stages: set, valid_programs: set) -> dict:
+    """Validate one large import CSV without materializing it as a DataFrame.
+
+    The admin import pipeline validates one canonical CSV at a time. Duplicate
+    keys are counted in a temporary disk-backed SQLite table, keeping memory use
+    bounded even when the extracted file contains hundreds of thousands of rows.
+    The multi-file CLI path retains the legacy implementation for cross-file
+    duplicate-content detection.
+    """
+    meta = parse_filename(path)
+    if not meta:
+        return {"file_error": (path.name, "FILENAME_PATTERN_MISMATCH")}
+
+    missing = []
+    fill_count = rows = anomaly_count = 0
+    first_row_blank = []
+    bad_cat = bad_stage = bad_section = bad_prog = bad_pct = 0
+    unknown_cats = Counter()
+    unknown_stages = Counter()
+    unknown_sections = Counter()
+    unknown_programs = Counter()
+    anomalies = []
+    last_values = {column: "" for column in FILL_COLUMNS}
+    key_cols = ['institution_code', 'program_name', 'category', 'section', 'stage', 'rank_number', 'percentage']
+
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            fieldnames = list(reader.fieldnames or [])
+            missing = [column for column in REQUIRED_COLUMNS if column not in fieldnames]
+            if missing:
+                return {"file_error": (path.name, f"MISSING_COLUMNS: {missing}")}
+
+            with tempfile.TemporaryDirectory(prefix="cetfind-validate-") as temp_dir:
+                db_path = Path(temp_dir) / "duplicate_keys.sqlite3"
+                with sqlite3.connect(db_path) as duplicate_db:
+                    key_placeholders = ",".join("?" for _ in key_cols)
+                    key_names = ",".join(f'k{i} TEXT NOT NULL' for i in range(len(key_cols)))
+                    conflict_cols = ",".join(f'k{i}' for i in range(len(key_cols)))
+                    duplicate_db.execute(
+                        f"CREATE TABLE duplicate_keys ({key_names}, row_count INTEGER NOT NULL, PRIMARY KEY ({conflict_cols}))"
+                    )
+                    upsert = (
+                        f"INSERT INTO duplicate_keys VALUES ({key_placeholders},1) "
+                        f"ON CONFLICT ({conflict_cols}) DO UPDATE SET row_count=row_count+1"
+                    )
+                    for row in reader:
+                        row_index = rows
+                        rows += 1
+                        for column in FILL_COLUMNS:
+                            value = (row.get(column) or "").strip()
+                            if value:
+                                last_values[column] = value
+                            elif last_values[column]:
+                                row[column] = last_values[column]
+                                fill_count += 1
+                            elif row_index == 0:
+                                first_row_blank.append(column)
+
+                        if is_extraction_anomaly(row):
+                            anomaly_count += 1
+                            if len(anomalies) < 25:
+                                anomalies.append({"file": path.name, "raw_category": row["category"],
+                                                  "stage": row["stage"], "rank": row["rank"]})
+                        else:
+                            base, _, _ = parse_category(row["category"])
+                            if base is None or base not in valid_cats:
+                                bad_cat += 1
+                                unknown_cats[row["category"] or "(empty)"] += 1
+                            st = STAGE_MAP.get(row["stage"].strip())
+                            if st is None:
+                                bad_stage += 1
+                                unknown_stages[row["stage"]] += 1
+                            sec = row["section"].strip()
+                            if sec and sec not in SECTION_MAP:
+                                bad_section += 1
+                                unknown_sections[sec] += 1
+                            prog = row["program_name"].strip()
+                            if prog and prog not in valid_programs:
+                                bad_prog += 1
+                                unknown_programs[prog] += 1
+                            try:
+                                float(row["percentage"])
+                            except (ValueError, TypeError):
+                                bad_pct += 1
+
+                        duplicate_db.execute(upsert, tuple((row.get(column) or "") for column in key_cols))
+                        if rows % 5000 == 0:
+                            duplicate_db.commit()
+                    duplicate_db.commit()
+                    duplicate_count = duplicate_db.execute(
+                        "SELECT COALESCE(SUM(row_count), 0) FROM duplicate_keys WHERE row_count > 1"
+                    ).fetchone()[0]
+    except Exception as exc:
+        return {"file_error": (path.name, f"READ_ERROR: {exc}")}
+
+    return {
+        "summary": {"file": path.name, "year": meta["year"], "round": meta["round"],
+                    "rows": rows, "bad_cat": bad_cat, "bad_stage": bad_stage,
+                    "bad_section": bad_section, "bad_prog": bad_prog, "bad_pct": bad_pct,
+                    "dups": int(duplicate_count), "anomaly": anomaly_count},
+        "forward_fill_count": fill_count,
+        "first_row_blank": first_row_blank,
+        "dup_rows": int(duplicate_count),
+        "anomaly_count": anomaly_count,
+        "anomalies": anomalies,
+        "unknown_cats": unknown_cats,
+        "unknown_stages": unknown_stages,
+        "unknown_sections": unknown_sections,
+        "unknown_programs": unknown_programs,
+    }
 
 
 def main(raw_dir: str):
@@ -184,10 +303,17 @@ def main(raw_dir: str):
     print(f'Validating {len(csvs)} files in {folder}\n')
 
     ref = Path('data/reference')
-    valid_cats     = set(pd.read_csv(ref / 'category_whitelist.csv')['base_code'])
-    valid_sections = set(pd.read_csv(ref / 'section_whitelist.csv')['section_code'])
-    valid_stages   = set(pd.read_csv(ref / 'stage_whitelist.csv')['canonical'])
-    valid_programs = set(pd.read_csv(ref / 'program_aliases.csv')['raw_name'])
+    def reference_values(filename: str, column: str) -> set[str]:
+        with (ref / filename).open('r', encoding='utf-8-sig', newline='') as stream:
+            reader = csv.DictReader(stream)
+            if column not in (reader.fieldnames or []):
+                raise ValueError(f'Missing {column} column in {filename}')
+            return {row[column] for row in reader if row.get(column)}
+
+    valid_cats = reference_values('category_whitelist.csv', 'base_code')
+    valid_sections = reference_values('section_whitelist.csv', 'section_code')
+    valid_stages = reference_values('stage_whitelist.csv', 'canonical')
+    valid_programs = reference_values('program_aliases.csv', 'raw_name')
 
     summary = []
     hashes = defaultdict(list)
@@ -199,14 +325,39 @@ def main(raw_dir: str):
     dup_rows = 0
     file_errors = []
     anomalies = []
+    anomaly_total = 0
 
     for path in csvs:
+        if len(csvs) == 1:
+            streamed = validate_single_file_streaming(
+                path, valid_cats, valid_sections, valid_stages, valid_programs
+            )
+            if streamed.get("file_error"):
+                file_errors.append(streamed["file_error"])
+                continue
+            summary.append(streamed["summary"])
+            forward_fill_count += streamed["forward_fill_count"]
+            dup_rows += streamed["dup_rows"]
+            anomaly_total += streamed["anomaly_count"]
+            anomalies.extend(streamed["anomalies"])
+            if streamed["first_row_blank"]:
+                file_errors.append((path.name,
+                    f"FIRST_ROW_BLANK: {streamed['first_row_blank']} — cannot forward-fill row 0, block context unknown"))
+            unknown_cats.update(streamed["unknown_cats"])
+            unknown_stages.update(streamed["unknown_stages"])
+            unknown_sections.update(streamed["unknown_sections"])
+            unknown_programs.update(streamed["unknown_programs"])
+            continue
+
         meta = parse_filename(path)
         if not meta:
             file_errors.append((path.name, 'FILENAME_PATTERN_MISMATCH'))
             continue
 
         try:
+            # Pandas is needed only for the legacy multi-file path, which compares
+            # whole-file content hashes. The one-file admin pipeline stays lean.
+            import pandas as pd
             df = pd.read_csv(path, dtype=str, keep_default_na=False,
                              encoding='utf-8-sig')
         except Exception as e:
@@ -296,6 +447,9 @@ def main(raw_dir: str):
             'bad_section': bad_section, 'bad_prog': bad_prog,
             'bad_pct': bad_pct, 'dups': dups, 'anomaly': anomaly_rows,
         })
+        anomaly_total += anomaly_rows
+        if len(anomalies) > 25:
+            del anomalies[25:]
 
     # -------- Report --------
     print(f"{'FILE':<42}{'YR':<6}{'RD':<4}{'ROWS':>7}"
@@ -336,7 +490,7 @@ def main(raw_dir: str):
         for f, e in file_errors:
             print(f'  \u2717 {f}: {e}')
 
-    print(f'\n=== QUARANTINED EXTRACTION ANOMALIES ({len(anomalies)}) ===')
+    print(f'\n=== QUARANTINED EXTRACTION ANOMALIES ({anomaly_total}) ===')
     print('  (rows with no institution_code AND no institution_name —')
     print('   broken PDF extraction, not a category/data issue. These')
     print('   are excluded from cutoffs and logged to ingest_errors,')
@@ -351,7 +505,7 @@ def main(raw_dir: str):
                                   unknown_sections, unknown_programs)) \
             + len(file_errors)
     print(f'\n{"=" * 60}\nTotal issues: {total}  '
-          f'(+ {len(anomalies)} quarantined anomalies, handled separately)'
+          f'(+ {anomaly_total} quarantined anomalies, handled separately)'
           f'\n{"=" * 60}')
     sys.exit(1 if total else 0)
 
