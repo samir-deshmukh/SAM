@@ -353,7 +353,7 @@ async def security_headers(request: Request, call_next):
     response.headers['X-Frame-Options']='DENY'
     response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' http://127.0.0.1:8765; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     response.headers['Cache-Control']='no-store' if request.url.path.startswith('/admin') else response.headers.get('Cache-Control','no-cache')
     if _COOKIE_SECURE:
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
