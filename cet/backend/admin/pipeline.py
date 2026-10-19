@@ -1,5 +1,6 @@
 import hashlib
 import re
+import shutil
 from pathlib import Path
 
 
@@ -42,6 +43,13 @@ def _pdf_ocr_probe(path, max_pages=4):
         import pdfplumber
         import pytesseract
 
+        tesseract_cmd = pytesseract.pytesseract.tesseract_cmd
+        if not shutil.which(tesseract_cmd):
+            raise RuntimeError(
+                "Scanned PDF detected, but the Tesseract OCR program is missing. "
+                "Install the system package 'tesseract-ocr' on this PC and retry."
+            )
+
         chunks = []
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages[:max_pages]:
@@ -54,6 +62,8 @@ def _pdf_ocr_probe(path, max_pages=4):
                 finally:
                     page.close()
         return "\n".join(chunks)
+    except RuntimeError:
+        raise
     except Exception:
         return ""
 
