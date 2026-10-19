@@ -35,7 +35,10 @@ class _Connection:
         self.statements.append((sql, params))
         normalized = " ".join(sql.split()).upper()
         if normalized.startswith("SELECT ID,STORED_PATH FROM IMPORT_JOBS"):
-            return _Cursor(rows=self.jobs)
+            rows = self.jobs
+            if "NOT LIKE 'LOCAL://%'" in normalized:
+                rows = [row for row in rows if not str(row.get("stored_path") or "").startswith("local://")]
+            return _Cursor(rows=rows)
         if normalized.startswith("SELECT EXISTS"):
             return _Cursor(row=self.saved)
         return _Cursor()
@@ -44,12 +47,12 @@ class _Connection:
         self.committed = True
 
 
-def _run_recovery(monkeypatch, tmp_path: Path, saved):
+def _run_recovery(monkeypatch, tmp_path: Path, saved, jobs=None):
     source = tmp_path / "imports" / "source.pdf"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"%PDF-test")
     connection = _Connection(
-        jobs=[{"id": 41, "stored_path": "imports/source.pdf"}],
+        jobs=jobs if jobs is not None else [{"id": 41, "stored_path": "imports/source.pdf"}],
         saved=saved,
     )
     events = []
@@ -86,3 +89,31 @@ def test_expired_job_without_saved_output_can_be_requeued(monkeypatch, tmp_path)
     assert any(event_args[1] == 41 and event_args[2] == "RECOVERED" for event_args in events)
     assert not any("DELETE FROM import_staging_records" in sql for sql, _ in connection.statements)
     assert not any("DELETE FROM import_results" in sql for sql, _ in connection.statements)
+
+
+def test_expired_local_worker_job_is_left_to_its_local_owner(monkeypatch, tmp_path):
+    connection, events = _run_recovery(
+        monkeypatch,
+        tmp_path,
+        {"has_staging": False, "has_results": False},
+        jobs=[{"id": 42, "stored_path": "local://job_42"}],
+    )
+
+    statements = [sql.upper() for sql, _ in connection.statements]
+    assert any("NOT LIKE 'LOCAL://%'" in sql for sql in statements)
+    assert not any("UPDATE IMPORT_JOBS" in sql for sql in statements)
+    assert not any(event_args[1] == 42 for event_args in events)
+    assert connection.committed
+
+
+def test_expired_server_job_without_source_or_staging_is_failed(monkeypatch, tmp_path):
+    connection, events = _run_recovery(
+        monkeypatch,
+        tmp_path,
+        {"has_staging": False, "has_results": False},
+        jobs=[{"id": 43, "stored_path": "imports/missing.pdf"}],
+    )
+
+    update = next(params for sql, params in connection.statements if "UPDATE import_jobs SET status='FAILED'" in sql)
+    assert "source PDF is missing and no staged output exists" in update[0]
+    assert any(event_args[1] == 43 and event_args[2] == "RECOVERY_FAILED" for event_args in events)

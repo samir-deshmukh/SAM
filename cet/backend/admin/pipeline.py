@@ -1,5 +1,6 @@
 import hashlib
 import re
+import shutil
 from pathlib import Path
 
 
@@ -11,15 +12,58 @@ SUPPORTED_COURSE_FAMILIES = frozenset({
 })
 
 
-def _pdf_text_probe(path, max_pages=8):
-    """Read a small native-text sample for content-based PDF classification."""
+def _pdf_text_probe(path, max_pages=24):
+    """Read a bounded native-text sample for content-based PDF classification.
+
+    CAP PDFs often have covers, notices, or blank pages before the actual
+    course heading, so the classifier samples more than just the first few
+    pages while keeping memory bounded to the extracted text.
+    """
     try:
         import pdfplumber
         chunks=[]
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages[:max_pages]:
-                chunks.append(page.extract_text() or "")
+                try:
+                    chunks.append(page.extract_text() or "")
+                finally:
+                    page.close()
         return "\n".join(chunks)
+    except Exception:
+        return ""
+
+
+def _pdf_ocr_probe(path, max_pages=4):
+    """OCR a few title pages when native PDF text cannot identify the course.
+
+    This is used only by the local worker. Server-side preflight stays native
+    text only to avoid spending scarce web-service memory on rasterization.
+    """
+    try:
+        import pdfplumber
+        import pytesseract
+
+        tesseract_cmd = pytesseract.pytesseract.tesseract_cmd
+        if not shutil.which(tesseract_cmd):
+            raise RuntimeError(
+                "Scanned PDF detected, but the Tesseract OCR program is missing. "
+                "Install the system package 'tesseract-ocr' on this PC and retry."
+            )
+
+        chunks = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages[:max_pages]:
+                try:
+                    image = page.to_image(resolution=110).original
+                    try:
+                        chunks.append(pytesseract.image_to_string(image, config="--psm 6") or "")
+                    finally:
+                        image.close()
+                finally:
+                    page.close()
+        return "\n".join(chunks)
+    except RuntimeError:
+        raise
     except Exception:
         return ""
 
@@ -133,9 +177,11 @@ def detect_course_family(value):
     return winners[0] if len(winners) == 1 else None
 
 
-def extract_pdf_metadata(path, filename):
-    """Recover year/round/family from the filename and PDF's first pages."""
+def extract_pdf_metadata(path, filename, *, use_ocr=False):
+    """Recover year/round/family from PDF text, optional OCR, and filename."""
     text = _pdf_text_probe(path).upper()
+    if use_ocr and (not detect_course_family(text) or not re.search(r"\b20\d{2}\b", text)):
+        text = f"{text}\n{_pdf_ocr_probe(path)}".upper()
     upper_name = str(filename or "").upper()
     family = detect_course_family(text) or detect_course_family(upper_name)
     year = None
@@ -168,7 +214,7 @@ def identify(filename):
     return data_type, family, year, round_name, confidence
 
 
-def detect_data_type(path, filename):
+def detect_data_type(path, filename, *, use_ocr=False):
     """Identify seat matrices from PDF content as well as filename hints.
 
     Seat-matrix PDFs are frequently named generically (for example
@@ -183,6 +229,8 @@ def detect_data_type(path, filename):
         "NUMBER OF SEATS", "CATEGORY-WISE SEAT DISTRIBUTION",
     )
     cutoff_markers = ("PERCENTILE", "RANK", "GOPENH", "LOPENH", "STAGE-I")
+    if use_ocr and not any(marker in text for marker in (*seat_markers, *cutoff_markers)):
+        text = f"{text}\n{_pdf_ocr_probe(path)}".upper()
     seat_score = sum(marker in text for marker in seat_markers)
     cutoff_score = sum(marker in text for marker in cutoff_markers)
     if seat_score >= 2 and seat_score > cutoff_score:
