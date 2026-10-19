@@ -142,10 +142,12 @@ class Connection:
         if had_ignore and re.search(r"ON\s+CONFLICT", sql, flags=re.I) is None:
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
         if re.search(r"INSERT\s+INTO", sql, flags=re.I) and re.search(r"ON\s+CONFLICT", sql, flags=re.I) is None:
-            # All admin/fact INSERT targets have an integer id except the resolver.
             table_match = re.search(r"INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", sql, flags=re.I)
             table = table_match.group(1).lower() if table_match else ""
-            if table != "college_website_resolver" and "RETURNING" not in sql.upper() and "ON CONFLICT DO NOTHING" not in sql.upper():
+            # Resolver and local-worker bookkeeping tables use natural/composite
+            # primary keys and have no integer id column to return.
+            no_surrogate_id = {"college_website_resolver", "local_worker_tokens", "local_worker_receipts"}
+            if table not in no_surrogate_id and "RETURNING" not in sql.upper() and "ON CONFLICT DO NOTHING" not in sql.upper():
                 sql = sql.rstrip().rstrip(";") + " RETURNING id"
         # INSERT ... ON CONFLICT statements can target tables whose primary
         # key is not named "id" (for example programs.program_id), so do not
