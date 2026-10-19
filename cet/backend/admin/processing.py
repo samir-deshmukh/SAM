@@ -359,7 +359,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env["CAPFIND_WORKER_ID"] = str(worker_id or "")
                 env["PYTHONIOENCODING"] = "utf-8"
                 env["PYTHONUTF8"] = "1"
-                chunk_pages = str(max(5, min(1000, int(env.get("CAPFIND_CHUNK_PAGES", "1000")))))
+                chunk_pages = str(max(10, min(250, int(env.get("CAPFIND_CHUNK_PAGES", "10")))))
                 command = [
                     sys.executable, str(SCRIPTS / "chunked_cutoff_extractor.py"),
                     str(pdf_path), "--out", str(raw), "--chunk-pages", chunk_pages,
@@ -412,32 +412,14 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             shutil.copy2(canonical, isolated / "raw.csv")
             # Rather than allowing cleaner path assumptions to touch project files,
             # call its functions directly.
-            # Run pandas-backed cleaning in a short-lived child process.
-            # Keeping its dataframe/allocator inside the child prevents memory
-            # from accumulating in the long-lived web worker on 512 MiB hosts.
-            reference_copy = isolated / "data" / "reference" / "category_whitelist.csv"
-            shutil.copy2(BASE / "data" / "reference" / "category_whitelist.csv", reference_copy)
+            cleaner = _load_module(SCRIPTS / "clean_data.py", "cet_clean_data")
+            cleaner.CATEGORY_WHITELIST_PATH = isolated / "data" / "reference" / "category_whitelist.csv"
+            cleaner.CATEGORY_WHITELIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(BASE / "data" / "reference" / "category_whitelist.csv",
+                         cleaner.CATEGORY_WHITELIST_PATH)
             clean_out.mkdir(parents=True, exist_ok=True)
             rejects = clean_out / "rejects"
-            clean_script = (
-                "import importlib.util; from pathlib import Path; "
-                f"spec=importlib.util.spec_from_file_location('cet_clean_data', {str(SCRIPTS / 'clean_data.py')!r}); "
-                "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); "
-                f"mod.CATEGORY_WHITELIST_PATH=Path({str(reference_copy)!r}); "
-                f"result=mod.clean_file(Path({str(canonical)!r}), Path({str(clean_out)!r}), Path({str(rejects)!r})); "
-                "print(result)"
-            )
-            clean_env = os.environ.copy()
-            clean_env.setdefault("PYTHONIOENCODING", "utf-8")
-            clean_env.setdefault("PYTHONUTF8", "1")
-            clean_result = subprocess.run(
-                [sys.executable, "-c", clean_script], cwd=str(isolated),
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", check=False, env=clean_env,
-            )
-            if clean_result.returncode != 0:
-                raise RuntimeError("Memory-isolated cutoff cleaning failed: " +
-                                   (clean_result.stderr or clean_result.stdout or "no cleaner output")[-2500:])
+            cleaner.clean_file(canonical, clean_out, rejects)
             cleaned = clean_out / canonical.name
             shutil.copy2(cleaned, canonical)
             update_status(conn, job_id, JobStatus.VALIDATING.value, "Running cutoff data quality gate")

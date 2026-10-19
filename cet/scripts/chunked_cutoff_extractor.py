@@ -17,9 +17,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import fitz
+
 BASE = Path(__file__).resolve().parents[1]
 EXTRACTOR = Path(__file__).with_name("cutoff_extractor.py")
-SPLITTER = Path(__file__).with_name("split_cutoff_pdf_parts.py")
 
 
 def sha256_file(path: Path) -> str:
@@ -36,16 +37,12 @@ def atomic_json(path: Path, payload: Any) -> None:
     temp.replace(path)
 
 
-def split_pdf(source, destination: Path, start: int, end: int) -> None:
+def split_pdf(source: fitz.Document, destination: Path, start: int, end: int) -> None:
     """Write original zero-based page interval [start, end) as a new PDF."""
-    import fitz
     chunk = fitz.open()
     try:
-        chunk.insert_pdf(source, from_page=start, to_page=end - 1, links=False, annots=False)
-        # Temporary chunks are short-lived local work files. Avoid expensive full garbage
-        # collection/deflation here; the source PDF is unchanged and extraction quality
-        # comes from the page text, not recompressing the temporary copy.
-        chunk.save(destination, garbage=0, deflate=False)
+        chunk.insert_pdf(source, from_page=start, to_page=end - 1, links=True, annots=True)
+        chunk.save(destination, garbage=3, deflate=True)
     finally:
         chunk.close()
 
@@ -171,8 +168,8 @@ def main() -> int:
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-name", default=None, help="Original uploaded filename for provenance fields")
-    parser.add_argument("--chunk-pages", type=int, default=1000,
-                        help="Maximum pages per temporary PDF part (default: 1000)")
+    parser.add_argument("--chunk-pages", type=int, default=10,
+                        help="Maximum pages per temporary PDF part (default: 10)")
     parser.add_argument("--keep-parts", action="store_true",
                         help="Keep temporary split PDFs for inspection")
     parser.add_argument("--hybrid", action="store_true",
@@ -197,15 +194,8 @@ def main() -> int:
     manifest_path = work / "manifest.json"
 
     source_hash = sha256_file(source)
-    # Count pages in a short-lived helper so PyMuPDF's large-document state is
-    # not retained by the coordinator while extraction workers are running.
-    count_result = subprocess.run(
-        [sys.executable, str(SPLITTER), str(source), "--count-only"],
-        cwd=str(BASE), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
-    )
-    if count_result.returncode != 0:
-        raise RuntimeError("Unable to count source PDF pages: " + (count_result.stderr or count_result.stdout)[-2000:])
-    total_pages = int(count_result.stdout.strip().splitlines()[-1])
+    with fitz.open(source) as doc:
+        total_pages = len(doc)
     if total_pages < 1:
         raise RuntimeError("Input PDF has no pages")
     source_name = args.source_name or source.name
@@ -217,7 +207,6 @@ def main() -> int:
         "engine": "hybrid" if args.hybrid else "native_only",
         "chunked_extractor_sha256": sha256_file(Path(__file__).resolve()),
         "page_extractor_sha256": sha256_file(EXTRACTOR),
-        "splitter_sha256": sha256_file(SPLITTER),
     }
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -250,32 +239,6 @@ def main() -> int:
 
     write_progress("RUNNING", 0, 0, "Preparing extraction")
 
-    # Split in a short-lived helper process. PyMuPDF's source-document state
-    # is released before any page extractor starts, reducing combined worker RSS.
-    skip_indices = []
-    for number in range(1, count + 1):
-        stem = f"part_{number:04d}"
-        chunk_out = part_root / stem
-        saved = prior.get(number)
-        if (saved and saved.get("status") == "COMPLETED"
-                and (chunk_out / f"{stem}_cutoffs.csv").is_file()
-                and (chunk_out / f"{stem}_cutoffs.json").is_file()
-                and (chunk_out / f"{stem}_page_audit.json").is_file()):
-            skip_indices.append(number)
-    write_progress("RUNNING", 0, 0, "Preparing temporary PDF parts")
-    split_command = [sys.executable, str(SPLITTER), str(source), "--out", str(chunk_dir),
-                     "--chunk-pages", str(args.chunk_pages)]
-    if skip_indices:
-        split_command.extend(["--skip-indices", ",".join(map(str, skip_indices))])
-    split_result = subprocess.run(
-        split_command, cwd=str(BASE), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False,
-    )
-    if split_result.returncode != 0:
-        raise RuntimeError("Unable to prepare temporary PDF parts: " + (split_result.stderr or split_result.stdout)[-2500:])
-    if split_result.stdout.strip():
-        print(split_result.stdout.rstrip())
-
     for idx in range(count):
         start = idx * args.chunk_pages
         end = min(start + args.chunk_pages, total_pages)
@@ -298,9 +261,10 @@ def main() -> int:
             continue
 
         write_progress("RUNNING", start + 1, number - 1, f"Extracting pages {start+1}-{end}")
-        print(f"[{number}/{count}] pages {start+1}-{end}: extracting bounded PDF part")
-        if not chunk_pdf.is_file():
-            raise RuntimeError(f"Prepared PDF part is missing: {chunk_pdf}")
+        print(f"[{number}/{count}] pages {start+1}-{end}: creating bounded PDF part")
+        if not chunk_pdf.exists():
+            with fitz.open(source) as split_source:
+                split_pdf(split_source, chunk_pdf, start, end)
 
         env = os.environ.copy()
         env["CAPFIND_PAGE_OFFSET"] = str(start)

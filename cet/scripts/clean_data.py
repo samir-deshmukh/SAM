@@ -21,6 +21,7 @@ import sys
 import csv
 from pathlib import Path
 
+import pandas as pd
 
 REQUIRED_COLUMNS = [
     'source_pdf', 'page', 'institution_code', 'institution_name',
@@ -35,71 +36,51 @@ CATEGORY_WHITELIST_PATH = Path('data/reference/category_whitelist.csv')
 
 def ensure_pwd_in_whitelist():
     """Add bare PWD as a valid base category if it's not already there."""
-    # This reference table is tiny; use csv to avoid importing pandas just for it.
-    rows = []
-    with CATEGORY_WHITELIST_PATH.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        fields = list(reader.fieldnames or [])
-        rows = list(reader)
-    if any(str(row.get("base_code", "")).strip().upper() == "PWD" for row in rows):
+    df = pd.read_csv(CATEGORY_WHITELIST_PATH)
+    if 'PWD' in set(df['base_code']):
         return False
-    if not fields:
-        fields = ["base_code", "category_full", "category_group"]
-    rows.append({
-        "base_code": "PWD",
-        "category_full": "Persons with Disability (unspecified sub-category)",
-        "category_group": "Special",
-    })
-    with CATEGORY_WHITELIST_PATH.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    new_row = pd.DataFrame([{
+        'base_code': 'PWD',
+        'category_full': 'Persons with Disability (unspecified sub-category)',
+        'category_group': 'Special',
+    }])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(CATEGORY_WHITELIST_PATH, index=False)
     return True
 
 
 def clean_file(path: Path, out_dir: Path, rejects_dir: Path):
-    """Stream rows to clean/reject CSVs without materializing the whole file."""
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding='utf-8-sig')
+
+    if any(c not in df.columns for c in REQUIRED_COLUMNS):
+        print(f'  SKIP (not a cutoffs-schema file): {path.name}')
+        return None
+
+    is_blank_category = df['category'].str.strip() == ''
+    clean_df = df[~is_blank_category].copy()
+    reject_df = df[is_blank_category].copy()
+    reject_df['reject_reason'] = 'blank_category_upstream_pdf_extraction'
+
     out_dir.mkdir(parents=True, exist_ok=True)
     rejects_dir.mkdir(parents=True, exist_ok=True)
+
     out_path = out_dir / path.name
-    reject_path = rejects_dir / f"{path.stem}_rejects.csv"
-    rows_in = rows_kept = rows_quarantined = 0
+    clean_df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
 
-    with path.open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        fields = list(reader.fieldnames or [])
-        if any(c not in fields for c in REQUIRED_COLUMNS):
-            print(f"  SKIP (not a cutoffs-schema file): {path.name}")
-            return None
-
-        with out_path.open("w", encoding="utf-8-sig", newline="") as clean_handle, reject_path.open("w", encoding="utf-8-sig", newline="") as reject_handle:
-            clean_writer = csv.DictWriter(clean_handle, fieldnames=fields, extrasaction="ignore")
-            reject_writer = csv.DictWriter(reject_handle, fieldnames=fields + ["reject_reason"], extrasaction="ignore")
-            clean_writer.writeheader()
-            reject_writer.writeheader()
-            for row in reader:
-                rows_in += 1
-                if not str(row.get("category", "")).strip():
-                    rejected = dict(row)
-                    rejected["reject_reason"] = "blank_category_upstream_pdf_extraction"
-                    reject_writer.writerow(rejected)
-                    rows_quarantined += 1
-                else:
-                    clean_writer.writerow(row)
-                    rows_kept += 1
-
-    if rows_quarantined == 0:
-        reject_path.unlink(missing_ok=True)
-        reject_value = None
+    if len(reject_df):
+        reject_path = rejects_dir / f'{path.stem}_rejects.csv'
+        reject_df.to_csv(reject_path, index=False, quoting=csv.QUOTE_MINIMAL)
     else:
-        reject_value = str(reject_path)
+        reject_path = None
+
     return {
-        "file": path.name,
-        "rows_in": rows_in,
-        "rows_kept": rows_kept,
-        "rows_quarantined": rows_quarantined,
-        "reject_path": reject_value,
+        'file': path.name,
+        'rows_in': len(df),
+        'rows_kept': len(clean_df),
+        'rows_quarantined': len(reject_df),
+        'reject_path': str(reject_path) if reject_path else None,
     }
+
 
 def main(raw_dir: str, out_dir: str):
     raw = Path(raw_dir)
