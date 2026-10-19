@@ -1,8 +1,8 @@
 # CETFind Repository Inventory — Initial Pass
 
-**Inspected baseline:** `905ad947c73062fe77671bd35c7d6263a1786b57`  
-**Working branch:** `rebuild/cetfind-engineering-baseline`  
-**Inspection date:** 2026-10-20  
+**Inspected baseline:** `905ad947c73062fe77671bd35c7d6263a1786b57`
+**Working branch:** `rebuild/cetfind-engineering-baseline`
+**Inspection date:** 2026-10-20
 **Confidence:** Partial code/document inspection; no local execution in this pass.
 
 This inventory is intentionally evidence-based and incomplete. It records what was inspected, what conflicts, and which risks need measurement. It does not certify the full application or production environment.

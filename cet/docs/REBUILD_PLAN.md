@@ -1,8 +1,8 @@
 # CETFind Engineering Rebuild Plan
 
-**Status:** Baseline and discovery phase  
-**Branch:** `rebuild/cetfind-engineering-baseline`  
-**Baseline:** `main` at `905ad947c73062fe77671bd35c7d6263a1786b57`  
+**Status:** Baseline and discovery phase
+**Branch:** `rebuild/cetfind-engineering-baseline`
+**Baseline:** `main` at `905ad947c73062fe77671bd35c7d6263a1786b57`
 **Purpose:** Establish a verifiable engineering baseline before making implementation changes.
 
 This document is a working source of truth for the rebuild. Update it in a dedicated commit whenever verified architecture, constraints, risks, or acceptance criteria change. Distinguish observed facts from assumptions; do not document an unverified hypothesis as a root cause.
