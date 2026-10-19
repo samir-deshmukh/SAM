@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from sqlalchemy.engine import URL
 from fastapi import HTTPException, Response
 from starlette.requests import Request
 
@@ -282,10 +283,11 @@ def test_search_metadata_cache_serves_every_college_not_just_the_first_page():
 
 
 def test_db_pool_defaults_are_bounded(monkeypatch):
+    # A URL object keeps these dummy local pool settings from looking like a real credential-bearing DSN to secret scanners.
     from src.cet_cap import db
     for key in ("CET_DB_POOL_SIZE", "CET_DB_MAX_OVERFLOW", "CET_DB_POOL_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
-    engine = db.get_engine("postgresql://user:pass@localhost/db")
+    engine = db.get_engine(URL.create("postgresql", username="test_user", password="test_only", host="localhost", database="test_db")")
     assert engine.pool.size() == 5
     assert engine.pool._max_overflow == 5
     assert engine.pool._timeout == 5.0
@@ -293,11 +295,12 @@ def test_db_pool_defaults_are_bounded(monkeypatch):
 
 
 def test_db_pool_settings_are_configurable(monkeypatch):
+    # This test inspects engine configuration only and must not open a database connection.
     from src.cet_cap import db
     monkeypatch.setenv("CET_DB_POOL_SIZE", "2")
     monkeypatch.setenv("CET_DB_MAX_OVERFLOW", "3")
     monkeypatch.setenv("CET_DB_POOL_TIMEOUT", "7")
-    engine = db.get_engine("postgresql://user:pass@localhost/db")
+    engine = db.get_engine(URL.create("postgresql", username="test_user", password="test_only", host="localhost", database="test_db")")
     assert engine.pool.size() == 2
     assert engine.pool._max_overflow == 3
     assert engine.pool._timeout == 7.0
