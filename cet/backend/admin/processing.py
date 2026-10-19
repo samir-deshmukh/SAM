@@ -486,7 +486,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 with log_path.open("w", encoding="utf-8") as log:
                     p = subprocess.Popen(
                         [sys.executable, str(SCRIPTS / "seat_matrix_extractor.py"),
-                         str(pdf_path), "--out", str(raw), "--dpi", "200"],
+                         str(pdf_path), "--out", str(raw), "--dpi", "200", "--no-json"],
                         cwd=str(BASE), stdout=log, stderr=subprocess.STDOUT, text=True, env=env,
                     )
                     started = time.monotonic()

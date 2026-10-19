@@ -210,7 +210,7 @@ def _process_job(job_id: int):
                 artifact_type = "CUTOFFS"
             else:
                 summary = extract_seats(pdf_path=pdf_path, outdir=outdir, dpi=200, lang="eng",
-                                        use_ocr=True, force_ocr=False)
+                                        use_ocr=True, force_ocr=False, write_json=False)
                 artifact = outdir / f"{pdf_path.stem}_seats_long.csv"
                 artifact_type = "SEATS"
         finally:

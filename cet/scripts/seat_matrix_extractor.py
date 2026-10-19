@@ -52,6 +52,7 @@ import csv
 import json
 import re
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -465,7 +466,8 @@ LONG_FIELDS = [
 
 
 def process_single_pdf(
-    pdf_path: Path, outdir: Path, dpi: int, lang: str, use_ocr: bool, force_ocr: bool
+    pdf_path: Path, outdir: Path, dpi: int, lang: str, use_ocr: bool, force_ocr: bool,
+    write_json: bool = True,
 ) -> Dict[str, Any]:
     all_courses: List[Dict[str, Any]] = []
     metadata_emitted_choices: set[Tuple[str, str]] = set()
@@ -492,12 +494,15 @@ def process_single_pdf(
 
     # LONG_FIELDS is fixed, so its CSV can be streamed safely. JSON is also
     # streamed as an array to preserve the existing artifact contract.
+    seats_json_output = (seats_json_path.open("w", encoding="utf-8")
+                         if write_json else nullcontext(None))
     with seats_path.open("w", newline="", encoding="utf-8") as seats_f, \
-         seats_json_path.open("w", encoding="utf-8") as seats_json_f, \
+         seats_json_output as seats_json_f, \
          pdfplumber.open(pdf_path) as pdf:
         seats_writer = csv.DictWriter(seats_f, fieldnames=LONG_FIELDS)
         seats_writer.writeheader()
-        seats_json_f.write("[\n")
+        if seats_json_f is not None:
+            seats_json_f.write("[\n")
         first_seat_json = True
         n_pages = len(pdf.pages)
         print(f"  pages: {n_pages}")
@@ -560,6 +565,16 @@ def process_single_pdf(
             all_courses.extend(courses)
             course_by_choice = {str(c.get("choice_code", "")).strip(): c for c in courses
                                 if str(c.get("choice_code", "")).strip()}
+            metadata_fields = (
+                "institution_name", "university", "affiliation_status", "cap_seats",
+                "course_name", "summary_fields", "pwd_common_reserved",
+                "def_common_reserved", "ews_seats", "tfws_choice_code",
+                "tfws_seats", "record_type",
+            )
+            metadata_by_choice = {
+                choice_code: {key: course.get(key) for key in metadata_fields}
+                for choice_code, course in course_by_choice.items()
+            }
             for r in long_rows:
                 r["source_pdf"] = pdf_path.name
                 r["source_row"] = seat_rows_extracted + 1
@@ -572,13 +587,6 @@ def process_single_pdf(
                 # Repeated per long row so the single canonical seat CSV is
                 # sufficient to reconstruct both the PDF's summary block and
                 # its category/allocation table during server-side approval.
-                metadata_fields = (
-                    "institution_name", "university", "affiliation_status", "cap_seats",
-                    "course_name", "summary_fields", "pwd_common_reserved",
-                    "def_common_reserved", "ews_seats", "tfws_choice_code",
-                    "tfws_seats", "record_type",
-                )
-                compact_metadata = {key: course.get(key) for key in metadata_fields}
                 metadata_key = (
                     str(r.get("institution_code", "")).strip(),
                     str(r.get("choice_code", "")).strip(),
@@ -588,16 +596,20 @@ def process_single_pdf(
                 # duplicate JSON in every staging record.
                 if metadata_key not in metadata_emitted_choices:
                     r["course_metadata"] = json.dumps(
-                        compact_metadata, ensure_ascii=False, separators=(",", ":")
+                        metadata_by_choice.get(str(r.get("choice_code", "")).strip(), {
+                            key: course.get(key) for key in metadata_fields
+                        }),
+                        ensure_ascii=False, separators=(",", ":"),
                     )
                     metadata_emitted_choices.add(metadata_key)
                 else:
                     r["course_metadata"] = ""
                 seats_writer.writerow({k: r.get(k, "") for k in LONG_FIELDS})
-                if not first_seat_json:
-                    seats_json_f.write(",\n")
-                seats_json_f.write(json.dumps(r, ensure_ascii=False))
-                first_seat_json = False
+                if seats_json_f is not None:
+                    if not first_seat_json:
+                        seats_json_f.write(",\n")
+                    seats_json_f.write(json.dumps(r, ensure_ascii=False))
+                    first_seat_json = False
                 seat_rows_extracted += 1
             page_audit.append({"page": pnum, "courses": len(courses),
                                 "seat_rows": len(long_rows), "method": method})
@@ -606,7 +618,8 @@ def process_single_pdf(
             # the web-service process.
             page.close()
 
-        seats_json_f.write("\n]\n")
+        if seats_json_f is not None:
+            seats_json_f.write("\n]\n")
 
     # Build the course CSV field order dynamically: base fields, then
     # whatever numeric field names actually showed up (union, in first-
@@ -624,9 +637,10 @@ def process_single_pdf(
         w.writeheader()
         for c in all_courses:
             w.writerow({k: c.get(k, "") for k in course_fields})
-    courses_json_path.write_text(
-        json.dumps(all_courses, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    if write_json:
+        courses_json_path.write_text(
+            json.dumps(all_courses, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     audit_path.write_text(
         json.dumps(page_audit, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -651,6 +665,8 @@ def main() -> int:
     ap.add_argument("--lang", default="eng", help="Tesseract language")
     ap.add_argument("--no-ocr", action="store_true", help="Never OCR; leave unreadable pages as-is")
     ap.add_argument("--force-ocr", action="store_true", help="OCR every page, ignoring the native text layer")
+    ap.add_argument("--no-json", action="store_true",
+                    help="Skip duplicate JSON sidecars; keep the canonical seat CSV and page audit")
     args = ap.parse_args()
 
     path = Path(args.path)
@@ -666,6 +682,7 @@ def main() -> int:
         summaries.append(process_single_pdf(
             pdf_path, outdir, dpi=args.dpi, lang=args.lang,
             use_ocr=not args.no_ocr, force_ocr=args.force_ocr,
+            write_json=not args.no_json,
         ))
 
     print("\n=== Summary ===")
