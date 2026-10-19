@@ -114,3 +114,20 @@ A single client IP cannot honestly simulate hundreds of independent users agains
 ## 9. Important source-of-truth rule
 
 The current implementation should be used when describing the system. `docs/ARCHITECTURE.md`, `docs/PRD.md`, `docs/DECISIONS.md`, and some comments contain historical Streamlit-era decisions and should not be presented as the current deployed architecture.
+
+
+## 10. Operational defense documents
+
+- `HANDOVER.md`: verified baseline and safe next steps.
+- `CONSTRAINTS.md`: production, data-integrity, security, and resource invariants.
+- `FLOW.md`: public request, import, and recovery paths.
+- `DATA.md`: data ownership, provenance, and row accounting.
+- `THREAT.md`: assets, trust boundaries, mitigations, and open risks.
+- `FAILURE.md`: failure symptoms and safe recovery.
+- `ROLLBACK.md`: separate code and data rollback procedures.
+- `ALTERNATIVES.md`: extraction, chunking, storage, and rate-limit trade-offs.
+- `ASSUMPTIONS.md`: production claims that still need evidence.
+- `DEPENDENCIES.md`: declared packages and audit status.
+- `DEFENSE.md`: concise architecture explanation and readiness evidence.
+
+These documents describe repository behavior; they do not certify live Render configuration or replace tests from the exact release commit.
