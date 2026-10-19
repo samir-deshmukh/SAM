@@ -11,3 +11,10 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Validation:** GitHub confirmed the branch creation and file commit. This was a documentation-only change; application tests were not run because no application code changed and this connector session cannot execute the repository's local test suite.
 - **Production impact:** None. No Render settings, deployment, database, or production data were changed.
 - **Known limitation:** The repository has not yet been fully inventoried or locally tested. The baseline plan explicitly treats the OOM root cause as unproven.
+
+### Record initial repository inventory
+- **Commit:** `47bcc8536d0fb11feea03394a08b0478cb3a9640`
+- **Scope:** Added `docs/REPOSITORY_INVENTORY.md` based on inspected repository files.
+- **Findings:** Identified high-risk memory candidates in whole-file seat comparison and page-audit accumulation, a missing child-process timeout, duplicate CSV reading for progress totals, stale Streamlit-era instructions, and a CI workflow that does not trigger on the new branch's pushes.
+- **Validation:** Documentation-only change; source files and production were not modified. Findings are explicitly labeled for further review and measurement, not asserted as confirmed production root causes.
+- **Production impact:** None.
