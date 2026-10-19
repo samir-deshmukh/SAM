@@ -152,6 +152,28 @@ UNIVERSITY_RE = re.compile(r"^\s*Home University\s*:\s*(?P<value>.+?)\s*$", re.I
 RANK_ONLY_RE = re.compile(r"^\d{1,6}$")
 PERCENT_ONLY_RE = re.compile(r"^\(\s*\d+(?:\.\d+)?\s*\)$")
 
+
+def _split_program_header_metadata(raw_name: str) -> tuple[str, str, str]:
+    """Separate inline Status/Home University text from a program heading.
+
+    Some CAP PDFs place all three fields on one extracted text line. The
+    program-code regex is intentionally permissive for newly introduced
+    branch names, so strip the following metadata here instead of treating
+    it as part of the program's identity.
+    """
+    match = re.search(r"\s+Status\s*:\s*", raw_name, re.IGNORECASE)
+    if not match:
+        return raw_name.strip(), "", ""
+    program_name = raw_name[:match.start()].strip()
+    suffix = raw_name[match.end():].strip()
+    university_match = re.search(r"\s+Home University\s*:\s*", suffix, re.IGNORECASE)
+    if university_match:
+        status = suffix[:university_match.start()].strip()
+        university = suffix[university_match.end():].strip()
+    else:
+        status, university = suffix, ""
+    return program_name, status, university
+
 # ----------------------------------------------------------------------
 # Generic category-code + round/stage-marker detection
 # ----------------------------------------------------------------------
@@ -236,7 +258,9 @@ def extract_metadata(lines: List[str]) -> Dict[str, str]:
             m = PROGRAM_RE.match(line)
             if m:
                 meta["program_code"] = m.group("code")
-                meta["program_name"] = m.group("name").strip()
+                (meta["program_name"], meta["status"], meta["home_university"]) = (
+                    _split_program_header_metadata(m.group("name"))
+                )
                 continue
         if not meta["status"]:
             m = STATUS_RE.match(line)
@@ -348,7 +372,17 @@ def update_metadata_from_line(
         state["pending_program_continuation"] = False
         program_name = str(metadata.get("program_name", "") or "")
         continuation_line = line.strip()
+        continuation_name, inline_status, inline_university = _split_program_header_metadata(
+            continuation_line
+        )
+        if inline_status or inline_university:
+            if continuation_name and program_name.count("(") > program_name.count(")"):
+                metadata["program_name"] = f"{program_name.rstrip()} {continuation_name}".strip()
+            metadata["status"] = inline_status
+            metadata["home_university"] = inline_university
+            return "program_continuation"
         is_boundary = any(pattern.match(line) for pattern in (INSTITUTE_RE, PROGRAM_RE, STATUS_RE, UNIVERSITY_RE))
+        is_boundary = is_boundary or bool(re.match(r"^\s*Status\s*:\s*$", line, re.IGNORECASE))
         is_boundary = is_boundary or bool(detect_section(line)) or continuation_line.upper() in BARE_STAGE_TOKENS
         is_boundary = is_boundary or bool(RANK_VALUE_RE.search(line)) or bool(extract_category_tokens(line))
         if continuation_line and not is_boundary and program_name.count("(") > program_name.count(")"):
@@ -370,9 +404,9 @@ def update_metadata_from_line(
     m = PROGRAM_RE.match(line)
     if m:
         metadata["program_code"] = m.group("code")
-        metadata["program_name"] = m.group("name").strip()
-        metadata["status"] = ""
-        metadata["home_university"] = ""
+        (metadata["program_name"], metadata["status"], metadata["home_university"]) = (
+            _split_program_header_metadata(m.group("name"))
+        )
         state["pending_program_continuation"] = (
             metadata["program_name"].count("(") > metadata["program_name"].count(")")
         )
