@@ -67,29 +67,60 @@ try:
     from scripts.worker_control import checkpoint as _worker_checkpoint
 except ImportError:
     from worker_control import checkpoint as _worker_checkpoint
-try:
-    from scripts import fitz_pdfium as fitz_pdfium
-except ImportError:
-    import fitz_pdfium
 
-try:
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-except ImportError:
-    pytesseract = None
-    Image = None
+# Optional engines are loaded only when a page actually needs them. Importing
+# PDFium, Pillow and pytesseract at process startup adds avoidable RSS to the
+# native-text-only path, which runs alongside the API and chunk coordinator on
+# the small production instance.
+fitz_pdfium = None
+pytesseract = None
+Image = None
+ImageEnhance = None
+ImageFilter = None
+ImageOps = None
+_OCR_LOAD_ATTEMPTED = False
 
-# ----------------------------------------------------------------------
-# Auto-locate Tesseract
-# ----------------------------------------------------------------------
-tesseract_path = shutil.which("tesseract")
-if tesseract_path and pytesseract is not None:
-    pytesseract.pytesseract.tesseract_cmd = tesseract_path
-elif pytesseract is not None:
-    # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
-    windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    if windows_tesseract.is_file():
-        pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
+
+def _ensure_pdfium_loaded() -> None:
+    global fitz_pdfium
+    if fitz_pdfium is not None:
+        return
+    try:
+        from scripts import fitz_pdfium as module
+    except ImportError:
+        import fitz_pdfium as module
+    fitz_pdfium = module
+
+
+def _ensure_ocr_loaded() -> bool:
+    global pytesseract, Image, ImageEnhance, ImageFilter, ImageOps, _OCR_LOAD_ATTEMPTED
+    if _OCR_LOAD_ATTEMPTED:
+        return pytesseract is not None and Image is not None
+    _OCR_LOAD_ATTEMPTED = True
+    try:
+        import pytesseract as tesseract_module
+        from PIL import Image as image_module
+        from PIL import ImageEnhance as enhance_module
+        from PIL import ImageFilter as filter_module
+        from PIL import ImageOps as ops_module
+    except ImportError:
+        return False
+
+    pytesseract = tesseract_module
+    Image = image_module
+    ImageEnhance = enhance_module
+    ImageFilter = filter_module
+    ImageOps = ops_module
+
+    tesseract_path = shutil.which("tesseract")
+    if tesseract_path:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    else:
+        # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
+        windows_tesseract = Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+        if windows_tesseract.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -510,8 +541,8 @@ def preprocess_image(img: "Image.Image") -> "Image.Image":
 
 
 def ocr_page(page: fitz.Page, dpi: int, lang: str = "eng") -> str:
-    if pytesseract is None:
-        raise RuntimeError("pytesseract not installed. Run: pip install pytesseract")
+    if not _ensure_ocr_loaded() or pytesseract is None:
+        raise RuntimeError("pytesseract/Pillow not installed. Install the optional OCR dependencies.")
     img = render_page(page, dpi)
     processed = preprocess_image(img)
     return pytesseract.image_to_string(processed, lang=lang, config="--psm 6")
@@ -599,6 +630,7 @@ def choose_extraction_technique(
     if native_hits >= len(sample_idx):
         return "native", scores
 
+    _ensure_ocr_loaded()
     if pytesseract is not None:
         ocr_hits = 0
         for i in sample_idx:
@@ -694,6 +726,7 @@ def process_single_pdf(
     native_doc = doc
     pdfium_doc = None
     if use_pdfium:
+        _ensure_pdfium_loaded()
         try:
             pdfium_doc = fitz_pdfium.open(pdf_path)
         except Exception as exc:
@@ -757,7 +790,7 @@ def process_single_pdf(
             selected_context = native_context
             selected_parser_state = native_state
 
-        if not records and pytesseract is not None:
+        if not records and _ensure_ocr_loaded() and pytesseract is not None:
             try:
                 ocr_text = ocr_page(native_page, dpi, lang)
                 ocr_lines = merge_split_rank_lines(normalize_lines(ocr_text))
