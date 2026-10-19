@@ -4,19 +4,20 @@ from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
+from starlette.concurrency import run_in_threadpool
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session,hash_password
 from .admin.network import client_ip
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file
 from .admin.source_storage import store_source_pdf, materialize_source, delete_source, storage_backend, StorageNotConfigured
-from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release
+from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release,revalidate_legacy_mh_staging
 from .admin.publishing import publish_release
 from .admin.migrations import ensure_part4_schema
 from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
-                              resolve_import_job)
+                              resolve_import_job, valid_url)
 from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -34,9 +35,25 @@ def _recover_interrupted_imports():
             source_exists = source.startswith('s3://') or (
                 not source.startswith('local://') and (BASE / source).is_file()
             )
-            connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
-            connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
-            if source_exists:
+            saved = connection.execute(
+                """SELECT
+                       EXISTS(SELECT 1 FROM import_staging_records WHERE job_id=? LIMIT 1) AS has_staging,
+                       EXISTS(SELECT 1 FROM import_results WHERE job_id=? LIMIT 1) AS has_results""",
+                (job_id, job_id),
+            ).fetchone()
+            has_saved_data = bool(saved and (saved.get('has_staging') or saved.get('has_results')))
+
+            # Recovery must never erase staged rows or comparison results.
+            # If any durable output exists, stop for explicit admin review instead
+            # of rerunning extraction over data that may already be valuable.
+            if has_saved_data:
+                connection.execute(
+                    "UPDATE import_jobs SET status='REVIEW_REQUIRED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    ('Worker lease expired; existing staged data/results were preserved. Review this import before retrying.', job_id),
+                )
+                event(connection, job_id, 'RECOVERY_REVIEW_REQUIRED',
+                      'Expired worker lease; staged data/results preserved for admin review', None)
+            elif source_exists:
                 connection.execute(
                     "UPDATE import_jobs SET status='QUEUED',worker_id=NULL,worker_lease_until=NULL,current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (job_id,),
@@ -45,9 +62,9 @@ def _recover_interrupted_imports():
             else:
                 connection.execute(
                     "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    ('Worker stopped and the source PDF is missing. Re-upload the original PDF.', job_id),
+                    ('Worker stopped and the source PDF is missing and no staged output exists. Re-upload the original PDF.', job_id),
                 )
-                event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing after worker lease expired; upload again', None)
+                event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing and no staged output exists after worker lease expired; upload again', None)
         connection.commit()
 
 
@@ -78,17 +95,21 @@ def _import_queue_loop():
                 _LAST_QUEUE_RECOVERY = time.monotonic()
             with connect() as connection:
                 row = connection.execute(
-                    "SELECT id FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    "SELECT id,original_filename FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
                 ).fetchone()
+                is_csv_job = False
                 if row:
                     candidate = int(row['id'])
+                    is_csv_job = str(row.get('original_filename') or '').lower().endswith('.csv')
                     claimed = connection.execute(
                         "UPDATE import_jobs SET status='EXTRACTING',worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED'",
                         (_WORKER_ID, candidate),
                     ).rowcount
                     if claimed:
                         job_id = candidate
-                        event(connection, job_id, 'WORKER_CLAIMED', 'Server worker claimed the queued PDF', 42)
+                        event(connection, job_id, 'WORKER_CLAIMED',
+                              'Server worker claimed the queued canonical CSV' if is_csv_job else 'Server worker claimed the queued PDF',
+                              25 if is_csv_job else 42)
                 connection.commit()
             if job_id is None:
                 time.sleep(2)
@@ -101,8 +122,13 @@ def _import_queue_loop():
                 daemon=True, name=f'import-heartbeat-{job_id}',
             )
             heartbeat_thread.start()
-            with _IMPORT_PROCESS_LOCK:
-                _process_import_background_locked(job_id)
+            if is_csv_job:
+                # Canonical CSVs share the durable queue, but must never enter the
+                # PDF parser. The CSV processor owns the same global import lock.
+                _process_csv_import_background(job_id)
+            else:
+                with _IMPORT_PROCESS_LOCK:
+                    _process_import_background_locked(job_id)
         except Exception:
             log.exception('Import queue worker iteration failed')
             time.sleep(3)
@@ -467,9 +493,12 @@ def user(request):
             'role': row['role'],
             'av': int(row['auth_version']),
         }
-    except Exception:
-        log.exception('Session validation failed')
-        return None
+    except Exception as exc:
+        # A transient database/pool failure is not an invalid login session.
+        # Returning None here made require() emit HTTP 401 and forced the UI
+        # to redirect the administrator to login during pool exhaustion.
+        log.exception('Session validation temporarily unavailable')
+        raise HTTPException(status_code=503, detail='Admin session validation temporarily unavailable') from exc
 
 
 _ADMIN_LOCK_TTL_SECONDS = 45
@@ -708,9 +737,35 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
             timeout=1800,
         )
         with connect() as connection:
+            missing_metadata = connection.execute("""
+                WITH latest AS (
+                    SELECT program_family, institution_code, MAX(capture_year) AS capture_year
+                    FROM seats
+                    WHERE (? IS NULL OR program_family=?)
+                    GROUP BY program_family, institution_code
+                )
+                SELECT COUNT(*) AS missing_count FROM (
+                    SELECT DISTINCT s.program_family, s.institution_code, s.capture_year, s.choice_code
+                    FROM seats s
+                    JOIN latest l ON l.program_family=s.program_family
+                        AND l.institution_code=s.institution_code AND l.capture_year=s.capture_year
+                    LEFT JOIN seat_matrix_courses m ON m.program_family=s.program_family
+                        AND m.institution_code=s.institution_code AND m.capture_year=s.capture_year
+                        AND m.choice_code=s.choice_code
+                    WHERE m.choice_code IS NULL AND (? IS NULL OR s.program_family=?)
+                ) missing
+            """, (course_family, course_family, course_family, course_family)).fetchone()["missing_count"]
+            if missing_metadata:
+                completion_message = (
+                    f'Calculated data is ready with legacy seat-matrix fallback; '
+                    f'{missing_metadata} latest institution/choice-code records lack full PDF metadata. '
+                    'See Source Coverage; re-import the canonical seat CSV to restore full source details.'
+                )
+            else:
+                completion_message = 'Graph, category and full PDF-backed seat-matrix data is ready'
             connection.execute(
-                "UPDATE derived_data_build_jobs SET status='COMPLETED',progress=100,message='Graph, category and seat-matrix data is ready',finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                (job_id,),
+                "UPDATE derived_data_build_jobs SET status='COMPLETED',progress=100,message=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (completion_message, job_id),
             )
             connection.commit()
     except Exception as exc:
@@ -782,21 +837,65 @@ def retry_derived_data_build(job_id: int, request: Request, background_tasks: Ba
     return JSONResponse(status_code=202, content={"ok": True, "job_id": new_id, "status": "QUEUED"})
 
 
+def _clear_derived_data_scope(connection, course: str | None) -> None:
+    tables = (
+        'cutoff_trend_points',
+        'cutoff_college_year_summary',
+        'cutoff_filter_options',
+        'seat_matrix_runtime',
+    )
+    if course:
+        for table in tables:
+            connection.execute(f"DELETE FROM {table} WHERE program_family=?", (course,))
+    else:
+        for table in tables:
+            connection.execute(f"DELETE FROM {table}")
+
+
 @app.delete('/admin/api/derived-data/{job_id}')
 def delete_derived_data_build(job_id: int, request: Request):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f"Derived data build #{active['id']} is running; wait until it finishes before deleting calculated data")
         job = connection.execute(
-            "SELECT id,status FROM derived_data_build_jobs WHERE id=?",
+            "SELECT id,status,course_family FROM derived_data_build_jobs WHERE id=?",
             (job_id,),
         ).fetchone()
         if not job:
             raise HTTPException(404, 'Build job not found')
         if str(job['status']).upper() in {'QUEUED', 'RUNNING'}:
             raise HTTPException(409, 'A running build cannot be deleted')
+        _clear_derived_data_scope(connection, str(job['course_family']) if job['course_family'] else None)
         connection.execute("DELETE FROM derived_data_build_jobs WHERE id=?", (job_id,))
         connection.commit()
-    return {"ok": True}
+    invalidate_public_caches()
+    return {"ok": True, "calculated_data_cleared": True}
+
+
+@app.post('/admin/api/derived-data/clear')
+def clear_derived_data(request: Request, course: str | None = Form(None)):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    course = (course or '').strip() or None
+    with connect() as connection:
+        active = connection.execute(
+            "SELECT id FROM derived_data_build_jobs WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active:
+            raise HTTPException(409, f"Derived data build #{active['id']} is running; wait until it finishes before clearing calculated data")
+        if course:
+            exists = connection.execute(
+                "SELECT 1 FROM programs WHERE program_family=? LIMIT 1", (course,)
+            ).fetchone()
+            if not exists:
+                raise HTTPException(400, f'Unknown course family: {course}')
+        _clear_derived_data_scope(connection, course)
+        connection.commit()
+    invalidate_public_caches()
+    return {"ok": True, "course": course or "ALL", "calculated_data_cleared": True}
 
 
 @app.get('/admin/api/derived-data/status')
@@ -813,6 +912,37 @@ def derived_data_status(request: Request):
         "jobs": [dict(row) for row in rows],
         "courses": [str(row['program_family']) for row in courses],
     }
+
+
+@app.get('/admin/api/derived-data/source-coverage')
+def derived_data_source_coverage(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN'})
+    with connect() as connection:
+        source_checks = connection.execute("""
+            WITH latest AS (
+                SELECT program_family, institution_code, MAX(capture_year) AS capture_year
+                FROM seats GROUP BY program_family, institution_code
+            ), latest_seats AS (
+                SELECT s.program_family,s.institution_code,s.capture_year,s.choice_code
+                FROM seats s JOIN latest l
+                  ON l.program_family=s.program_family
+                 AND l.institution_code=s.institution_code
+                 AND l.capture_year=s.capture_year
+            )
+            SELECT s.program_family,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) AS choice_codes,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NOT NULL) AS metadata_codes,
+                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NULL) AS missing_metadata_codes,
+                   COUNT(*) AS latest_seat_rows
+            FROM latest_seats s
+            LEFT JOIN seat_matrix_courses m
+              ON m.program_family=s.program_family
+             AND m.institution_code=s.institution_code
+             AND m.capture_year=s.capture_year
+             AND m.choice_code=s.choice_code
+            GROUP BY s.program_family ORDER BY s.program_family
+        """).fetchall()
+    return {"source_checks": [dict(row) for row in source_checks]}
 
 
 LOCAL_ARTIFACT_MAX_BYTES = 150 * 1024 * 1024
@@ -1243,6 +1373,145 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
         raise
 
 
+
+MAX_CSV_BYTES = 100 * 1024 * 1024
+CSV_CUTOFF_REQUIRED = {'source_pdf','page','institution_code','institution_name','program_code','program_name','status','home_university','section','stage','category','rank','rank_number','rank_suffix','percentage','percentage_raw','raw_value','source','merged_from'}
+CSV_SEAT_REQUIRED = {'source_pdf','page','institution_code','choice_code','allocation_type','category','gender','seats'}
+
+def _csv_header(path: Path):
+    with path.open('r', encoding='utf-8-sig', newline='') as handle:
+        try: return {str(value).strip() for value in next(csv.reader(handle))}
+        except StopIteration: return set()
+
+def _process_csv_import_background(job_id: int):
+    """Stage a locally pre-extracted canonical CSV through existing validation."""
+    with _IMPORT_PROCESS_LOCK:
+        with connect() as connection:
+            job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+            if not job or job['status'] not in {'QUEUED','EXTRACTING','FAILED','CANCELLED','REVIEW_REQUIRED'}: return
+            try:
+                with materialize_source(job['stored_path']) as source_path:
+                    expected_hash = str(job.get('sha256') or '').strip().lower()
+                    if expected_hash and sha256_file(source_path).lower() != expected_hash:
+                        raise RuntimeError('CSV fingerprint does not match the upload record')
+                    # Keep the input artifact inside the job work directory so the
+                    # audit result can reference it even when the private source is in S3.
+                    raw_dir = BASE / 'data' / 'import_work' / f'job_{job_id}' / 'raw'
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    staged_csv = raw_dir / 'uploaded_source.csv'
+                    import shutil
+                    shutil.copy2(source_path, staged_csv)
+                    from .admin.processing import _write_commit_progress
+                    # Publish an active status before the long validation/staging
+                    # transaction begins, so the runtime poller can discover CSV jobs.
+                    connection.execute("UPDATE import_jobs SET status='NORMALIZING',updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+                    event(connection, job_id, 'CSV_PROCESSING', 'CSV upload complete; validation and staging started', 25)
+                    connection.commit()
+                    total_bytes = int(job.get('size_bytes') or staged_csv.stat().st_size)
+                    _write_commit_progress(job_id, 'RUNNING', 'Reading CSV', 0, 1,
+                                           f"CSV received ({total_bytes:,} bytes); starting validation")
+                    csv_progress_state = {'processed': 0, 'total': 0}
+                    def report_csv_progress(processed, total):
+                        csv_progress_state.update(processed=processed, total=total)
+                        _write_commit_progress(
+                            job_id, 'RUNNING', 'Staging CSV rows', processed, total,
+                            f"Staging {processed:,} of {total:,} CSV rows",
+                        )
+                    result = process_import(connection, job_id, staged_csv,
+                        data_type=job['data_type'], family=job['course_family'], year=int(job['year']),
+                        round_name=job.get('round') or 'C1', claimed=True, pre_extracted_path=staged_csv,
+                        extraction_summary={'source':'pre-extracted CSV'}, source_filename=job['original_filename'],
+                        progress_callback=report_csv_progress)
+                    if not result.get('ok'):
+                        log.error('CSV import staging failed: job_id=%s error=%s', job_id, result.get('error'))
+                    elif result.get('status') == 'CANCELLED':
+                        _write_commit_progress(job_id, 'CANCELLED', 'CSV processing cancelled',
+                                               int(csv_progress_state['processed']), int(csv_progress_state['total']),
+                                               'CSV processing was stopped by an admin.')
+                    else:
+                        processed = int(csv_progress_state['processed'])
+                        total = int(csv_progress_state['total'])
+                        _write_commit_progress(
+                            job_id, 'COMPLETED', 'CSV staging complete', total or processed, total or processed,
+                            f"CSV validation and staging finished ({processed:,} rows processed). Check import status for review findings.",
+                        )
+            except Exception as exc:
+                log.exception('CSV import failed: job_id=%s', job_id)
+                connection.rollback()
+                connection.execute("UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(exc)[:4000],job_id))
+                event(connection,job_id,'ERROR','CSV import failed: '+str(exc)[:1000],None)
+                connection.commit()
+
+@app.post('/admin/api/imports/csv')
+def upload_csv(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...),
+               data_type: str = Form(...), course_family: str = Form(...), year: int = Form(...),
+               round_name: str = Form('')):
+    current_user = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    name = Path(file.filename or '').name
+    if not name.lower().endswith('.csv'): raise HTTPException(400,'Only .csv files are accepted in CSV Import')
+    data_type = str(data_type or '').strip().upper(); family = str(course_family or '').strip().upper()
+    if data_type not in {'CUTOFFS','SEATS'}: raise HTTPException(400,'Choose Cutoff data or Seat matrix data')
+    if family not in {'BCA','BBA','MBA','MCA','BE','BTECH','BARCH','MARCH','BPLAN','MPLAN','BPHARM','MPHARM','PHARMD','ME','LLB3','LLB5','BED','BPED','MED','MPED','HMCT','MHMCT','BDES','MTECH'}: raise HTTPException(400,'Unsupported course family')
+    if year < 2000 or year > 2100: raise HTTPException(400,'Academic year must be a four-digit year')
+    round_name = str(round_name or '').strip().upper()
+    if data_type == 'CUTOFFS' and round_name not in {'C1','C2','C3','C4'}: raise HTTPException(400,'Select CAP cutoff round C1, C2, C3 or C4')
+    if data_type == 'SEATS': round_name = ''
+    job_key = 'IMPORT-' + uuid.uuid4().hex[:12].upper(); tmp = IMPORTS / (job_key + '.upload')
+    stored_value = None; total = 0; digest = hashlib.sha256()
+    try:
+        with open(tmp,'wb') as output:
+            while True:
+                chunk=file.file.read(1024*1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_CSV_BYTES: raise HTTPException(413,'CSV exceeds 100 MiB limit')
+                digest.update(chunk); output.write(chunk)
+        if total < 8: raise HTTPException(400,'CSV is empty or too small')
+        try:
+            header = _csv_header(tmp)
+            with tmp.open('r', encoding='utf-8-sig', newline='') as csv_handle:
+                reader = csv.reader(csv_handle); next(reader, None)
+                has_data = next(reader, None) is not None
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise HTTPException(400,'CSV must be a valid UTF-8 CSV file') from exc
+        if not has_data: raise HTTPException(400,'CSV contains a header but no data rows')
+        required = CSV_CUTOFF_REQUIRED if data_type == 'CUTOFFS' else CSV_SEAT_REQUIRED
+        missing = sorted(required - header)
+        if missing: raise HTTPException(400,'CSV is not in CETFind canonical format. Missing columns: '+', '.join(missing))
+        fingerprint=digest.hexdigest()
+        try: stored_value=store_source_pdf(tmp,f'imports/{job_key}.csv',fingerprint)
+        except StorageNotConfigured as exc: raise HTTPException(503,str(exc)) from exc
+        if tmp.exists(): tmp.unlink()
+        with connect() as connection:
+            connection.execute("INSERT INTO import_jobs(job_key,original_filename,stored_path,sha256,size_bytes,status,created_by,data_type,course_family,year,round,confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_key,name,stored_value,fingerprint,total,'QUEUED',current_user['uid'],data_type,family,year,round_name or None,1.0))
+            row=connection.execute('SELECT id FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+            if not row: raise RuntimeError('CSV import job could not be created')
+            job_id=int(row['id'])
+            event(connection,job_id,'CSV_RECEIVED',f'Pre-extracted {data_type.lower()} CSV uploaded; PDF extraction skipped',10)
+            event(connection,job_id,'QUEUED','CSV queued for canonical validation and staging',20)
+            connection.commit()
+        # The durable server queue dispatches CSV jobs to validation/staging and
+        # PDF jobs to extraction. Avoid an in-request BackgroundTask racing the
+        # queue worker for the same QUEUED record.
+        return JSONResponse(status_code=202,content={'ok':True,'id':job_id,'job_key':job_key,'status':'QUEUED','message':'CSV accepted; queued for validation and staging (PDF extraction skipped).'})
+    except HTTPException:
+        if tmp.exists(): tmp.unlink()
+        if stored_value:
+            try:
+                with connect() as connection: exists=connection.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+                if not exists: delete_source(stored_value)
+            except Exception: log.exception('Could not clean rejected CSV source %s',job_key)
+        raise
+    except Exception:
+        if tmp.exists(): tmp.unlink()
+        if stored_value:
+            try:
+                with connect() as connection: exists=connection.execute('SELECT 1 AS n FROM import_jobs WHERE job_key=?',(job_key,)).fetchone()
+                if not exists: delete_source(stored_value)
+            except Exception: log.exception('Could not clean orphaned CSV source %s',job_key)
+        raise
+
 def _resolver_server_busy():
     """Keep AI resolver work out of the critical path on the small web instance."""
     with connect() as c:
@@ -1376,9 +1645,16 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
         if not job:
             raise HTTPException(404, 'Import not found')
         if job.get('source_deleted'):
-            raise HTTPException(409, 'The source PDF was manually deleted. Re-upload it to retry extraction.')
+            raise HTTPException(409, 'The source file was manually deleted. Re-upload it to retry processing.')
         if job['status'] not in {JobStatus.REVIEW_REQUIRED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
             raise HTTPException(409, f'Import is not ready for processing: {job["status"]}')
+        if str(job.get('original_filename') or '').lower().endswith('.csv'):
+            if job.get('source_deleted'): raise HTTPException(409, 'The source CSV was manually deleted. Re-upload it to retry import.')
+            connection.execute('DELETE FROM import_staging_records WHERE job_id=?',(job_id,))
+            connection.execute('DELETE FROM import_results WHERE job_id=?',(job_id,))
+            connection.execute("UPDATE import_jobs SET status='QUEUED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(job_id,))
+            event(connection,job_id,'RETRY','CSV revalidation and staging queued',10); connection.commit()
+            return {'ok':True,'id':job_id,'status':'QUEUED','source_type':'CSV'}
         if job['status'] == JobStatus.CANCELLED.value:
             if job.get('worker_alive') or _ACTIVE_IMPORT_JOB_ID == job_id:
                 raise HTTPException(409, 'Cancellation is still stopping the worker; wait a moment before retrying')
@@ -1422,9 +1698,11 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
                 else 'Source metadata is incomplete; identify year, round and course before processing',
             )
 
+        # A review-required PDF must be re-queued after validator/reference fixes.
+        # Keep the expected prior status in the predicate to avoid racing another worker.
         claimed = connection.execute(
-            "UPDATE import_jobs SET status='QUEUED',current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='IDENTIFIED'",
-            (job_id,),
+            "UPDATE import_jobs SET status='QUEUED',current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=?",
+            (job_id, job['status']),
         ).rowcount
         if not claimed:
             raise HTTPException(409, 'Import is already being processed')
@@ -1453,13 +1731,13 @@ def pause_import(request: Request, job_id: int):
             raise HTTPException(404, 'Import not found')
         if str(job['stored_path'] or '').startswith('local://'):
             raise HTTPException(409, 'This legacy import belongs to the local worker')
-        if job['status'] not in {'QUEUED', 'EXTRACTING', 'PAUSED'}:
-            raise HTTPException(409, f'Only a queued or extracting import can be paused (current status: {job["status"]})')
+        if job['status'] not in {'QUEUED', 'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING', 'PAUSED'}:
+            raise HTTPException(409, f'Import cannot be paused while in {job["status"]}')
         control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
         control.mkdir(parents=True, exist_ok=True)
         (control / 'PAUSE').touch()
-        connection.execute("UPDATE import_jobs SET status='PAUSED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','EXTRACTING','PAUSED')", (job_id,))
-        event(connection, job_id, 'PAUSE_REQUESTED', 'Pause requested; extraction will stop at a safe page checkpoint', None)
+        connection.execute("UPDATE import_jobs SET status='PAUSED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','EXTRACTING','NORMALIZING','VALIDATING','COMPARING','PAUSED')", (job_id,))
+        event(connection, job_id, 'PAUSE_REQUESTED', 'Pause requested; processing will stop at the next safe checkpoint', None)
         connection.commit()
     return {'ok': True, 'job_id': job_id, 'status': 'PAUSE_REQUESTED'}
 
@@ -1468,7 +1746,7 @@ def pause_import(request: Request, job_id: int):
 def resume_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        job = connection.execute('SELECT status,stored_path,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT status,stored_path,original_filename,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
         if str(job['stored_path'] or '').startswith('local://'):
@@ -1477,9 +1755,10 @@ def resume_import(request: Request, job_id: int):
             raise HTTPException(409, f'Only an extracting import can be resumed (current status: {job["status"]})')
         control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
         (control / 'PAUSE').unlink(missing_ok=True)
-        next_status = 'EXTRACTING' if job.get('worker_id') and job.get('worker_alive') else 'QUEUED'
+        is_csv = str(job.get('original_filename') or '').lower().endswith('.csv')
+        next_status = 'NORMALIZING' if is_csv else ('EXTRACTING' if job.get('worker_id') and job.get('worker_alive') else 'QUEUED')
         connection.execute("UPDATE import_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='PAUSED'", (next_status, job_id))
-        event(connection, job_id, 'RESUME_REQUESTED', 'Pause marker removed; extraction will continue', None)
+        event(connection, job_id, 'RESUME_REQUESTED', 'Pause marker removed; processing will continue', None)
         connection.commit()
     return {'ok': True, 'job_id': job_id, 'status': next_status}
 
@@ -1549,7 +1828,9 @@ def runtime_metrics(request: Request):
     with connect() as connection:
         storage = connection.execute('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS bytes FROM import_jobs WHERE source_deleted=FALSE AND stored_path NOT LIKE ?',
                                      ('local://%',)).fetchone()
-        active = connection.execute("SELECT id,status,original_filename,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        latest_event = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (active['id'],)).fetchone() if active else None
+        csv_progress = connection.execute('SELECT status,stage,processed,total,progress,message FROM import_commit_progress WHERE job_id=?', (active['id'],)).fetchone() if active else None
         queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']
     job_progress = None
     if active:
@@ -1567,16 +1848,23 @@ def runtime_metrics(request: Request):
                 manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 pass
-        total_pages = int(active.get('total_pages') or progress.get('total') or manifest.get('total_pages') or 0)
-        current_page = int(active.get('current_page') or progress.get('page') or 0)
-        chunk_size = max(1, int(manifest.get('chunk_pages') or 100))
+        total_pages = int(progress.get('total') or active.get('total_pages') or manifest.get('total_pages') or 0)
+        current_page = int(progress.get('page') or active.get('current_page') or 0)
+        chunk_size = max(1, int(progress.get('chunk_pages') or manifest.get('chunk_pages') or 10))
+        completed_chunks = len([x for x in manifest.get('parts', []) if x.get('status') == 'COMPLETED'])
         pause_requested = (control / 'PAUSE').exists()
         job_progress = {
             'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
+            'data_type': active['data_type'] or 'CUTOFFS',
+            'event_progress': (csv_progress['progress'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['progress'] if latest_event else None)),
+            'event_message': (csv_progress['message'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['message'] if latest_event else '')),
+            'progress_stage': csv_progress['stage'] if csv_progress else '',
+            'rows_processed': int(csv_progress['processed'] or 0) if csv_progress else 0,
+            'total_rows': int(csv_progress['total'] or 0) if csv_progress else 0,
             'page': current_page, 'total_pages': total_pages,
             'percent': round(min(100, current_page / total_pages * 100), 1) if total_pages else 0,
-            'chunk_count': int(active.get('current_chunk') or len([x for x in manifest.get('parts', []) if x.get('status') == 'COMPLETED'])),
-            'total_chunks': int(active.get('total_chunks') or (((total_pages + chunk_size - 1) // chunk_size) if total_pages else 0)),
+            'chunk_count': int(progress.get('chunk_count') or active.get('current_chunk') or completed_chunks),
+            'total_chunks': int(progress.get('total_chunks') or active.get('total_chunks') or (((total_pages + chunk_size - 1) // chunk_size) if total_pages else 0)),
             'pause_requested': pause_requested,
             'paused_at_checkpoint': active['status'] == 'PAUSED' or progress.get('state') == 'PAUSED',
         }
@@ -1786,46 +2074,21 @@ def review_list(request: Request):
                    (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id) AS staging_row_count,
                    (SELECT COUNT(*) FROM import_staging_records r WHERE r.job_id=j.id AND UPPER(COALESCE(r.validation_status,'')) = 'REVIEW') AS validation_issue_count
             FROM import_jobs j
-            WHERE j.status IN ('REVIEW_REQUIRED','COMMITTING')
+            WHERE j.status IN ('STAGED','REVIEW_REQUIRED','COMMITTING')
             ORDER BY j.id DESC
         """).fetchall()
         response = [dict(r) for r in rows]
-        # Older imports stored the complete file-level validator output on
-        # every row. Count the affected category records from that report
-        # rather than presenting every staged record as an individual error.
-        for item in response:
-            if not item.get("validation_issue_count"):
-                continue
-            repeated = c.execute(
-                "SELECT validation_message FROM import_staging_records WHERE job_id=? "
-                "AND validation_status='REVIEW' LIMIT 1", (item["id"],)
-            ).fetchone()
-            message = str(repeated["validation_message"] or "") if repeated else ""
-            if "Total issues:" not in message:
-                continue
-            result = c.execute(
-                "SELECT summary_json FROM import_results WHERE job_id=? ORDER BY id DESC LIMIT 1",
-                (item["id"],)
-            ).fetchone()
-            try:
-                summary = json.loads(result["summary_json"] or "{}") if result else {}
-                report = str(summary.get("validation", ""))
-                unknown_categories = set(re.findall(r"\[([^\]]+)\]\s*:\s*\d+", report))
-                if unknown_categories:
-                    staged = c.execute(
-                        "SELECT normalized_json FROM import_staging_records WHERE job_id=?",
-                        (item["id"],)
-                    ).fetchall()
-                    item["validation_issue_count"] = sum(
-                        1 for staged_row in staged
-                        if str(json.loads(staged_row["normalized_json"] or "{}").get("category", "")).strip().upper() in unknown_categories
-                    )
-                else:
-                    item["validation_issue_count"] = 0
-            except (TypeError, ValueError, json.JSONDecodeError):
-                # Preserve the conservative count if an old report is malformed.
-                pass
         return response
+
+@app.post('/admin/api/imports/{job_id}/revalidate-legacy-mh')
+def revalidate_legacy_mh(request: Request, job_id: int):
+    u = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    with connect() as c:
+        try:
+            return revalidate_legacy_mh_staging(c, job_id, u['uid'])
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
 
 @app.get('/admin/api/imports/{job_id}/review')
 def review_detail(request: Request, job_id: int):
@@ -1838,19 +2101,40 @@ def review_detail(request: Request, job_id: int):
                        "FROM import_staging_records WHERE job_id=? ORDER BY id LIMIT 500",(job_id,)).fetchall()
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
+@app.get('/admin/api/imports/{job_id}/commit-progress')
+def import_commit_progress(request: Request, job_id: int):
+    require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
+    with connect() as c:
+        row = c.execute(
+            "SELECT job_id,status,stage,processed,total,progress,message,updated_at FROM import_commit_progress WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+    if not row:
+        return {'job_id': job_id, 'status': 'IDLE', 'stage': 'Waiting', 'processed': 0,
+                'total': 0, 'progress': 0, 'message': 'No commit has started for this import.'}
+    return dict(row)
+
+
+def _approve_import_sync(job_id: int, actor_user_id: int, notes: str):
+    """Run the long atomic promotion in a worker thread, not on the ASGI event loop."""
+    with connect() as c:
+        result = approve_import(c, job_id, actor_user_id, notes)
+    invalidate_public_caches()
+    return result
+
+
 @app.post('/admin/api/imports/{job_id}/approve')
-async def approve(request: Request, job_id: int, background_tasks: BackgroundTasks):
+async def approve(request: Request, job_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'},csrf=True)
     try: body=await request.json()
     except Exception: body={}
     notes=str(body.get('notes','')).strip()[:4000]
-    with connect() as c:
-        try:
-            result = approve_import(c,job_id,u['uid'],notes)
-            invalidate_public_caches()
-            background_tasks.add_task(_resolve_one_import_background, job_id)
-            return result
-        except ValueError as e: raise HTTPException(409,str(e))
+    try:
+        # Keep heartbeats, status polling, and admin requests responsive while
+        # thousands of staged rows are promoted in one database transaction.
+        return await run_in_threadpool(_approve_import_sync, job_id, u['uid'], notes)
+    except ValueError as e:
+        raise HTTPException(409,str(e))
 
 @app.post('/admin/api/imports/{job_id}/reject')
 async def reject(request: Request, job_id: int):
@@ -1904,18 +2188,21 @@ def delete_rolled_back_release(request: Request, release_id: int):
 @app.post('/admin/api/releases/{release_id}/publish')
 def publish(request: Request, release_id: int):
     u=require(request, {'SUPER_ADMIN','DATA_ADMIN'},csrf=True)
+    # Read authorization metadata in a short transaction; publishing performs
+    # filesystem work and must not keep this request's database connection open.
     with connect() as c:
         rel=c.execute('SELECT * FROM data_releases WHERE id=?',(release_id,)).fetchone()
         if not rel: raise HTTPException(404,'Release not found')
         if rel['approved_by'] != u['uid'] and u['role'] != 'SUPER_ADMIN': raise HTTPException(403,'Only the approving admin or a super admin can publish this release')
-        try:
-            result = publish_release(c, int(rel['source_job_id']), release_id)
-            invalidate_public_caches()
-            return result
-        except ValueError as e: raise HTTPException(409,str(e))
-        except Exception:
-            log.exception('Release publish failed: release_id=%s', release_id)
-            raise HTTPException(500,'Release publication failed; check the release timeline or server logs')
+        job_id=int(rel['source_job_id'])
+    try:
+        result = publish_release(job_id, release_id)
+        invalidate_public_caches()
+        return result
+    except ValueError as e: raise HTTPException(409,str(e))
+    except Exception:
+        log.exception('Release publish failed: release_id=%s', release_id)
+        raise HTTPException(500,'Release publication failed; check the release timeline or server logs')
 
 @app.get('/admin/releases', response_class=HTMLResponse)
 def releases_page_route(request: Request):
@@ -1926,7 +2213,7 @@ def releases_page_route(request: Request):
 @app.get('/admin/rollback', response_class=HTMLResponse)
 def rollback_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER','READ_ONLY'})
-    return releases_page(active='rollback', title='Rollback History')
+    return RedirectResponse('/admin/releases', status_code=307)
 
 @app.get('/admin/api/releases')
 def releases_api(request: Request):
@@ -2004,40 +2291,28 @@ async def feedback_status(request: Request, feedback_id: int):
 @app.get('/admin/resolver', response_class=HTMLResponse)
 def resolver_page_route(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
-    with connect() as c:
-        sync_institutes_to_resolver(c)
-        c.commit()
-        rows=[dict(r) for r in c.execute(
-            """SELECT i.institution_code,
-                      COALESCE(r.institution_name,i.institution_name) AS institution_name,
-                      COALESCE(r.city,i.city) AS city,
-                      COALESCE(r.website,i.website) AS website,
-                      COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source) AS source,
-                      COALESCE(r.source_url,i.website) AS source_url,
-                      r.address, r.city_source, r.website_source, r.address_source,
-                      r.verification_note, r.last_checked_at, r.updated_at
-               FROM institutes i
-               LEFT JOIN college_website_resolver r
-                 ON r.institution_code=i.institution_code
-              ORDER BY LOWER(COALESCE(r.institution_name,i.institution_name))
-              LIMIT 5000"""
-        )]
-    return resolver_page(rows)
+    # Rows are loaded once by the page's API call. Do not sync or query all
+    # colleges while constructing the HTML response.
+    return resolver_page([])
 
 @app.get('/admin/api/resolver')
 def resolver_api(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN','REVIEWER'})
     with connect() as c:
-        sync_institutes_to_resolver(c)
-        c.commit()
         return [dict(r) for r in c.execute(
             """SELECT i.institution_code,
-                      COALESCE(r.institution_name,i.institution_name) AS institution_name,
+                      COALESCE(NULLIF(r.institution_name,''),NULLIF(i.institution_name,'')) AS institution_name,
                       COALESCE(r.city,i.city) AS city,
                       COALESCE(r.website,i.website) AS website,
                       COALESCE(r.status,'PENDING') AS status,
-                      COALESCE(r.source,i.website_source) AS source,
+                      COALESCE(NULLIF(r.source,''),NULLIF(i.website_source,''),
+                        (SELECT 'CAP PDF: ' || c.source_pdf FROM cutoffs c
+                         WHERE c.institution_code=i.institution_code
+                         ORDER BY c.year DESC, c.id DESC LIMIT 1),
+                        (SELECT 'Seat matrix: ' || s.source_pdf FROM seats s
+                         WHERE s.institution_code=i.institution_code
+                         ORDER BY s.capture_year DESC, s.id DESC LIMIT 1),
+                        'CAP data (source file unavailable)') AS source,
                       COALESCE(r.source_url,i.website) AS source_url,
                       r.address, r.city_source, r.website_source, r.address_source,
                       r.verification_note, r.last_checked_at, r.updated_at
@@ -2062,8 +2337,19 @@ def resolver_github_seed(request: Request):
     raise HTTPException(410, 'GitHub seed is disabled; resolver scope is the CAP institutes table')
 
 @app.post('/admin/api/resolver/next')
-def resolver_next(request: Request):
+async def resolver_next(request: Request):
     require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status_filter = str(body.get('status') or '').strip().upper()
+    if status_filter == 'UNVERIFIED':
+        status_filter = 'CANDIDATE'
+    allowed_statuses = {'PENDING', 'CANDIDATE', 'VERIFIED', 'NEEDS_REVIEW', 'FAILED'}
+    if status_filter and status_filter not in allowed_statuses:
+        raise HTTPException(400, 'Invalid resolver status filter')
+    exclude_codes = [str(x).strip() for x in body.get('exclude_codes', []) if str(x).strip()][:5000]
     if not os.getenv('GEMINI_API_KEY', '').strip():
         return {
             'ok': True,
@@ -2076,20 +2362,53 @@ def resolver_next(request: Request):
     busy, reason = _resolver_server_busy()
     if busy:
         with connect() as c:
-            pending = c.execute("SELECT COUNT(*) AS n FROM college_website_resolver WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW')").fetchone()['n']
-        return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(pending)}
+            sql = 'SELECT COUNT(*) AS n FROM college_website_resolver'
+            clauses, params = [], []
+            if status_filter:
+                clauses.append('status=?')
+                params.append(status_filter)
+            if exclude_codes:
+                clauses.append('institution_code NOT IN (' + ','.join('?' for _ in exclude_codes) + ')')
+                params.extend(exclude_codes)
+            if clauses:
+                sql += ' WHERE ' + ' AND '.join(clauses)
+            remaining = c.execute(sql, params).fetchone()['n']
+        return {'ok': True, 'busy': True, 'reason': reason, 'processed': 0, 'remaining': int(remaining)}
     try:
         with connect() as c:
-            current = c.execute(
-                "SELECT institution_code,institution_name,status FROM college_website_resolver "
-                "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW') "
-                "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
-                "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name) LIMIT 1"
-            ).fetchone()
-        result = resolve_import_job(None, limit=1)
+            sql = 'SELECT institution_code,institution_name,status FROM college_website_resolver'
+            clauses, params = [], []
+            if status_filter:
+                clauses.append('status=?')
+                params.append(status_filter)
+            if exclude_codes:
+                clauses.append('institution_code NOT IN (' + ','.join('?' for _ in exclude_codes) + ')')
+                params.extend(exclude_codes)
+            if clauses:
+                sql += ' WHERE ' + ' AND '.join(clauses)
+            sql += " ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name) LIMIT 1"
+            current = c.execute(sql, params).fetchone()
+        if not current:
+            return {'ok': True, 'busy': False, 'current': None, 'processed': 0, 'remaining': 0}
+        current_code = str(current['institution_code'])
+        result = resolve_import_job(None, limit=1, status_filter=status_filter or None, exclude_codes=exclude_codes)
+        # Count only not-yet-attempted colleges, including for the All-status scan.
+        scanned = list(dict.fromkeys([*exclude_codes, current_code]))
+        with connect() as c:
+            remaining_sql = 'SELECT COUNT(*) AS n FROM college_website_resolver'
+            remaining_clauses, remaining_params = [], []
+            if status_filter:
+                remaining_clauses.append('status=?')
+                remaining_params.append(status_filter)
+            if scanned:
+                remaining_clauses.append('institution_code NOT IN (' + ','.join('?' for _ in scanned) + ')')
+                remaining_params.extend(scanned)
+            if remaining_clauses:
+                remaining_sql += ' WHERE ' + ' AND '.join(remaining_clauses)
+            result['remaining'] = int(c.execute(remaining_sql, remaining_params).fetchone()['n'])
         return {'ok': True, 'busy': False,
-                'current': dict(current) if current else None,
-                'processed': result.get('resolved', 0) + result.get('failed', 0), **result}
+                'current': dict(current),
+                'processed': result.get('resolved', 0) + result.get('failed', 0) + result.get('searched', 0), **result}
     except Exception as exc:
         log.exception('Single resolver step failed')
         raise HTTPException(500, f'Resolver step failed: {str(exc)[:300]}')
@@ -2143,7 +2462,7 @@ async def resolver_find(request: Request):
                     })
                     continue
             try:
-                ai, _ = gemini_find(r['institution_name'], r.get('city'), excluded_website if force_research else None)
+                ai, _ = gemini_find(r['institution_name'], r.get('city'), excluded_website if force_research else None, institution_code=code)
                 url = ai.get('official_url')
                 city = str(ai.get('city')).strip() if ai.get('city') else r.get('city')
                 address = str(ai.get('address')).strip() if ai.get('address') else None
@@ -2164,7 +2483,7 @@ async def resolver_find(request: Request):
                 verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
                     not ai_url or _same_site(v.get('url'), ai_url)
                 )
-                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if v.get('ok') else 'FAILED')
+                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') in (408, 425, 429) or (v.get('status') and v.get('status') >= 500) or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
                 note = ' '.join(x for x in (
                     (ai.get('note') or ''),
                     (ai_check.get('note') or ''),
@@ -2188,6 +2507,51 @@ async def resolver_find(request: Request):
                 })
         c.commit()
     return {'ok':True,'results':results}
+
+@app.post('/admin/api/resolver/edit')
+async def resolver_edit(request: Request):
+    u = require(request, {'SUPER_ADMIN','DATA_ADMIN'}, csrf=True)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, 'Invalid JSON body')
+    code = str(body.get('institution_code') or '').strip()
+    if not code or len(code) > 100:
+        raise HTTPException(400, 'A valid college ID is required')
+    city = str(body.get('city') or '').strip()[:160] or None
+    address = str(body.get('address') or '').strip()[:500] or None
+    website_raw = str(body.get('website') or '').strip()
+    website = valid_url(website_raw) if website_raw else None
+    if website_raw and not website:
+        raise HTTPException(400, 'Website must be a valid public HTTP or HTTPS URL')
+    source = str(body.get('source') or '').strip()[:500] or 'Manual admin correction'
+    source_url_raw = str(body.get('source_url') or '').strip()
+    source_url = valid_url(source_url_raw) if source_url_raw else None
+    if source_url_raw and not source_url:
+        raise HTTPException(400, 'Source URL must be a valid public HTTP or HTTPS URL')
+    with connect() as c:
+        row = c.execute('SELECT institution_code,institution_name,city,website,address,source,source_url FROM college_website_resolver WHERE institution_code=?', (code,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'College not found in resolver')
+        before = dict(row)
+        c.execute("""UPDATE college_website_resolver SET city=?,website=?,address=?,source=?,source_url=?,
+          city_source='manual_admin',website_source='manual_admin',address_source='manual_admin',
+          status=CASE WHEN ? IS NOT NULL THEN 'NEEDS_REVIEW' ELSE 'PENDING' END,
+          verification_note='Manually edited by admin; website requires verification if changed.',
+          updated_at=CURRENT_TIMESTAMP WHERE institution_code=?""",
+          (city, website, address, source, source_url, website, code))
+        c.execute("""UPDATE institutes SET city=?,website=?,address=?,city_source='manual_admin',
+          website_source='manual_admin',address_source='manual_admin',verified_at=CURRENT_TIMESTAMP
+          WHERE institution_code=?""", (city, website, address, code))
+        after = {'institution_code': code, 'institution_name': row['institution_name'], 'city': city,
+                 'website': website, 'address': address, 'source': source, 'source_url': source_url}
+        c.execute("INSERT INTO audit_log (actor_user_id,action,entity_type,entity_id,before_json,after_json,reason) VALUES (?,?,?,?,?,?,?)",
+          (u['uid'], 'EDIT_COLLEGE_RESOLVER', 'INSTITUTE', code, json.dumps(before, default=str),
+           json.dumps(after, default=str), 'Manual college metadata correction in Website Resolver'))
+        c.commit()
+    invalidate_public_caches()
+    return {'ok': True, 'college': after}
+
 
 @app.post('/admin/api/resolver/verify')
 async def resolver_manual_verify(request: Request):

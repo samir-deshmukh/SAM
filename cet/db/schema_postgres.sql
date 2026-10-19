@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS cutoffs (
     round            INTEGER NOT NULL,
     institution_code TEXT NOT NULL REFERENCES institutes(institution_code),
     program_id       INTEGER NOT NULL REFERENCES programs(program_id),
+    program_code     TEXT,
     base_category    TEXT NOT NULL REFERENCES base_categories(base_code),
     is_ladies        BOOLEAN NOT NULL DEFAULT FALSE,
     section_code     TEXT NOT NULL REFERENCES sections(section_code),
@@ -84,6 +85,8 @@ CREATE INDEX IF NOT EXISTS idx_cutoffs_filter
 
 CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_prog
     ON cutoffs(institution_code, program_id);
+CREATE INDEX IF NOT EXISTS idx_cutoffs_inst_program_code
+    ON cutoffs(institution_code, program_code);
 
 CREATE INDEX IF NOT EXISTS idx_cutoffs_percentile
     ON cutoffs(percentile DESC);
@@ -107,6 +110,7 @@ CREATE TABLE IF NOT EXISTS seats (
     raw_gender          TEXT NOT NULL DEFAULT '',
     source_pdf          TEXT NOT NULL,
     source_page         INTEGER,
+    source_row          INTEGER,
     ingested_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(capture_year, program_family, institution_code, choice_code,
            allocation_lane, raw_category, raw_gender)
@@ -117,6 +121,24 @@ CREATE INDEX IF NOT EXISTS idx_seats_lookup
 
 CREATE INDEX IF NOT EXISTS idx_seats_category
     ON seats(base_category, allocation_lane, is_total);
+
+-- Full per-choice-code metadata copied from the official seat-matrix PDF.
+-- Long allocation rows alone are insufficient to reproduce the source table:
+-- this JSONB record retains the original summary columns and reservation notes.
+CREATE TABLE IF NOT EXISTS seat_matrix_courses (
+    capture_year INTEGER NOT NULL,
+    program_family TEXT NOT NULL,
+    institution_code TEXT NOT NULL REFERENCES institutes(institution_code),
+    choice_code TEXT NOT NULL,
+    source_pdf TEXT NOT NULL,
+    source_page INTEGER,
+    source_job_id INTEGER,
+    course_metadata JSONB NOT NULL,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (capture_year, program_family, institution_code, choice_code)
+);
+CREATE INDEX IF NOT EXISTS idx_seat_matrix_courses_lookup
+    ON seat_matrix_courses(program_family, institution_code, capture_year, choice_code);
 
 -- ============================================================
 -- STAGING & AUDIT TABLES

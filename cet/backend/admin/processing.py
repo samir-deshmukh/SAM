@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv, importlib.util, json, shutil, subprocess, sys, os, time
 from functools import lru_cache
 from pathlib import Path
-from .db import event, update_status
+from .db import connect, event, update_status
 from .state import JobStatus, can_transition
 
 BASE = Path(__file__).resolve().parents[2]
@@ -119,10 +119,32 @@ def _resolve_cutoff_dimensions(raw: dict):
 
     return base, ladies, section, stage
 
+def _csv_control_checkpoint(conn, job_id: int) -> None:
+    """Honor stop/pause controls while a large CSV is being staged."""
+    import time
+    pause_marker = STAGING_ROOT / f"job_{job_id}" / "PAUSE"
+    while pause_marker.exists():
+        _raise_if_cancelled(conn, job_id)
+        time.sleep(0.25)
+    _raise_if_cancelled(conn, job_id)
+
+
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
-               valid: bool, validation_message: str, required_fields=()) -> tuple[int, int]:
+               valid: bool, validation_message: str, required_fields=(),
+               progress_callback=None) -> tuple[int, int]:
     rows = 0
     quarantined = 0
+    total_rows = 0
+    if progress_callback:
+        # Count CSV records with the CSV parser (not physical lines, since quoted
+        # fields may contain newlines) so progress remains accurate for large files.
+        with path.open("r", encoding="utf-8-sig", newline="") as count_file:
+            total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
+        try:
+            progress_callback(0, total_rows)
+        except Exception:
+            pass
+    progress_interval = max(250, total_rows // 100) if total_rows else 250
     # The trusted validator treats these columns as block-level merged cells:
     # a blank value means "same as the preceding row". Apply the same
     # normalization before staging so continuation pages do not become false
@@ -131,6 +153,10 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
         "institution_code", "institution_name", "program_code",
         "program_name", "status", "section",
     )
+    seat_valid_categories = seat_lane_map = seat_alias_map = None
+    if result_type == "SEATS":
+        from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
+        seat_valid_categories, seat_lane_map, seat_alias_map = load_whitelists(BASE / "data" / "reference")
     last_values = {field: "" for field in fill_columns}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
@@ -157,6 +183,18 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                     _resolve_cutoff_dimensions(normalized)
                 except (ValueError, KeyError) as exc:
                     row_errors.append(str(exc))
+            elif result_type == "SEATS" and not missing:
+                lane_raw = str(normalized.get("allocation_type", "")).strip()
+                category_raw = str(normalized.get("category", "")).strip()
+                if lane_raw not in seat_lane_map:
+                    row_errors.append(f"Unknown allocation type: {lane_raw!r}")
+                if category_raw != TOTAL_MARKER:
+                    category = normalize_category(category_raw, seat_alias_map)
+                    if category not in seat_valid_categories:
+                        row_errors.append(
+                            f"Unknown category {category_raw!r} at page {_page_from(normalized)}; "
+                            "check the source PDF before approval"
+                        )
             if row_errors:
                 quarantined += 1
                 row_status = "REVIEW"
@@ -179,6 +217,16 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                  message)
             )
             rows += 1
+            if progress_callback and (rows % progress_interval == 0 or (total_rows and rows == total_rows)):
+                try:
+                    _csv_control_checkpoint(conn, job_id)
+                    progress_callback(rows, total_rows)
+                except ImportCancelled:
+                    raise
+                except Exception:
+                    # Telemetry must never interrupt the import itself.
+                    pass
+    _csv_control_checkpoint(conn, job_id)
     return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
@@ -222,8 +270,15 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
         identity_existing.setdefault(identity, set()).add((r[6], r[7], r[8]))
     changed_examples = []
     duplicate_in_stage = 0
+    uncomparable_rows = 0
     for _, row in df.iterrows():
-        base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+        # A malformed category has already been quarantined by _stage_csv.
+        # Do not let one bad extracted row abort comparison of a large PDF.
+        try:
+            base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+        except (ValueError, KeyError):
+            uncomparable_rows += 1
+            continue
         rs = row["rank_suffix"].strip() or None
         rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
         pct = float(row["percentage"]) if row["percentage"].strip() else None
@@ -241,9 +296,9 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
                 changed_examples.append({"identity": identity, "new": key[6:]})
         else:
             new_rows += 1
-    return {"rows_compared": len(df), "already_present_exact_key": duplicates,
-            "new_candidates": new_rows, "changed_candidates": changed,
-            "duplicate_in_staged_input": duplicate_in_stage,
+    return {"rows_compared": len(df), "rows_uncomparable_quarantined": uncomparable_rows,
+            "already_present_exact_key": duplicates, "new_candidates": new_rows,
+            "changed_candidates": changed, "duplicate_in_staged_input": duplicate_in_stage,
             "changed_examples": changed_examples}
 
 def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
@@ -267,7 +322,8 @@ def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
 def process_import(conn, job_id: int, pdf_path: Path, *,
                    data_type: str, family: str, year: int, round_name: str,
                    claimed: bool=False, pre_extracted_path: Path | None=None,
-                   extraction_summary: dict | None=None, source_filename: str | None=None, worker_id: str | None=None):
+                   extraction_summary: dict | None=None, source_filename: str | None=None, worker_id: str | None=None,
+                   progress_callback=None):
     """Run extraction/normalization/validation and stop at STAGED/REVIEW_REQUIRED."""
     # Stable per-job work path lets the chunk manifest skip completed parts on retry.
     work = WORK_ROOT / f"job_{job_id}"
@@ -303,7 +359,8 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env["CAPFIND_WORKER_ID"] = str(worker_id or "")
                 env["PYTHONIOENCODING"] = "utf-8"
                 env["PYTHONUTF8"] = "1"
-                chunk_pages = str(max(10, min(250, int(env.get("CAPFIND_CHUNK_PAGES", "100")))))
+                # Keep production extraction chunks bounded to 10 pages for low-memory workers.
+                chunk_pages = "10"
                 command = [
                     sys.executable, str(SCRIPTS / "chunked_cutoff_extractor.py"),
                     str(pdf_path), "--out", str(raw), "--chunk-pages", chunk_pages,
@@ -380,7 +437,8 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             # required at row level.
             rows, row_quarantine = _stage_csv(
                 conn, job_id, "CUTOFFS", canonical, valid, validation,
-                ("institution_code", "program_name", "category", "percentage")
+                ("institution_code", "program_name", "category", "percentage"),
+                progress_callback=progress_callback,
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
@@ -404,6 +462,26 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env.setdefault("OMP_THREAD_LIMIT", "1")
                 env.setdefault("OPENBLAS_NUM_THREADS", "1")
                 env.setdefault("MKL_NUM_THREADS", "1")
+                # The seat extractor uses cooperative checkpoints too; expose the
+                # same progress/control channel used by the chunked cutoff worker.
+                env["CAPFIND_JOB_CONTROL_DIR"] = str(staging)
+                env["CAPFIND_JOB_ID"] = str(job_id)
+                env["CAPFIND_WORKER_ID"] = str(worker_id or "")
+                # The extractor closes each PDF page after processing and streams seat rows
+                # to disk, so long files need a length-aware watchdog rather than a
+                # fixed 30-minute cutoff. Keep a hard ceiling for genuinely stuck jobs.
+                try:
+                    import fitz
+                    with fitz.open(pdf_path) as source_doc:
+                        expected_pages = len(source_doc)
+                except Exception:
+                    expected_pages = 0
+                timeout_seconds = max(1800, min(4 * 60 * 60, expected_pages * 15))
+                env["CAPFIND_TOTAL_PAGES"] = str(expected_pages)
+                # Seat matrices currently run as one page-checkpointed extraction
+                # rather than cutoff-style page chunks.
+                env["CAPFIND_CHUNK_INDEX"] = "1"
+                env["CAPFIND_TOTAL_CHUNKS"] = "1"
                 log_path = work / "seat_extractor.log"
                 with log_path.open("w", encoding="utf-8") as log:
                     p = subprocess.Popen(
@@ -421,10 +499,16 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                                 p.kill()
                                 p.wait(timeout=3)
                             _raise_if_cancelled(conn, job_id)
-                        if time.monotonic() - started > 1800:
+                        # Large CAP seat-matrix PDFs can legitimately take longer than
+                        # 30 minutes, especially when OCR is needed. Scale the watchdog
+                        # from the document length instead of killing a healthy long job.
+                        if time.monotonic() - started > timeout_seconds:
                             p.kill()
                             p.wait(timeout=5)
-                            raise RuntimeError("Seat-matrix extractor timed out after 30 minutes")
+                            raise RuntimeError(
+                                f"Seat-matrix extractor timed out after {int(timeout_seconds // 60)} minutes "
+                                f"for a {expected_pages}-page PDF"
+                            )
                         time.sleep(0.25)
                 extractor_output = log_path.read_text(encoding="utf-8", errors="replace")
                 _raise_if_cancelled(conn, job_id)
@@ -453,8 +537,11 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
             event(conn, job_id, "VALIDATE", "Running existing validate_seats.py gate", 78)
             valid, validation = _run_validator(SCRIPTS / "validate_seats.py", normalized)
             (work / "validation.txt").write_text(validation, encoding="utf-8")
-            rows, row_quarantine = _stage_csv(conn, job_id, "SEATS", canonical, valid, validation,
-                                                ("institution_code", "choice_code", "allocation_type", "category", "seats"))
+            rows, row_quarantine = _stage_csv(
+                conn, job_id, "SEATS", canonical, valid, validation,
+                ("institution_code", "choice_code", "allocation_type", "category", "seats"),
+                progress_callback=progress_callback,
+            )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
             shutil.copy2(work / "validation.txt", staging / "validation.txt")
@@ -536,11 +623,144 @@ def _require_clean_stage(conn, job_id: int, result_type: str):
     return result
 
 
-def _insert_cutoff_from_json(conn, raw, job, source_pdf):
+
+def revalidate_legacy_mh_staging(conn, job_id: int, actor_user_id: int):
+    """Repair only the known legacy BCA 2026 CAP-2 MH validator mismatch.
+
+    The source PDF can be unavailable on ephemeral hosting, so this path
+    revalidates the already-staged rows against current canonical rules. It is
+    intentionally restricted to one known filename and the exact historical
+    validator signature; it never commits production data.
+    """
+    import re
+    import csv
+
+    job = conn.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        raise ValueError("Import not found")
+    if (
+        job.get("original_filename") != "2026BCA_CAP2_MH_CutOff.pdf"
+        or str(job.get("course_family") or "").upper() != "BCA"
+        or int(job.get("year") or 0) != 2026
+        or str(job.get("round") or "").upper() not in {"C2", "2", "ROUND 2"}
+        or job.get("data_type") != "CUTOFFS"
+    ):
+        raise ValueError("This repair is restricted to the known 2026 BCA CAP-2 MH import")
+    if job.get("status") != JobStatus.REVIEW_REQUIRED.value:
+        raise ValueError(f"Import is not awaiting review: {job.get('status')}")
+
+    result = conn.execute(
+        "SELECT * FROM import_results WHERE job_id=? AND result_type='CUTOFFS' ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if not result or result.get("validation_status") != "REVIEW_REQUIRED":
+        raise ValueError("The expected legacy validation result was not found")
+    try:
+        summary = json.loads(result.get("summary_json") or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Stored validation summary is unreadable") from exc
+    report = str(summary.get("validation") or "")
+
+    # Do not waive any issue other than the four obsolete MH category reports.
+    required_report_checks = (
+        re.search(r"Total issues:\s*4\b", report),
+        re.search(r"=== UNKNOWN CATEGORIES \(1\) ===", report),
+        re.search(r"^\s*\[MH\]\s*:\s*4\s*$", report, re.MULTILINE),
+        re.search(r"=== UNKNOWN STAGES \(0\) ===", report),
+        re.search(r"=== UNKNOWN SECTIONS \(0\) ===", report),
+        re.search(r"=== UNKNOWN PROGRAM NAMES \(0\) ===", report),
+        re.search(r"Exact duplicate rows detected:\s*0\b", report),
+    )
+    if not all(required_report_checks) or "=== FILE ERRORS ===" in report:
+        raise ValueError("Stored report does not match the narrowly approved MH-only legacy issue; no changes made")
+
+    alias_path = BASE / "data" / "reference" / "program_aliases.csv"
+    with alias_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        valid_programs = {str(row.get("raw_name", "")).strip() for row in csv.DictReader(handle)}
+    rows = conn.execute(
+        "SELECT id,result_type,normalized_json,validation_status FROM import_staging_records WHERE job_id=? ORDER BY id",
+        (job_id,),
+    ).fetchall()
+    if len(rows) != 327 or any(row.get("result_type") != "CUTOFFS" for row in rows):
+        raise ValueError(f"Expected exactly 327 cutoff staging rows; found {len(rows)}. No changes made")
+
+    # Validate every staged row before changing any record.
+    repaired_ids = []
+    for row in rows:
+        try:
+            normalized = json.loads(row.get("normalized_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Staged row {row['id']} contains invalid JSON; no changes made") from exc
+        for field in ("institution_code", "program_name", "category", "percentage"):
+            if not str(normalized.get(field, "")).strip():
+                raise ValueError(f"Staged row {row['id']} is missing {field}; no changes made")
+        if str(normalized.get("program_name", "")).strip() not in valid_programs:
+            raise ValueError(f"Staged row {row['id']} has an unrecognized program; no changes made")
+        try:
+            _resolve_cutoff_dimensions(normalized)
+            float(normalized["percentage"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"Staged row {row['id']} still fails current validation: {exc}; no changes made") from exc
+        repaired_ids.append(int(row["id"]))
+
+    # All checks passed: repair staging metadata only. Production remains untouched.
+    for row_id in repaired_ids:
+        conn.execute(
+            "UPDATE import_staging_records SET validation_status='VALID',validation_message=NULL WHERE id=? AND job_id=?",
+            (row_id, job_id),
+        )
+    summary["legacy_revalidation"] = {
+        "rule": "MH -> MI canonical category mapping",
+        "reason": "Historical validator flagged four MH labels that current canonical parsing accepts as MI",
+        "rows_revalidated": len(repaired_ids),
+        "source_pdf_reextracted": False,
+        "production_committed": False,
+    }
+    conn.execute(
+        "UPDATE import_results SET validation_status='PASS',rows_validated=?,summary_json=? WHERE id=?",
+        (len(repaired_ids), json.dumps(summary, ensure_ascii=False), result["id"]),
+    )
+    event(conn, job_id, "LEGACY_REVALIDATION",
+          f"Revalidated {len(repaired_ids)} existing cutoff rows against current rules; no production changes made", 100)
+    conn.execute(
+        """INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,before_json,after_json,reason)
+           VALUES (?,?,?,?,?,?,?)""",
+        (actor_user_id, "REVALIDATE_STAGED_IMPORT", "IMPORT", str(job_id),
+         json.dumps({"validation_status": result["validation_status"]}),
+         json.dumps({"validation_status": "PASS", "rows_revalidated": len(repaired_ids)}),
+         "Narrow MH-to-MI legacy validation repair; original PDF was not re-extracted"),
+    )
+    conn.commit()
+    return {"ok": True, "job_id": job_id, "rows_revalidated": len(repaired_ids),
+            "status": JobStatus.REVIEW_REQUIRED.value, "production_committed": False}
+
+@lru_cache(maxsize=1)
+def _cutoff_program_levels():
+    """Read program aliases once; never rebuild a pandas DataFrame per row."""
+    path = BASE / "data" / "reference" / "program_aliases.csv"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return {
+            str(row.get("raw_name", "")).strip(): str(row.get("level", "")).strip()
+            for row in csv.DictReader(handle)
+        }
+
+
+@lru_cache(maxsize=1)
+def _seat_import_whitelists():
+    from scripts.validate_seats import load_whitelists
+    return load_whitelists(BASE / "data" / "reference")
+
+
+def _insert_cutoff_from_json(conn, raw, job, source_pdf, reference_cache=None):
     import sys
     sys.path.insert(0, str(SCRIPTS))
     from validate_data import parse_filename
     family = job["course_family"]
+    reference_cache = reference_cache if reference_cache is not None else {
+        "institutes": set(), "base_categories": set(), "sections": set(), "stages": set(), "program_ids": {}
+    }
     program_name = str(raw.get("program_name","")).strip()
     inst = str(raw.get("institution_code","")).strip()
     if not program_name or not inst:
@@ -551,52 +771,61 @@ def _insert_cutoff_from_json(conn, raw, job, source_pdf):
     rank_number = int(rank) if rank.isdigit() else None
     suffix = str(raw.get("rank_suffix","")).strip() or None
 
-    level_map = {}
-    alias_file = BASE/"data"/"reference"/"program_aliases.csv"
-    if alias_file.exists():
-        import pandas as pd
-        df=pd.read_csv(alias_file,dtype=str,keep_default_na=False)
-        level_map=dict(zip(df["raw_name"].str.strip(),df["level"].str.strip()))
-    level=level_map.get(program_name)
+    level = _cutoff_program_levels().get(program_name)
     # A PDF can legitimately contain an institute that is not yet present in
     # the reference table. The PDF is the authoritative source for its code
     # and name at import time; upsert that reference row before the fact row
     # so PostgreSQL's FK remains enforced without requiring a manual seed run.
-    conn.execute("""INSERT INTO institutes(institution_code,institution_name)
-        VALUES(?,?) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name""",
-        (inst, str(raw.get("institution_name","")).strip() or inst))
-    conn.execute("INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING", (base,))
-    conn.execute("INSERT INTO sections(section_code,section_full) VALUES(?,?) ON CONFLICT(section_code) DO NOTHING",
-                 (section, section))
-    conn.execute("INSERT INTO stages(stage_code) VALUES(?) ON CONFLICT(stage_code) DO NOTHING", (stage,))
-    conn.execute("INSERT INTO programs(program_family,program_name_raw,level) VALUES(?,?,?) ON CONFLICT(program_family,program_name_raw) DO NOTHING",
-                 (family,program_name,level))
-    prog=conn.execute("SELECT program_id FROM programs WHERE program_family=? AND program_name_raw=?",
-                      (family,program_name)).fetchone()
-    if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
-    pid=prog["program_id"]
-    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,base,bool(ladies),
+    if inst not in reference_cache["institutes"]:
+        conn.execute("""INSERT INTO institutes(institution_code,institution_name)
+            VALUES(?,?) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name""",
+            (inst, str(raw.get("institution_name","")).strip() or inst))
+        reference_cache["institutes"].add(inst)
+    if base not in reference_cache["base_categories"]:
+        conn.execute("INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING", (base,))
+        reference_cache["base_categories"].add(base)
+    if section not in reference_cache["sections"]:
+        conn.execute("INSERT INTO sections(section_code,section_full) VALUES(?,?) ON CONFLICT(section_code) DO NOTHING",
+                     (section, section))
+        reference_cache["sections"].add(section)
+    if stage not in reference_cache["stages"]:
+        conn.execute("INSERT INTO stages(stage_code) VALUES(?) ON CONFLICT(stage_code) DO NOTHING", (stage,))
+        reference_cache["stages"].add(stage)
+    program_key = (family, program_name)
+    if program_key not in reference_cache["program_ids"]:
+        conn.execute("INSERT INTO programs(program_family,program_name_raw,level) VALUES(?,?,?) ON CONFLICT(program_family,program_name_raw) DO NOTHING",
+                     (family,program_name,level))
+        prog=conn.execute("SELECT program_id FROM programs WHERE program_family=? AND program_name_raw=?",
+                          (family,program_name)).fetchone()
+        if not prog: raise ValueError(f"Unable to resolve program: {program_name}")
+        reference_cache["program_ids"][program_key] = prog["program_id"]
+    pid=reference_cache["program_ids"][program_key]
+    program_code=str(raw.get("program_code", "")).strip() or None
+    vals=(int(job["year"]),int(str(job["round"])[1:]),inst,pid,program_code,base,bool(ladies),
           section,stage,None,rank_number,suffix,pct,str(raw.get("category","")).strip(),
           program_name,source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
     cur=conn.execute("""INSERT INTO cutoffs
-        (year,round,institution_code,program_id,base_category,is_ladies,section_code,
+        (year,round,institution_code,program_id,program_code,base_category,is_ladies,section_code,
          stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,
          raw_program_name,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
     inserted=cur.fetchone()
     if inserted:
         rid=inserted["id"]
-        after=dict(zip(["year","round","institution_code","program_id","base_category","is_ladies",
+        after=dict(zip(["year","round","institution_code","program_id","program_code","base_category","is_ladies",
                         "section_code","stage_code","home_university","rank_number","rank_suffix",
                         "percentile","raw_category","raw_program_name","source_pdf","source_page"], vals))
         return rid, after
     return None, None
 
 
-def _insert_seat_from_json(conn, raw, job, source_pdf):
+def _insert_seat_from_json(conn, raw, job, source_pdf, reference_cache=None):
     from scripts.ingest_seats import canonical_institution_code
-    from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
-    valid_cats, lane_map, alias_map = load_whitelists(BASE/"data"/"reference")
+    from scripts.validate_seats import normalize_category, TOTAL_MARKER
+    reference_cache = reference_cache if reference_cache is not None else {
+        "institutes": set(), "base_categories": set(), "allocation_lanes": set()
+    }
+    valid_cats, lane_map, alias_map = _seat_import_whitelists()
     inst=canonical_institution_code(str(raw.get("institution_code","")),str(raw.get("choice_code","")))
     lane_raw=str(raw.get("allocation_type","")).strip()
     lane=lane_map.get(lane_raw)
@@ -605,10 +834,12 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     # but the admin import path writes directly to the production connection.
     # Ensure the referenced lane exists here as well so a fresh Render database
     # cannot reject an otherwise validated seat row with a foreign-key error.
-    conn.execute(
-        "INSERT INTO allocation_lanes(lane_code,lane_full) VALUES(?,?) ON CONFLICT(lane_code) DO NOTHING",
-        (lane, lane_raw),
-    )
+    if lane not in reference_cache["allocation_lanes"]:
+        conn.execute(
+            "INSERT INTO allocation_lanes(lane_code,lane_full) VALUES(?,?) ON CONFLICT(lane_code) DO NOTHING",
+            (lane, lane_raw),
+        )
+        reference_cache["allocation_lanes"].add(lane)
     cat=str(raw.get("category","")).strip()
     total=cat==TOTAL_MARKER
     base=None if total else normalize_category(cat,alias_map)
@@ -617,34 +848,92 @@ def _insert_seat_from_json(conn, raw, job, source_pdf):
     # Seat imports use the same PostgreSQL FK graph as cutoff imports.
     # The standalone seat ingester seeds these reference rows, but the admin
     # approval path writes directly to production and must do the same.
-    conn.execute(
-        "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
-        "ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name",
-        (inst, str(raw.get("institution_name","")).strip() or inst),
-    )
-    if base is not None:
+    if inst not in reference_cache["institutes"]:
+        conn.execute(
+            "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
+            "ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name",
+            (inst, str(raw.get("institution_name","")).strip() or inst),
+        )
+        reference_cache["institutes"].add(inst)
+    if base is not None and base not in reference_cache["base_categories"]:
         conn.execute(
             "INSERT INTO base_categories(base_code) VALUES(?) ON CONFLICT(base_code) DO NOTHING",
             (base,),
         )
+        reference_cache["base_categories"].add(base)
     gender=str(raw.get("gender","")).strip()
     is_ladies={"G":False,"L":True}.get(gender) if gender else None
+    source_row = int(raw["source_row"]) if str(raw.get("source_row", "")).isdigit() else None
     vals=(int(job["year"]),job["course_family"],inst,str(raw.get("choice_code","")).strip(),
           lane,base,total,is_ladies,int(raw["seats"]),cat,lane_raw,gender,
-          source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None)
+          source_pdf,int(raw["page"]) if str(raw.get("page","")).isdigit() else None,
+          source_row)
     cur=conn.execute("""INSERT INTO seats
         (capture_year,program_family,institution_code,choice_code,allocation_lane,base_category,
-         is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id""", vals)
+         is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page,source_row)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT DO NOTHING RETURNING id""", vals)
     inserted=cur.fetchone()
     if inserted:
         rid=inserted["id"]
         cols=["capture_year","program_family","institution_code","choice_code","allocation_lane",
               "base_category","is_total","is_ladies","seats","raw_category","raw_allocation_type",
-              "raw_gender","source_pdf","source_page"]
+              "raw_gender","source_pdf","source_page","source_row"]
         return rid, dict(zip(cols,vals))
     return None,None
 
+
+
+def _insert_seat_course_metadata(conn, raw, job, source_pdf):
+    """Persist one official course/choice-code summary from the source PDF."""
+    metadata = raw.get("course_metadata")
+    if not metadata:
+        return False
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid course_metadata JSON: {exc}")
+    if not isinstance(metadata, dict):
+        raise ValueError("course_metadata must be a JSON object")
+    from scripts.ingest_seats import canonical_institution_code
+    institution = canonical_institution_code(
+        str(raw.get("institution_code", "")), str(raw.get("choice_code", ""))
+    )
+    choice = str(raw.get("choice_code", "")).strip()
+    if not institution or not choice:
+        raise ValueError("Seat-matrix course metadata has no institution/choice code")
+    metadata_pdf = str(metadata.get("source_pdf") or raw.get("source_pdf") or source_pdf)
+    page = metadata.get("page") or raw.get("page")
+    page = int(page) if str(page or "").isdigit() else None
+    conn.execute("""INSERT INTO seat_matrix_courses
+        (capture_year,program_family,institution_code,choice_code,source_pdf,source_page,source_job_id,course_metadata)
+        VALUES (?,?,?,?,?,?,?,CAST(? AS jsonb))
+        ON CONFLICT(capture_year,program_family,institution_code,choice_code) DO NOTHING""",
+        (int(job["year"]), job["course_family"], institution, choice,
+         metadata_pdf, page, int(job["id"]), json.dumps(metadata, ensure_ascii=False)))
+    return True
+
+
+def _write_commit_progress(job_id: int, status: str, stage: str,
+                           processed: int, total: int, message: str) -> None:
+    """Persist progress outside the production-row transaction so polling can see it live."""
+    total = max(0, int(total))
+    processed = max(0, min(int(processed), total)) if total else 0
+    progress = 100 if status == "COMPLETED" else (min(99, int(processed * 100 / total)) if total else 0)
+    with connect() as progress_conn:
+        progress_conn.execute(
+            """INSERT INTO import_commit_progress
+               (job_id,status,stage,processed,total,progress,message,updated_at)
+               VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT(job_id) DO UPDATE SET
+                 status=EXCLUDED.status, stage=EXCLUDED.stage,
+                 processed=EXCLUDED.processed, total=EXCLUDED.total,
+                 progress=EXCLUDED.progress, message=EXCLUDED.message,
+                 updated_at=CURRENT_TIMESTAMP""",
+            (job_id, status, stage, processed, total, progress, message),
+        )
+        progress_conn.commit()
 
 def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
     """Atomically promote a clean staged import into production and create a release."""
@@ -654,6 +943,12 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         raise ValueError(f"Import is not awaiting approval: {job['status']}")
     dtype=job["data_type"]
     _require_clean_stage(conn,job_id,dtype)
+    total_rows = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM import_staging_records WHERE job_id=?",
+        (job_id,),
+    ).fetchone()["n"])
+    _write_commit_progress(job_id, "RUNNING", "Preparing transaction", 0, total_rows,
+                           "Validation passed; preparing the atomic database commit")
     conn.execute("BEGIN IMMEDIATE")
     try:
         update_status(conn,job_id,JobStatus.APPROVED.value,"Approved by admin; beginning transactional production commit")
@@ -661,16 +956,40 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         update_status(conn,job_id,JobStatus.COMMITTING.value,"Promoting staged rows into production")
         inserted=[]
         source_pdf=job["original_filename"]
-        for r in _load_staged_rows(conn,job_id,dtype):
+        staged_rows = _load_staged_rows(conn,job_id,dtype)
+        progress_interval = max(25, total_rows // 100) if total_rows else 1
+        processed_rows = 0
+        seat_metadata_written = set()
+        reference_cache = ({"institutes": set(), "base_categories": set(), "sections": set(), "stages": set(), "program_ids": {}}
+                           if dtype == "CUTOFFS" else
+                           {"institutes": set(), "base_categories": set(), "allocation_lanes": set()})
+        _write_commit_progress(job_id, "RUNNING", "Writing production records", 0, total_rows,
+                               f"Writing 0 of {total_rows:,} staged records")
+        for r in staged_rows:
             raw=json.loads(r["normalized_json"])
             if dtype=="CUTOFFS":
-                rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf)
+                rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf,reference_cache)
                 table="cutoffs"
             else:
-                rid, after=_insert_seat_from_json(conn,raw,job,source_pdf)
+                rid, after=_insert_seat_from_json(conn,raw,job,source_pdf,reference_cache)
                 table="seats"
+                metadata = raw.get("course_metadata")
+                if metadata:
+                    metadata_key = (str(raw.get("institution_code", "")).strip(),
+                                    str(raw.get("choice_code", "")).strip())
+                    if metadata_key not in seat_metadata_written:
+                        _insert_seat_course_metadata(conn, raw, job, source_pdf)
+                        seat_metadata_written.add(metadata_key)
             if rid is not None:
                 inserted.append((table,rid,after))
+            processed_rows += 1
+            if processed_rows % progress_interval == 0 or processed_rows == total_rows:
+                _write_commit_progress(
+                    job_id, "RUNNING", "Writing production records", processed_rows, total_rows,
+                    f"Processed {processed_rows:,} of {total_rows:,} staged records",
+                )
+        _write_commit_progress(job_id, "RUNNING", "Creating release", total_rows, total_rows,
+                               f"All {total_rows:,} staged records processed; creating release and audit entries")
         release_key=f"REL-{job['job_key']}"
         release_result = conn.execute("""INSERT INTO data_releases
             (release_key,source_job_id,source_sha256,status,approved_by,notes)
@@ -695,10 +1014,17 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
              json.dumps({"release_id":release_id,"release_key":release_key,
                          "rows_inserted":len(inserted)},ensure_ascii=False),notes or "Approved import"))
         conn.commit()
+        _write_commit_progress(job_id, "COMPLETED", "Database commit complete", total_rows, total_rows,
+                               f"Database commit complete: {len(inserted):,} new rows saved. Release {release_key} is awaiting publish.")
         return {"ok":True,"job_id":job_id,"status":"COMMITTING","release_key":release_key,
                 "release_id":release_id,"rows_inserted":len(inserted)}
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        try:
+            _write_commit_progress(job_id, "FAILED", "Commit failed", 0, total_rows,
+                                   "Transaction rolled back: " + str(exc)[:500])
+        except Exception:
+            pass
         # Preserve a durable failure state in a separate transaction.
         conn.execute("UPDATE import_jobs SET status=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                      (JobStatus.FAILED.value,"Production commit failed; transaction rolled back",job_id))
@@ -731,6 +1057,8 @@ def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
     # the reads above; do not issue a nested BEGIN here.
     try:
         conn.execute("DELETE FROM data_release_items WHERE release_id=?",(release_id,))
+        if job_id:
+            conn.execute("DELETE FROM seat_matrix_courses WHERE source_job_id=?",(job_id,))
         conn.execute("DELETE FROM data_releases WHERE id=?",(release_id,))
         if job_id:
             conn.execute("DELETE FROM import_events WHERE job_id=?",(job_id,))
@@ -807,6 +1135,16 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
                 if code: affected_institutes.add(code)
             cur=conn.execute(f"DELETE FROM {table} WHERE id=?",(item["row_id"],))
             deleted += cur.rowcount
+
+        # Course metadata is stored once per choice code (rather than repeated
+        # for every category row). Remove metadata first introduced by this
+        # source job when rolling the release back; older metadata records are
+        # retained because the import path does not overwrite them.
+        if release["source_job_id"]:
+            conn.execute(
+                "DELETE FROM seat_matrix_courses WHERE source_job_id=?",
+                (release["source_job_id"],),
+            )
 
         # Production reference rows are created as part of imports, but the
         # release ledger historically tracked only cutoff/seat rows. Remove

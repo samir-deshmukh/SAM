@@ -58,10 +58,11 @@ def ingest_file(conn,path,program_cache,level_map):
         prog=row['program_name'].strip(); inst=row['institution_code'].strip()
         pid=get_or_create_program(conn,program_cache,family,prog,level_map)
         try:
-            result=conn.execute(text('''INSERT INTO cutoffs(year,round,institution_code,program_id,base_category,is_ladies,section_code,stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,raw_program_name,source_pdf,source_page)
-                VALUES(:year,:round,:inst,:pid,:cat,:ladies,:section,:stage,:hu,:rank,:suffix,:pct,:rawcat,:rawprog,:pdf,:page)
+            program_code=str(row.get('program_code','')).strip() or None
+            result=conn.execute(text('''INSERT INTO cutoffs(year,round,institution_code,program_id,program_code,base_category,is_ladies,section_code,stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,raw_program_name,source_pdf,source_page)
+                VALUES(:year,:round,:inst,:pid,:program_code,:cat,:ladies,:section,:stage,:hu,:rank,:suffix,:pct,:rawcat,:rawprog,:pdf,:page)
                 ON CONFLICT(year,round,institution_code,program_id,base_category,is_ladies,section_code,stage_code,rank_number,percentile) DO NOTHING'''),
-                {'year':year,'round':round_no,'inst':inst,'pid':pid,'cat':base,'ladies':is_ladies,'section':section,'stage':stage,'hu':None,'rank':rank,'suffix':suffix,'pct':percentile,'rawcat':cat,'rawprog':prog,'pdf':row['source_pdf'],'page':page})
+                {'year':year,'round':round_no,'inst':inst,'pid':pid,'program_code':program_code,'cat':base,'ladies':is_ladies,'section':section,'stage':stage,'hu':None,'rank':rank,'suffix':suffix,'pct':percentile,'rawcat':cat,'rawprog':prog,'pdf':row['source_pdf'],'page':page})
             if result.rowcount==0: duplicate+=1; error('DUPLICATE_UNIQUE_KEY')
             else: inserted+=1
         except Exception as exc:

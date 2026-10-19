@@ -6,11 +6,42 @@ would allow an approved import to be invisible to the public site.
 """
 from __future__ import annotations
 
+import logging
 import re
+import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event as sqlalchemy_event, text
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
+
+log = logging.getLogger("cet-cap-db")
+_CHECKOUT_LOCK = threading.Lock()
+_CHECKED_OUT_TRACES: dict[int, str] = {}
+
+
+def _track_checkout(dbapi_connection, connection_record, connection_proxy):
+    with _CHECKOUT_LOCK:
+        _CHECKED_OUT_TRACES[id(connection_record)] = "".join(traceback.format_stack(limit=18))
+
+
+def _track_checkin(dbapi_connection, connection_record):
+    with _CHECKOUT_LOCK:
+        _CHECKED_OUT_TRACES.pop(id(connection_record), None)
+
+
+def _log_pool_exhaustion(engine):
+    with _CHECKOUT_LOCK:
+        traces = list(_CHECKED_OUT_TRACES.values())
+    log.error(
+        "ADMIN_DB_POOL_EXHAUSTED checked_out=%s pool=%s outstanding_checkout_traces=%s",
+        engine.pool.checkedout(),
+        engine.pool.status(),
+        len(traces),
+    )
+    for index, trace in enumerate(traces, 1):
+        log.error("ADMIN_DB_OUTSTANDING_CHECKOUT_%s\\n%s", index, trace)
 
 BASE = Path(__file__).resolve().parents[2]
 SCHEMA = BASE / "db" / "admin_schema_postgres.sql"
@@ -34,6 +65,8 @@ def _engine():
     if not url.startswith("postgresql+psycopg2://"):
         raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL.")
     _ENGINE = create_engine(url, pool_pre_ping=True, future=True)
+    sqlalchemy_event.listen(_ENGINE, "checkout", _track_checkout)
+    sqlalchemy_event.listen(_ENGINE, "checkin", _track_checkin)
     return _ENGINE
 
 
@@ -77,7 +110,12 @@ class Result:
 
 class Connection:
     def __init__(self):
-        self._conn = _engine().connect()
+        engine = _engine()
+        try:
+            self._conn = engine.connect()
+        except SQLAlchemyPoolTimeout:
+            _log_pool_exhaustion(engine)
+            raise
         self._tx = None
 
     def __enter__(self):
@@ -143,6 +181,12 @@ def connect():
 
 def init_admin_schema():
     with connect() as c:
+        # Migrate this column before running PUBLIC_SCHEMA: on an existing
+        # database CREATE TABLE IF NOT EXISTS does not add new columns, while
+        # the schema's index declaration references program_code immediately.
+        # ALTER TABLE IF EXISTS also safely no-ops on a fresh database where
+        # the cutoffs table has not been created yet.
+        c.execute("ALTER TABLE IF EXISTS cutoffs ADD COLUMN IF NOT EXISTS program_code TEXT")
         # Both public fact tables and admin workflow tables live in the same
         # PostgreSQL database. This prevents an approved import from landing
         # in one store while the public API reads another.
@@ -150,6 +194,18 @@ def init_admin_schema():
         c.executescript(SCHEMA.read_text(encoding="utf-8"))
         # Forward-compatible migrations for databases created before institute
         # enrichment was expanded to city/address provenance.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS import_commit_progress (
+                job_id BIGINT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'IDLE',
+                stage TEXT NOT NULL DEFAULT 'Waiting',
+                processed BIGINT NOT NULL DEFAULT 0,
+                total BIGINT NOT NULL DEFAULT 0,
+                progress INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         for statement in (
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district TEXT",
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS address TEXT",

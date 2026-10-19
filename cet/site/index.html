@@ -4,16 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
 <title>CETFind — Maharashtra CET CAP College Finder</title>
-<meta name="description" content="CETFind helps Maharashtra CET candidates explore historical Maharashtra CET CAP cutoff and seat-matrix data, with a public BBA college directory and comparison tools by percentile and city.">
+<meta name="description" content="CETFind helps Maharashtra CET candidates explore college options using published historical CAP cutoff and seat-matrix data, with search tools for supported courses, percentile and city.">
 <meta name="robots" content="index, follow, max-image-preview:large">
 <link rel="canonical" href="https://cetfind.onrender.com/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="CETFind — Maharashtra CET CAP College Finder">
-<meta property="og:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data with CETFind's public BBA college directory.">
+<meta property="og:description" content="Explore Maharashtra CET college options using published historical CAP cutoff and seat-matrix data for supported courses.">
 <meta property="og:url" content="https://cetfind.onrender.com/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="CETFind — Maharashtra CET CAP College Finder">
-<meta name="twitter:description" content="Explore historical Maharashtra CET CAP cutoff and seat-matrix data with CETFind's public BBA college directory.">
+<meta name="twitter:description" content="Explore Maharashtra CET college options using published historical CAP cutoff and seat-matrix data for supported courses.">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="theme-color" content="#0B0B0F">
 <script type="application/ld+json">
@@ -991,6 +991,12 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
 .pdf-selected-title { padding-left: 12px; border-left: 3px solid var(--paper-500); }
 .pdf-table .pdf-cell-line + .pdf-cell-line { margin-top: 3px; }
 .pdf-view-note { font-size: 12px; color: var(--paper-600); margin: 0 0 14px; line-height: 1.5; }
+.engineering-branch-selector { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 8px; padding: 12px; border: 1px solid #d1d5db; border-radius: 12px; background: #f5f5f5; }
+.engineering-branch-current { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+.engineering-branch-current span { color: #6b7280; font-size: 11px; }
+.engineering-branch-current strong { color: #111827; font-size: 14px; line-height: 1.35; }
+.engineering-branch-arrow { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid #9ca3af; border-radius: 9px; background: #fff; color: #111827; font-size: 22px; cursor: pointer; }
+.engineering-branch-arrow:disabled { opacity: .35; cursor: not-allowed; }
 .pdf-round-title { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--paper-600); margin: 20px 0 8px; }
 #dTrendTable, #dSeatMatrixBody { overflow-x: auto; }
 
@@ -1035,8 +1041,20 @@ footer { background: var(--ink-900); color: var(--paper-50); padding: 100px 48px
 .seat-pdf-card { border: 1px solid var(--paper-300); background: var(--paper-50); margin: 18px 0 28px; overflow: hidden; border-radius: 16px; }
 .seat-pdf-head { background: var(--paper-50); }
 .seat-pdf-institution { padding: 12px 14px 7px; font-size: 15px; font-weight: 800; color: var(--ink-900); }
+.seat-pdf-course-name { padding: 0 14px 5px; color: var(--ink-900); font-size: 13px; font-weight: 700; }
 .seat-pdf-subline { padding: 0 14px 12px; color: var(--paper-600); font-size: 12px; font-weight: 600; }
-.seat-pdf-summary { border-top: 1px solid var(--paper-300); }
+.seat-pdf-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(95px, 1fr)); border-top: 1px solid var(--paper-300); border-bottom: 1px solid var(--paper-300); }
+.seat-pdf-summary-item { min-width: 0; padding: 9px 8px; border-right: 1px solid var(--paper-300); display: flex; flex-direction: column; gap: 5px; text-align: center; }
+.seat-pdf-summary-item span, .seat-pdf-detail span { font-size: 10px; color: var(--paper-600); }
+.seat-pdf-summary-item strong, .seat-pdf-detail strong { font-size: 12px; color: var(--ink-900); overflow-wrap: anywhere; }
+.seat-pdf-course-summary-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.seat-pdf-course-summary { width: 100%; min-width: 820px; border-collapse: collapse; border-spacing: 0; font-size: 11px; background: var(--paper-50); }
+.seat-pdf-course-summary th, .seat-pdf-course-summary td { border: 1px solid var(--paper-300); padding: 8px 7px; text-align: center; vertical-align: middle; }
+.seat-pdf-course-summary thead th { background: var(--paper-200); color: var(--ink-900); font-weight: 800; }
+.seat-pdf-course-summary tbody td { color: var(--ink-900); font-weight: 600; }
+.seat-pdf-course-summary th:nth-child(2), .seat-pdf-course-summary td:nth-child(2) { min-width: 220px; text-align: left; }
+.seat-pdf-details { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--paper-300); background: var(--paper-100); }
+.seat-pdf-detail { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-right: 1px solid var(--paper-300); }
 .seat-pdf-status, .seat-pdf-cap { padding: 9px 12px; font-size: 12px; font-weight: 800; background: var(--paper-100); border-bottom: 1px solid var(--paper-300); }
 .seat-pdf-cap { background: var(--paper-50); text-align: center; font-size: 13px; }
 .seat-pdf-summary-grid { display: grid; grid-template-columns: repeat(8, minmax(86px, 1fr)); border-bottom: 1px solid var(--paper-300); }
@@ -1176,6 +1194,74 @@ body{letter-spacing:-.01em;}
 .results-table tr.active,.pdf-table td.pdf-selected,.pdf-table th.pdf-selected,.pdf-selected-title{background:rgba(216,207,188,.42)!important;color:#11120D}
 .chip{background:#FFFBF4;border-color:#D8CFBC;color:#11120D}
 .chip.active{background:#11120D;color:#FFFBF4;border-color:#11120D}
+
+
+/* Match the admin panel: strict white, grey, and charcoal palette. */
+:root {
+  --ink-900:#262626; --ink-800:#333333;
+  --paper-50:#FFFFFF; --paper-100:#FFFFFF; --paper-200:#E9E9E9;
+  --paper-300:#DEDEDE; --paper-400:#D6D6D6; --paper-500:#BDBDBD;
+  --paper-600:#666666; --paper-700:#444444; --paper-800:#262626;
+}
+html, body, .sketch-bg { background:#F4F4F4; color:#262626; }
+.page-content { background:transparent!important; color:#262626; }
+.sketch-bg::after { background-image:linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px); }
+.topbar, .hero-stat, .seo-directory-card, .search-card, .results-bar, .table-wrap,
+.results-table, .drawer, .drawer-head, .drawer-body, .d-section, .d-stat, .trend-card,
+.seat-card, .seat-pdf-card, .seat-pdf-head, .seat-pdf-table-wrap, .seat-pdf-table,
+.feedback-card, .feedback-message, .pdf-table-scroll { background:#FFFFFF!important; color:#262626; }
+.topbar, .hero-stats, .seo-directory-card, .search-card, .results-table,
+.results-table tr, .drawer-head, .d-section, .trend-card, .seat-card,
+.seat-pdf-card, .seat-pdf-data-note, .seat-pdf-footer-note, .feedback-card,
+.feedback-message, .field input, .field select, .ssel-btn, .ssel-search input,
+.feedback-close, .chip, .d-chip, .round-chip, .seat-matrix-toggle, .pdf-table,
+.seat-pdf-table, .results-table td, .results-table th { border-color:#DEDEDE!important; }
+.topbar-nav, .topbar-nav a, .hero-lede, .section-desc, .seo-directory-copy p,
+.field label, .ssel-btn, .results-count span, .college-meta, .status-label,
+.drawer-eyebrow, .d-text, .d-stat-label, .d-stat-value small, .d-bar-row .lbl,
+.d-gap-summary, .trends-desc, .trends-rounds-label, .pdf-view-note,
+.pdf-round-title, .trends-note, .seat-pdf-subline, .seat-pdf-summary-grid span,
+.seat-pdf-data-note, .seat-pdf-footer-note, .feedback-card p { color:#666666!important; }
+.hero h1, .section-title, .section-title em, .hero h1 em, .topbar-brand,
+.seo-directory-copy h2, .results-count strong, .rank-num, .cutoff-num, .pct-num,
+.college-name, .empty-state h4, .drawer-title, .d-stat-value, .d-text strong,
+.d-bar-row .val, .d-gap-summary strong, .trends-title, .tin-value,
+.seat-pdf-institution, .seat-pdf-summary-grid b, .pdf-table-title,
+.feedback-card h2, .feedback-label, .footer-title, .footer-col h5,
+.footer-col p, .footer-inner, .footer-inner a { color:#262626!important; }
+.btn-primary, .search-submit, .seo-directory-link, .chip.active, .ssel-item.active,
+.feedback-launch, .feedback-submit, .feedback-rating button.selected {
+  background:#333333!important; color:#FFFFFF!important; border-color:#333333!important; box-shadow:none!important;
+}
+.btn-primary:hover, .search-submit:hover, .seo-directory-link:hover,
+.feedback-launch:hover, .feedback-submit:hover { background:#555555!important; color:#FFFFFF!important; }
+.btn-ghost, .knowledge-link, .feedback-close, .drawer-close, .feedback-rating button,
+.chip, .d-chip, .round-chip, .seat-matrix-toggle, .ssel-btn, .field input,
+.field select, .ssel-search input { background:#FFFFFF!important; color:#444444!important; }
+.results-table tr:hover, .results-table tr.active, .pdf-table td.pdf-selected,
+.pdf-table th.pdf-selected, .pdf-selected-title, .ssel-item:hover,
+.round-chip.active, .seat-matrix-toggle.active, .chip:hover { background:#E9E9E9!important; color:#262626!important; box-shadow:none!important; }
+.results-table tr.active .status, .status-safe, .status-border, .status-reach,
+.d-bar-fill, .bar, .round-chip .dot { background:#777777!important; }
+.pdf-table thead th, .results-table thead th, .seat-pdf-lane-title,
+.seat-pdf-table thead th, .seat-pdf-table tbody .seat-pdf-rowlabel,
+.seat-pdf-status, .seat-pdf-cap { background:#E9E9E9!important; color:#333333!important; }
+.pdf-table tbody tr:nth-child(even) td, .seat-pdf-table tbody td { background:#FFFFFF!important; color:#333333!important; }
+.tin-value.up, .tin-value.down, .trends-note.warn, .field input.field-invalid { color:#555555!important; border-color:#777777!important; }
+/* Preserve the original animated tortoises; make their line art visible on grey-white. */
+.tortoise-main, .tortoise-tr, .tortoise-bl { color:#777777!important; }
+.tortoise-main { opacity:.42; }
+.tortoise-tr { opacity:.38; }
+.tortoise-bl { opacity:.40; }
+/* The site uses the semantic <footer> element, not a .footer class. */
+footer { background:#111111!important; color:#FFFFFF!important; border-top:1px solid #333333!important; }
+footer .footer-title, footer .footer-title em, footer .footer-col h5, footer .footer-col p,
+footer .footer-inner, footer .footer-inner a { color:#FFFFFF!important; }
+footer .footer-grid { border-top-color:#444444!important; }
+.feedback-modal { background:rgba(0,0,0,.42)!important; }
+.feedback-message:focus, .field input:focus, .field select:focus, .ssel-btn:focus,
+.ssel-search input:focus { border-color:#888888!important; box-shadow:0 0 0 3px rgba(0,0,0,.06)!important; }
+
 </style>
 </head>
 <body>
@@ -1381,18 +1467,6 @@ body{letter-spacing:-.01em;}
     </div>
   </section>
 
-  <!-- Public, crawlable directory entry point -->
-  <section class="seo-directory" aria-labelledby="directory-title">
-    <div class="seo-directory-inner">
-      <div class="seo-directory-card">
-        <div class="seo-directory-copy">
-          <h2 id="directory-title">Explore the public BBA directory.</h2>
-          <p>Browse the currently published BBA college records by city, then open individual college pages for historical CAP data. These pages are built from CETFind's public dataset and are separate from the interactive search below.</p>
-        </div>
-        <a class="seo-directory-link" href="seo/courses/bba.html">Browse BBA colleges →</a>
-      </div>
-    </div>
-  </section>
 
   <!-- ═══════════════════════════════════════════════════════════════
        STEP 01 — SEARCH: city, course, percentile
@@ -2108,6 +2182,24 @@ function populateSelects() {
   courseSelect.value = CONFIG.unselected;
 }
 
+function courseDisplayLabel(value) {
+  const raw = String(value ?? "").trim();
+  const normalized = raw.toUpperCase().replace(/[.\s]/g, "");
+  const labels = {
+    BARCH: "B.Architecture",
+    MARCH: "M.Architecture",
+    BPLAN: "B.Planning",
+    MPLAN: "M.Planning",
+    BPHARM: "B.Pharmacy",
+    MPHARM: "M.Pharmacy",
+    PHARMD: "Pharm.D",
+    MTECH: "M.Tech",
+    ME: "M.E."
+  };
+  if (labels[normalized]) return labels[normalized];
+  return ["BE", "BTECH", "BE/BTECH"].includes(normalized) ? "BE / BTech" : raw;
+}
+
 /* ── loadRealCollegeData() ──────────────────────────────────
    Fetches site/data/search_index.json (real ingested CET CAP data,
    built by scripts/export_search_index.py) and replaces the
@@ -2129,7 +2221,12 @@ async function loadRealCollegeData() {
       .filter(v => v && v.toLowerCase() !== "select course"))];
 
     CONFIG.cityOptions = cities.map(v => ({ value: v, label: v }));
-    CONFIG.courseOptions = courses.map(v => ({ value: v, label: v }));
+    // BE and BTech are alternate labels for the same engineering course family here.
+    // Keep the API value unchanged so existing filters and endpoints continue to work.
+    CONFIG.courseOptions = courses.map(v => ({
+      value: v,
+      label: courseDisplayLabel(v)
+    }));
 
     populateSelects();
     renderResults();
@@ -2249,7 +2346,7 @@ function renderResultsTable() {
       <tr data-id="${c.id}" class="${openId === c.id ? "active" : ""}">
         <td>
           <span class="college-name">${c.name}</span>
-          <span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${c.course}</span>
+          <span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${courseDisplayLabel(c.course)}</span>
         </td>
         <td><span class="cutoff-num">${c.cutoff}</span></td>
         <td><span class="pct-num">${hi.toFixed(2)}–${lo.toFixed(2)}%</span></td>
@@ -2357,7 +2454,7 @@ function showDrawer(college) {
 
   /* Fill header */
   drawerBadge.textContent  = college.institution_code;
-  drawerEyebrow.textContent = `${college.city ?? "City unknown"} · ${college.course}`;
+  drawerEyebrow.textContent = `${college.city ?? "City unknown"} · ${courseDisplayLabel(college.course)}`;
   drawerTitle.textContent  = college.name;
 
   /* Fill body (the renderSlide function builds the HTML) */
@@ -2710,7 +2807,7 @@ const cutoffDataCache = new Map();
    (ids point at drawer-scoped elements instead). ── */
 function createTrendsController(ids) {
 
-  const COURSES = ["BBA", "BCA", "MBA", "MCA"];
+  const COURSES = ["BE", "BBA", "BCA", "MBA", "MCA"];
 
   const cache = cutoffDataCache;
   const state = {
@@ -2719,7 +2816,11 @@ function createTrendsController(ids) {
     selectedYear: null,        // which year's table is currently shown
     view: "years",             // "years" (per-year cutoff table) or "seats" (seat matrix)
     drawerOptions: null,       // small precomputed metadata fetched from PostgreSQL
+    selectedProgramCode: '',
   };
+  // The drawer keeps one engineering program selected across both views.
+  let selectedDrawerProgram = null;
+  const isEngineeringCourse = () => /^(BE|B\.E\.?|BTECH|B\.TECH|BE\/BTECH|B\.E\.?\/B\.?TECH|ENGINEERING)/i.test(String(state.course || '').trim());
 
   /* ── DOM refs ── */
   const els = {};
@@ -2785,9 +2886,11 @@ function createTrendsController(ids) {
     );
     if (!response.ok) throw new Error(`Could not load seat matrix for ${college} (${course})`);
     const payload = await response.json();
-    const data = payload.data || {};
-    seatDataCache.set(key, data);
-    return data;
+    // Keep the full server payload: data rows plus source-PDF course summary
+    // fields. Returning only payload.data would discard the very metadata
+    // needed to reproduce the official seat-matrix page.
+    seatDataCache.set(key, payload);
+    return payload;
   }
 
   function currentData() {
@@ -3051,11 +3154,11 @@ function createTrendsController(ids) {
     els.trendsLoading.style.display = "flex";
     try {
       const data = await loadCollegeYear(state.course, state.college, state.selectedYear);
-      const collegeRows = (Array.isArray(data.pdf_rows) ? data.pdf_rows : [])
-        .filter(r => r.ladies === state.ladies);
+      const allCollegeRows = Array.isArray(data.pdf_rows) ? data.pdf_rows : [];
+      const collegeRows = allCollegeRows.filter(r => r.ladies === state.ladies);
       els.trendsLoading.style.display = "none";
 
-      if (!collegeRows.length) {
+      if (!allCollegeRows.length) {
         showEmpty("<strong>No cutoff data on file</strong>This college has no raw cutoff lines for the selected seat type/year.");
         return;
       }
@@ -3066,8 +3169,31 @@ function createTrendsController(ids) {
       }
       renderYearChips(years);
 
-      const yearRows = collegeRows;
-      const branchLabel = id => data.branches[String(id)] || `#${id}`;
+      const seatPayloadForBranches = isEngineeringCourse() ? await loadSeats(state.course, state.college) : null;
+      const seatMetadataForBranches = seatPayloadForBranches && seatPayloadForBranches.course_metadata ? seatPayloadForBranches.course_metadata : {};
+      const seatOnlyLabels = {};
+      const branchLabel = id => data.branches[String(id)] || seatOnlyLabels[String(id)] || `#${id}`;
+      const programCodeByBranch = new Map();
+      allCollegeRows.forEach(r => {
+        const id = String(r.branch);
+        const code = String(r.program_code || '');
+        if (code && !programCodeByBranch.has(id)) programCodeByBranch.set(id, code);
+      });
+      for (const [code, meta] of Object.entries(seatMetadataForBranches)) {
+        if (![...programCodeByBranch.values()].includes(String(code))) {
+          const id = `@choice:${code}`;
+          programCodeByBranch.set(id, String(code));
+          seatOnlyLabels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+        }
+      }
+      const branchIds = [...new Set([...allCollegeRows.map(r => String(r.branch)), ...[...programCodeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
+        .sort((a,b) => (programCodeByBranch.get(a) || a).localeCompare(programCodeByBranch.get(b) || b));
+      if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
+      const activeProgram = String(selectedDrawerProgram || '');
+      const yearRows = collegeRows.filter(r => String(r.branch) === activeProgram);
+      const activeProgramRow = allCollegeRows.find(r => String(r.branch) === activeProgram && r.program_code)
+        || allCollegeRows.find(r => String(r.branch) === activeProgram);
+      state.selectedProgramCode = activeProgramRow ? String(activeProgramRow.program_code || '') : (programCodeByBranch.get(activeProgram) || '');
       /* Section labels are small enough to derive from the raw code using
          the same label map embedded in the course-year payload when present. */
       const SECTION_LABELS = {
@@ -3087,8 +3213,7 @@ function createTrendsController(ids) {
       const selectedCategory = state.category || null;
       const tableBlocks = [];
 
-      const branches = [...new Set(yearRows.map(r => String(r.branch)))]
-        .sort((a,b) => branchLabel(a).localeCompare(branchLabel(b)));
+      const branches = yearRows.length ? [activeProgram] : [];
 
       branches.forEach(branch => {
         const branchRows = yearRows.filter(r => String(r.branch) === branch);
@@ -3171,10 +3296,20 @@ function createTrendsController(ids) {
         });
       });
 
+      const activeIndex = branchIds.indexOf(activeProgram);
+      const branchSelector = isEngineeringCourse() && branchIds.length > 1 ? `
+        <div class="engineering-branch-selector" aria-label="Engineering branch selector">
+          <button type="button" class="engineering-branch-arrow" data-branch-prev aria-label="Previous branch" ${activeIndex <= 0 ? 'disabled' : ''}>←</button>
+          <div class="engineering-branch-current"><span>Branch ${activeIndex + 1} of ${branchIds.length}</span><strong>${escapeHtml(branchLabel(activeProgram))}</strong></div>
+          <button type="button" class="engineering-branch-arrow" data-branch-next aria-label="Next branch" ${activeIndex >= branchIds.length - 1 ? 'disabled' : ''}>→</button>
+        </div>` : '';
+      const noBranchRows = !yearRows.length
+        ? `<p class="d-text">No cutoff rows are recorded for ${escapeHtml(branchLabel(activeProgram))} for this year and seat type. No other branch's data is substituted.</p>`
+        : '';
       els.trendsTable.style.display = "block";
       els.trendsTable.innerHTML = `
-        <p class="pdf-view-note">Showing all cutoff lines for this college for ${state.selectedYear}. Your selected category + quota is highlighted; nothing else is filtered out.</p>
-        ${tableBlocks.join("")}`;
+        <p class="pdf-view-note">Showing cutoff lines for ${escapeHtml(branchLabel(activeProgram))} at this college for ${state.selectedYear}. Other branches are kept separate. Your selected category + quota is highlighted.</p>
+        ${noBranchRows}${tableBlocks.join("")}${branchSelector}`;
     } catch (err) {
       els.trendsLoading.style.display = "none";
       showEmpty(`<strong>Couldn't load cutoff data</strong>${escapeHtml(err.message)}`);
@@ -3234,13 +3369,11 @@ function createTrendsController(ids) {
   }
 
   /* ── Seat Matrix view ──
-     Render the extracted seat-matrix data in the same column structure as
-     the official CAP seat-distribution PDF. Where the source contains a G/L
-     split, show G and L separately. Where the source only contains a single
-     category total, span the G/L pair and show that actual value rather than
-     inventing a split. The PDF's top summary fields (SI, AI, minority,
-     institute, orphan, EWS) are intentionally not shown because they are not
-     part of the reliable extracted seat dataset. */
+     Render the extracted seat-matrix data in the official CAP PDF's structure.
+     Source summary labels/values, affiliation, CAP seats, EWS/TFWS and common
+     reserved-seat notes are retained with each choice code. Category order is
+     taken from source-row order, and missing course metadata means the table
+     is withheld rather than reconstructed from guessed labels. */
   const SEAT_ALLOC_LABEL = {
     "State Level": "State Level",
     HU: "HU",
@@ -3248,18 +3381,43 @@ function createTrendsController(ids) {
     PWD: "PWD",
     DEF: "DEF"
   };
-  const SEAT_CAT_ORDER = ["OPEN", "SC", "ST", "VJDT", "VJ/DT", "NTB", "NTC", "NTD", "OBC", "SEBC", "Total"];
-
   function seatRowsByCategory(rows) {
-    const map = new Map(rows.map(r => [r.category, r]));
-    return SEAT_CAT_ORDER.filter(cat => map.has(cat)).map(cat => map.get(cat));
+    // The API returns rows in source-PDF order. Do not sort or whitelist the
+    // category names here: that used to hide valid categories and reorder the
+    // official table.
+    return rows;
   }
 
-  function seatPdfHeaderHtml(collegeName, course, code, choiceCount) {
+  function seatPdfHeaderHtml(collegeName, course, code, choiceCount, metadata) {
+    const meta = metadata || {};
+    const summary = meta.summary_fields && typeof meta.summary_fields === "object"
+      ? Object.entries(meta.summary_fields) : [];
+    const summaryHtml = summary.length ? `
+      <div class="seat-pdf-course-summary-wrap">
+        <table class="seat-pdf-course-summary">
+          <thead><tr><th>Choice Code</th><th>Course Name</th>${summary.map(([label]) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead>
+          <tbody><tr><td>${escapeHtml(code)}</td><td>${escapeHtml(meta.course_name || "—")}</td>${summary.map(([, value]) => `<td>${escapeHtml(value == null ? "—" : String(value))}</td>`).join("")}</tr></tbody>
+        </table>
+      </div>` : "";
+    const details = [
+      ["University / Institute", meta.university],
+      ["Affiliation / Status", meta.affiliation_status],
+      ["CAP Seats", meta.cap_seats],
+      ["Source PDF / Page", meta.source_pdf ? `${meta.source_pdf} / p.${meta.source_page ?? "—"}` : ""],
+      ["EWS Seats", meta.ews_seats],
+      ["PWD Common Reserved Seats", meta.pwd_common_reserved],
+      ["DEF Common Reserved Seats", meta.def_common_reserved],
+      [meta.tfws_choice_code ? "TFWS Choice Code / Seats" : "", meta.tfws_choice_code ? `${meta.tfws_choice_code} / ${meta.tfws_seats ?? "—"}` : ""]
+    ].filter(([label, value]) => label && value !== null && value !== undefined && value !== "");
+    const detailHtml = details.length ? `
+      <div class="seat-pdf-details">
+        ${details.map(([label, value]) => `<div class="seat-pdf-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
+      </div>` : "";
     return `
       <div class="seat-pdf-head">
-        <div class="seat-pdf-institution">${escapeHtml(collegeName || "College")}</div>
-        <div class="seat-pdf-subline">Seat Matrix · ${escapeHtml(course)} · Choice Code ${escapeHtml(code)}${choiceCount > 1 ? ` · ${choiceCount} choice codes` : ""}</div>
+        <div class="seat-pdf-institution">${escapeHtml(meta.institution_name || collegeName || "College")}</div>
+        <div class="seat-pdf-subline">Seat Matrix · ${escapeHtml(courseDisplayLabel(course))}${choiceCount > 1 ? ` · ${choiceCount} choice codes in this college` : ""}</div>
+        ${detailHtml}${summaryHtml}
       </div>`;
   }
 
@@ -3288,14 +3446,10 @@ function createTrendsController(ids) {
         }
         return `<td colspan="2">${r.total ?? "—"}</td>`;
       }).join("");
-      let extra = "";
-      if (alloc === "PWD" || alloc === "DEF") {
-        const total = rows.find(r => r.category === "Total");
-        const label = alloc === "DEF" ? "DEF Common Reserved Seats" : "PWD Common Reserved Seats";
-        const val = total && total.total != null ? total.total : "—";
-        extra = `<tr class="seat-pdf-common-row"><td colspan="${1 + categories.length * 2}">${label} : ${val}</td></tr>`;
-      }
-      return `<tr><th class="seat-pdf-rowlabel">${escapeHtml(SEAT_ALLOC_LABEL[alloc] || alloc)}</th>${cells}</tr>${extra}`;
+      // PWD/DEF lane totals are not the same as the PDF's separate common
+      // reserved-seat counts; those values are shown in the course metadata
+      // block above. Never relabel a lane total as a common-seat value.
+      return `<tr><th class="seat-pdf-rowlabel">${escapeHtml(SEAT_ALLOC_LABEL[alloc] || alloc)}</th>${cells}</tr>`;
     }).join("");
     return `
       <div class="seat-pdf-table-wrap">
@@ -3309,10 +3463,10 @@ function createTrendsController(ids) {
       </div>`;
   }
 
-  function seatMatrixChoiceHtml(course, code, allocs, collegeName, choiceCount) {
+  function seatMatrixChoiceHtml(course, code, allocs, collegeName, choiceCount, metadata) {
     return `
       <section class="seat-pdf-card">
-        ${seatPdfHeaderHtml(collegeName, course, code, choiceCount)}
+        ${seatPdfHeaderHtml(collegeName, course, code, choiceCount, metadata)}
         ${seatMatrixTableHtml(allocs)}
       </section>`;
   }
@@ -3324,16 +3478,67 @@ function createTrendsController(ids) {
       return;
     }
     try {
-      const seatData = await loadSeats(state.course, state.college);
-      const instData = seatData;
+      const seatPayload = await loadSeats(state.course, state.college);
+      const instData = seatPayload && seatPayload.data ? seatPayload.data : {};
+      const courseMetadata = seatPayload && seatPayload.course_metadata ? seatPayload.course_metadata : {};
       if (!instData || !Object.keys(instData).length) {
         els.seatMatrixBody.innerHTML = `<p class="d-text">No seat matrix on file for this college.</p>`;
         return;
       }
-      const choiceCodes = Object.keys(instData);
+      let branchSelectorHtml = '';
+      if (isEngineeringCourse() && state.selectedYear) {
+        const yearPayload = await loadCollegeYear(state.course, state.college, state.selectedYear);
+        const allRows = Array.isArray(yearPayload.pdf_rows) ? yearPayload.pdf_rows : [];
+        const labels = { ...(yearPayload.branches || {}) };
+        const codeByBranch = new Map();
+        allRows.forEach(r => {
+          const id = String(r.branch);
+          const code = String(r.program_code || '');
+          if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
+        });
+        for (const [code, meta] of Object.entries(courseMetadata)) {
+          if (![...codeByBranch.values()].includes(String(code))) {
+            const id = `@choice:${code}`;
+            codeByBranch.set(id, String(code));
+            labels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+          }
+        }
+        const branchIds = [...new Set([...allRows.map(r => String(r.branch)), ...[...codeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
+          .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
+        if (!branchIds.includes(String(selectedDrawerProgram))) selectedDrawerProgram = branchIds[0] || null;
+        const selectedRow = allRows.find(r => String(r.branch) === String(selectedDrawerProgram) && r.program_code)
+          || allRows.find(r => String(r.branch) === String(selectedDrawerProgram));
+        state.selectedProgramCode = selectedRow ? String(selectedRow.program_code || '') : (codeByBranch.get(String(selectedDrawerProgram)) || '');
+        const branchIndex = branchIds.indexOf(String(selectedDrawerProgram));
+        if (branchIds.length > 1) {
+          branchSelectorHtml = `
+            <div class="engineering-branch-selector" aria-label="Engineering branch selector">
+              <button type="button" class="engineering-branch-arrow" data-branch-prev aria-label="Previous branch" ${branchIndex <= 0 ? 'disabled' : ''}>←</button>
+              <div class="engineering-branch-current"><span>Branch ${branchIndex + 1} of ${branchIds.length}</span><strong>${escapeHtml(labels[String(selectedDrawerProgram)] || 'Select branch')}</strong></div>
+              <button type="button" class="engineering-branch-arrow" data-branch-next aria-label="Next branch" ${branchIndex >= branchIds.length - 1 ? 'disabled' : ''}>→</button>
+            </div>`;
+        }
+      }
+      const allChoiceCodes = Object.keys(instData);
+      const choiceCodes = isEngineeringCourse()
+        ? (state.selectedProgramCode ? allChoiceCodes.filter(code => String(code) === String(state.selectedProgramCode)) : [])
+        : allChoiceCodes;
       const collegeMeta = (CONFIG.colleges || []).find(x => x.course === state.course && String(x.institution_code) === String(state.college));
       const collegeName = collegeMeta ? collegeMeta.name : state.college;
-      els.seatMatrixBody.innerHTML = choiceCodes.map(code => seatMatrixChoiceHtml(state.course, code, instData[code], collegeName, choiceCodes.length)).join("");
+      if (!choiceCodes.length) {
+        els.seatMatrixBody.innerHTML = `${branchSelectorHtml}<p class="d-text">No seat-matrix record is linked to the selected branch (${escapeHtml(state.selectedProgramCode || 'no verified program code')}). Other branches are not shown as a substitute.</p>`;
+        return;
+      }
+      const displayCodes = choiceCodes.filter(code => courseMetadata[String(code)]);
+      const missingMetadataCount = choiceCodes.length - displayCodes.length;
+      const missingMetadataNote = missingMetadataCount
+        ? `<p class="d-text">The official PDF summary metadata is missing for ${missingMetadataCount} selected choice code(s). Those tables are withheld until the source PDF is re-extracted and re-imported; no other branch is used as a substitute.</p>`
+        : "";
+      if (!displayCodes.length) {
+        els.seatMatrixBody.innerHTML = `${branchSelectorHtml}<p class="d-text">The official PDF summary metadata has not been imported for this branch. The seat matrix is withheld rather than showing a partial or potentially misleading table.</p>`;
+        return;
+      }
+      els.seatMatrixBody.innerHTML = `${branchSelectorHtml}${missingMetadataNote}${displayCodes.map(code => seatMatrixChoiceHtml(state.course, code, instData[code], collegeName, displayCodes.length, courseMetadata[String(code)])).join("")}`;
       els.seatMatrixWrap.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       els.seatMatrixBody.innerHTML = `<p class="d-text">Couldn't load seat matrix: ${escapeHtml(err.message || String(err))}</p>`;
@@ -3344,7 +3549,7 @@ function createTrendsController(ids) {
   function wire() {
     COURSES.forEach(c => {
       const opt = document.createElement("option");
-      opt.value = c; opt.textContent = c;
+      opt.value = c; opt.textContent = courseDisplayLabel(c);
       els.tCourse.appendChild(opt);
     });
 
@@ -3422,6 +3627,45 @@ function createTrendsController(ids) {
     enhanceSelect(els.tCategory, { search: true });
     enhanceSelect(els.tQuota,    { search: true });
 
+    if (ids.mode === "drawer") {
+      [els.trendsTable, els.seatMatrixBody].filter(Boolean).forEach(container => {
+        container.addEventListener("click", event => {
+        const prev = event.target.closest("[data-branch-prev]");
+        const next = event.target.closest("[data-branch-next]");
+        if (!prev && !next) return;
+        event.preventDefault();
+        const key = `${state.course}:${state.selectedYear}:${state.college}`;
+        const cached = collegeYearCache.get(key);
+        if (!cached) return;
+        Promise.all([Promise.resolve(cached), loadSeats(state.course, state.college)]).then(([payload, seatPayload]) => {
+          const rows = Array.isArray(payload.pdf_rows) ? payload.pdf_rows : [];
+          const labels = { ...(payload.branches || {}) };
+          const seatMetadata = seatPayload && seatPayload.course_metadata ? seatPayload.course_metadata : {};
+          const codeByBranch = new Map();
+          rows.forEach(r => {
+            const id = String(r.branch);
+            const code = String(r.program_code || '');
+            if (code && !codeByBranch.has(id)) codeByBranch.set(id, code);
+          });
+          for (const [code, meta] of Object.entries(seatMetadata)) {
+            if (![...codeByBranch.values()].includes(String(code))) {
+              const id = `@choice:${code}`;
+              codeByBranch.set(id, String(code));
+              labels[id] = `${meta.course_name || 'Engineering branch'} · cutoff unavailable`;
+            }
+          }
+          const branchIds = [...new Set([...rows.map(r => String(r.branch)), ...[...codeByBranch.keys()].filter(id => id.startsWith('@choice:'))])]
+            .sort((a,b) => (codeByBranch.get(a) || a).localeCompare(codeByBranch.get(b) || b));
+          const index = branchIds.indexOf(String(selectedDrawerProgram));
+          const target = Math.max(0, Math.min(branchIds.length - 1, index + (next ? 1 : -1)));
+          selectedDrawerProgram = branchIds[target] || selectedDrawerProgram;
+          renderDrawerAllData();
+          if (els.seatMatrixWrap && els.seatMatrixWrap.style.display !== "none") renderSeatMatrix();
+        }).catch(err => console.error("Could not change engineering branch:", err));
+        });
+      });
+    }
+
     /* Seat Matrix toggle — independent of the category/quota picked
        above; shows/hides its own table and loads the data on first
        open (cached after that, see loadSeats()). */
@@ -3447,6 +3691,8 @@ function createTrendsController(ids) {
     state.ladies = false;
     state.category = state.quota = null;
     state.selectedYear = null;
+    state.selectedProgramCode = '';
+    selectedDrawerProgram = null;
     els.tCourse.innerHTML = `<option value="${course}" selected>${course}</option>`;
     els.tCollege.innerHTML = `<option value="${collegeCode}" selected>${collegeCode}</option>`;
 

@@ -2,13 +2,42 @@ import hashlib
 
 import pytest
 
-from backend.admin.pipeline import MAX_PDF_BYTES, detect_data_type, extract_pdf_metadata, identify, security_check
+from backend.admin.pipeline import MAX_PDF_BYTES, detect_course_family, detect_data_type, extract_pdf_metadata, identify, security_check
 from backend.admin.processing import _resolve_cutoff_dimensions
 
 
 def test_identify_cutoff_and_seat_filenames():
     assert identify("BCA_2026_C1.pdf") == ("CUTOFFS", "BCA", 2026, "C1", 1.0)
     assert identify("MCA_26_C2_SM.pdf") == ("SEATS", "MCA", 2026, "C2", 1.0)
+
+
+def test_identifies_architecture_before_incidental_mba_reference(monkeypatch, tmp_path):
+    pdf = tmp_path / "MBA_26_C1.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    monkeypatch.setattr(
+        "backend.admin.pipeline._pdf_text_probe",
+        lambda path: "Bachelor of Architecture CAP Round 1 2026-27. Other admissions include MBA.",
+    )
+    assert identify(pdf.name) == ("CUTOFFS", "MBA", 2026, "C1", 1.0)
+    assert extract_pdf_metadata(pdf, pdf.name) == ("BARCH", 2026, "C1")
+
+
+def test_detects_common_course_families_without_substring_guessing():
+    assert detect_course_family("BACHELOR OF ARCHITECTURE") == "BARCH"
+    assert detect_course_family("First Year of Five Year Full Time Degree Course in Architecture") == "BARCH"
+    assert detect_course_family("First Year of Five Year Full Time Degree Course in Architecture at College of Engineering and Technology") == "BARCH"
+    assert detect_course_family("Two Years Full Time Post Graduate Degree Course in Engineering and Technology") == "ME"
+    assert detect_course_family("Post Graduate Technical Courses in Engineering and Technology for working Professionals") == "ME"
+    assert detect_course_family("Provisional Cutoff List for First Year of Full Time Master Program in M.PHARM & PHARM.D (Post Baccalaureate)") == "MPHARM"
+    assert detect_course_family("Cut Off Merit for First Year Under Graduate Technical Course in B.Pharmacy & Post Graduate Pharm.D") == "BPHARM"
+    assert detect_course_family("Admission to First Year of Post Graduate Technical Courses in Engineering/Technology (M.E./M.Tech.)") == "ME"
+    assert detect_course_family("Cut Off List for Four Year Degree Courses in Engineering and Technology; M.E./M.Tech is mentioned elsewhere") == "BE"
+    assert detect_course_family("Cut Off Merit for Post Graduate Technical Courses in Engineering/Technology (M.E./M.Tech.)") == "ME"
+    assert detect_course_family("Cut Off List for CAP Round-IV Master of Computer Applications (MBA); 1005 College; M. B. A.") == "MBA"
+    assert detect_course_family("Admission to First Year of Four Years Full Time Degree Course in Pharmacy (B.Pharm)") == "BPHARM"
+    assert detect_course_family("B.Pharmacy CAP Seat Matrix") == "BPHARM"
+    assert detect_course_family("MCA 2026 C1") == "MCA"
+    assert detect_course_family("generic admission document") is None
 
 
 def test_identify_partial_filename_has_partial_confidence():

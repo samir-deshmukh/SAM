@@ -220,6 +220,13 @@ def parse_course_block(
     at `start` (the header row index). Returns (course, long_rows, next_index)."""
     header_row = table[start]
     field_names = find_course_header_field_names(header_row)
+    header_cells = row_cells(header_row)
+    try:
+        cc_idx = header_cells.index("Choice Code")
+        cn_idx = header_cells.index("Course Name")
+        source_summary_labels = header_cells[max(cc_idx, cn_idx) + 1:]
+    except ValueError:
+        source_summary_labels = list(field_names)
 
     i = start + 1
     if i >= len(table):
@@ -242,6 +249,10 @@ def parse_course_block(
         "choice_code": choice_code,
         "course_name": course_name,
         **dict(zip(field_names, vals)),
+        # Preserve the exact source labels as well as the stable slug columns.
+        # The public UI can therefore reproduce the PDF's top summary header
+        # without guessing labels from normalized field names.
+        "summary_fields": dict(zip(source_summary_labels, vals)),
         "pwd_common_reserved": None,
         "def_common_reserved": None,
         "ews_seats": None,
@@ -448,8 +459,8 @@ TRAILING_COURSE_FIELDS = [
     "ews_seats", "tfws_choice_code", "tfws_seats", "record_type",
 ]
 LONG_FIELDS = [
-    "source_pdf", "page", "institution_code", "choice_code",
-    "allocation_type", "category", "gender", "seats",
+    "source_pdf", "page", "source_row", "institution_code", "choice_code",
+    "allocation_type", "category", "gender", "seats", "course_metadata",
 ]
 
 
@@ -457,6 +468,7 @@ def process_single_pdf(
     pdf_path: Path, outdir: Path, dpi: int, lang: str, use_ocr: bool, force_ocr: bool
 ) -> Dict[str, Any]:
     all_courses: List[Dict[str, Any]] = []
+    metadata_emitted_choices: set[Tuple[str, str]] = set()
     # Seat rows can be enormous on CAP seat-matrix PDFs. Stream them directly
     # to disk instead of retaining the full long table (and a second JSON copy)
     # in RAM for the entire document.
@@ -546,8 +558,41 @@ def process_single_pdf(
             for c in courses:
                 c["source_pdf"] = pdf_path.name
             all_courses.extend(courses)
+            course_by_choice = {str(c.get("choice_code", "")).strip(): c for c in courses
+                                if str(c.get("choice_code", "")).strip()}
             for r in long_rows:
                 r["source_pdf"] = pdf_path.name
+                r["source_row"] = seat_rows_extracted + 1
+                course = course_by_choice.get(str(r.get("choice_code", "")).strip())
+                if course is None:
+                    raise ParseError(
+                        f"page {pnum}: seat row has no matching course metadata for choice code "
+                        f"{r.get('choice_code')!r}"
+                    )
+                # Repeated per long row so the single canonical seat CSV is
+                # sufficient to reconstruct both the PDF's summary block and
+                # its category/allocation table during server-side approval.
+                metadata_fields = (
+                    "institution_name", "university", "affiliation_status", "cap_seats",
+                    "course_name", "summary_fields", "pwd_common_reserved",
+                    "def_common_reserved", "ews_seats", "tfws_choice_code",
+                    "tfws_seats", "record_type",
+                )
+                compact_metadata = {key: course.get(key) for key in metadata_fields}
+                metadata_key = (
+                    str(r.get("institution_code", "")).strip(),
+                    str(r.get("choice_code", "")).strip(),
+                )
+                # Store metadata once per choice code, not once per category
+                # row. This keeps large CSV uploads small and avoids storing
+                # duplicate JSON in every staging record.
+                if metadata_key not in metadata_emitted_choices:
+                    r["course_metadata"] = json.dumps(
+                        compact_metadata, ensure_ascii=False, separators=(",", ":")
+                    )
+                    metadata_emitted_choices.add(metadata_key)
+                else:
+                    r["course_metadata"] = ""
                 seats_writer.writerow({k: r.get(k, "") for k in LONG_FIELDS})
                 if not first_seat_json:
                     seats_json_f.write(",\n")

@@ -302,3 +302,59 @@ def test_db_pool_settings_are_configurable(monkeypatch):
     assert engine.pool._max_overflow == 3
     assert engine.pool._timeout == 7.0
     engine.dispose()
+
+
+def test_seat_matrix_api_preserves_source_order_and_pdf_metadata(monkeypatch):
+    class Result:
+        def __init__(self, rows=None, scalar=None):
+            self.rows = rows or []
+            self.scalar = scalar
+
+        def scalar_one_or_none(self):
+            return self.scalar
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query, params=None):
+            sql = str(query)
+            if "SELECT MAX(capture_year)" in sql:
+                return Result(scalar=2026)
+            if "FROM seat_matrix_courses" in sql:
+                return Result(rows=[(
+                    "0100219110",
+                    {"course_name": "Civil Engineering", "summary_fields": {"SI": 60}},
+                    "2026_fe_seatmatrix_V1.pdf",
+                    1,
+                )])
+            if "FROM seats" in sql:
+                return Result(rows=[
+                    (1, "0100219110", "State Level", "SC", "G", 6),
+                    (2, "0100219110", "State Level", "OPEN", "G", 16),
+                    (3, "0100219110", "PWD", "SC", "", 1),
+                ])
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    monkeypatch.setattr(api, "get_active_engine", lambda: Engine())
+    monkeypatch.setattr(api, "_require_public_course", lambda course, engine: None)
+    api._request_history.clear()
+
+    result = api.get_college_seats(request_for("10.0.0.10"), "01002", "BE")
+
+    assert result["source_order_preserved"] is True
+    assert result["course_metadata"]["0100219110"]["summary_fields"] == {"SI": 60}
+    assert result["course_metadata"]["0100219110"]["source_pdf"] == "2026_fe_seatmatrix_V1.pdf"
+    assert [r["category"] for r in result["data"]["0100219110"]["State Level"]] == ["SC", "OPEN"]
+    assert result["data"]["0100219110"]["State Level"][0]["G"] == 6
+    assert result["data"]["0100219110"]["PWD"][0]["total"] == 1

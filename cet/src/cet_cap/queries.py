@@ -195,12 +195,18 @@ def search_college_summary_page(
             SELECT s.institution_code,
                    i.institution_name,
                    i.city,
-                   i.website,
+                   CASE
+                       WHEN UPPER(COALESCE(r.status, '')) = 'VERIFIED'
+                            AND NULLIF(BTRIM(r.website), '') IS NOT NULL
+                       THEN r.website
+                       ELSE NULL
+                   END AS website,
                    s.highest_cutoff,
                    COALESCE(y.years_on_record, 0) AS years_on_record,
                    s.lowest_rank
             FROM summary s
             JOIN institutes i ON i.institution_code = s.institution_code
+            LEFT JOIN college_website_resolver r ON r.institution_code = i.institution_code
             LEFT JOIN years y ON y.institution_code = s.institution_code
             WHERE 1=1
               {city_clause}

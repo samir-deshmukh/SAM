@@ -497,63 +497,104 @@ def get_college_seats(
     institution_code: str,
     course: str = Query(..., description="Course family (e.g. MBA)"),
 ):
-    """Fetch the precomputed latest seat matrix for one college."""
+    """Fetch source-ordered latest seat rows and their official PDF metadata."""
     check_rate_limit(request)
     engine = get_active_engine()
     _require_public_course(course, engine)
     with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT capture_year, choice_code, allocation_lane, base_category,
-                   gender_g, gender_l, category_total, is_total
-            FROM seat_matrix_runtime
+        latest = conn.execute(text("""
+            SELECT MAX(capture_year)
+            FROM seats
+            WHERE institution_code = :institution AND program_family = :course
+        """), {"institution": institution_code, "course": course}).scalar_one_or_none()
+        if latest is None:
+            raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
+        capture_year = int(latest)
+        source_rows = conn.execute(text("""
+            SELECT id, choice_code, allocation_lane, raw_category, raw_gender, seats
+            FROM seats
             WHERE institution_code = :institution
               AND program_family = :course
-            ORDER BY choice_code, allocation_lane, base_category
-        """), {"institution": institution_code, "course": course}).fetchall()
+              AND capture_year = :year
+            ORDER BY source_page NULLS LAST, source_row NULLS LAST, id
+        """), {"institution": institution_code, "course": course, "year": capture_year}).fetchall()
+        metadata_rows = conn.execute(text("""
+            SELECT choice_code, course_metadata, source_pdf, source_page
+            FROM seat_matrix_courses
+            WHERE institution_code = :institution
+              AND program_family = :course
+              AND capture_year = :year
+            ORDER BY source_page NULLS LAST, choice_code
+        """), {"institution": institution_code, "course": course, "year": capture_year}).fetchall()
 
-        # Runtime rows are derived/cache data. If a seat import exists but the
-        # derived table was not refreshed yet, build the same compact matrix
-        # directly from the authoritative seats table for this college.
-        if not rows:
+    if not source_rows:
+        raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
+
+    # Prefer source-order rows from the official PDF-backed records. The
+    # aggregated runtime cache remains a fallback for legacy imports that do
+    # not yet contain the complete course metadata payload.
+    course_metadata = {}
+    for row in metadata_rows:
+        value = row[1]
+        if isinstance(value, str):
+            try:
+                import json
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = {}
+        item = value if isinstance(value, dict) else {}
+        item["source_pdf"] = str(row[2] or "")
+        item["source_page"] = int(row[3]) if row[3] is not None else None
+        course_metadata[str(row[0])] = item
+
+    data = {}
+    for row in source_rows:
+        choice, allocation = str(row[1]), str(row[2])
+        category, gender, seats = str(row[3]), str(row[4] or ""), int(row[5])
+        allocation_rows = data.setdefault(choice, {}).setdefault(allocation, [])
+        category_row = next((item for item in allocation_rows if item["category"] == category), None)
+        if category_row is None:
+            category_row = {"category": category, "G": None, "L": None, "total": None}
+            allocation_rows.append(category_row)
+        if gender == "G":
+            category_row["G"] = seats
+        elif gender == "L":
+            category_row["L"] = seats
+        else:
+            category_row["total"] = seats
+
+    if not course_metadata:
+        # Compatibility for previously imported seat data. This path cannot
+        # reproduce the original summary fields; it is intentionally used only
+        # until that source is re-imported with course_metadata.
+        with engine.connect() as conn:
             rows = conn.execute(text("""
-                SELECT capture_year, choice_code, allocation_lane,
-                       COALESCE(base_category, 'Total') AS base_category,
-                       MAX(CASE WHEN is_ladies = FALSE AND is_total = FALSE THEN seats END) AS gender_g,
-                       MAX(CASE WHEN is_ladies = TRUE AND is_total = FALSE THEN seats END) AS gender_l,
-                       MAX(CASE WHEN is_total = TRUE OR is_ladies IS NULL THEN seats END) AS category_total,
-                       BOOL_OR(is_total) AS is_total
-                FROM seats
+                SELECT capture_year, choice_code, allocation_lane, base_category,
+                       gender_g, gender_l, category_total, is_total
+                FROM seat_matrix_runtime
                 WHERE institution_code = :institution
                   AND program_family = :course
-                  AND capture_year = (
-                      SELECT MAX(capture_year)
-                      FROM seats
-                      WHERE institution_code = :institution
-                        AND program_family = :course
-                  )
-                GROUP BY capture_year, choice_code, allocation_lane,
-                         COALESCE(base_category, 'Total')
                 ORDER BY choice_code, allocation_lane, base_category
             """), {"institution": institution_code, "course": course}).fetchall()
+        legacy_data = {}
+        for row in rows:
+            choice, allocation = str(row[1]), str(row[2])
+            legacy_data.setdefault(choice, {}).setdefault(allocation, []).append({
+                "category": str(row[3]),
+                "G": int(row[4]) if row[4] is not None else None,
+                "L": int(row[5]) if row[5] is not None else None,
+                "total": int(row[6]) if row[6] is not None else None,
+            })
+        if legacy_data:
+            data = legacy_data
 
-    if not rows:
-        raise HTTPException(status_code=404, detail="No seat matrix on file for this college.")
-    capture_year = max(int(r[0]) for r in rows)
-    data = {}
-    for row in rows:
-        choice = str(row[1])
-        allocation = str(row[2])
-        data.setdefault(choice, {}).setdefault(allocation, []).append({
-            "category": str(row[3]),
-            "G": int(row[4]) if row[4] is not None else None,
-            "L": int(row[5]) if row[5] is not None else None,
-            "total": int(row[6]) if row[6] is not None else None,
-        })
     return {
         "institution_code": institution_code,
         "course": course,
         "capture_year": capture_year,
         "data": data,
+        "course_metadata": course_metadata,
+        "source_order_preserved": bool(course_metadata),
     }
 
 
@@ -762,7 +803,7 @@ def get_college_year_runtime(request: Request, institution_code: str, year: int,
         q = text("""
             SELECT c.program_id, c.institution_code, c.base_category, c.raw_category,
                    c.is_ladies, c.section_code, c.stage_code, c.year, c.round,
-                   c.percentile, c.rank_number, p.program_name_raw
+                   c.percentile, c.rank_number, p.program_name_raw, c.program_code
             FROM cutoffs c
             JOIN programs p ON p.program_id = c.program_id
             WHERE c.institution_code = :inst
@@ -780,18 +821,22 @@ def get_college_year_runtime(request: Request, institution_code: str, year: int,
         sections={}
         pdf_rows=[]
         for r in rows:
-            program_id=str(r[0]); branch=str(r[11] or program_id)
-            branches[program_id]=branch
+            program_id=str(r[0])
+            program_code=str(r[12] or '').strip()
+            branch_key=program_code or program_id
+            branch=str(r[11] or program_id)
+            branches[branch_key]=branch
             cat=str(r[2] or r[3] or '')
             raw_cat=str(r[3] or r[2] or cat)
             categories[cat]={'full':cat,'group':'Other'}
             sec=str(r[5] or '')
             sections[sec]=sec
             pdf_rows.append({
-                'branch':program_id,'college':institution_code,'category':cat,
+                'branch':branch_key,'college':institution_code,'category':cat,
                 'raw_category':raw_cat,'ladies':bool(r[4]),'section':sec,
                 'stage':str(r[6] or f'Round {r[8]}'),'year':int(r[7]),
                 'round':int(r[8]),'percentile':float(r[9]),'rank':r[10],
+                'program_code':str(r[12] or ''),
             })
         return {'course':course,'year':year,'college':institution_code,
                 'branches':branches,'categories':categories,'sections':sections,

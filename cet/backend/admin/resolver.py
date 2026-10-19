@@ -58,7 +58,7 @@ def _public_dns_target(url):
     except (OSError, ValueError):
         return []
 
-def verify_url(url, college_name, timeout=7):
+def verify_url(url, college_name, timeout=7, _redirects=0):
     url = valid_url(url)
     if not url:
         return {'ok': False, 'url': None, 'note': 'Invalid URL'}
@@ -92,9 +92,20 @@ def verify_url(url, college_name, timeout=7):
         if response is None:
             return {'ok': False, 'url': url, 'note': 'Unreachable: ConnectionError'}
         status = response.status
+        if status in (301, 302, 303, 307, 308):
+            location = response.getheader('location')
+            if not location:
+                return {'ok': False, 'url': url, 'status': status, 'note': f'HTTP {status}; redirect has no Location header'}
+            if _redirects >= 5:
+                return {'ok': False, 'url': url, 'status': status, 'note': 'Too many website redirects'}
+            target = valid_url(urllib.parse.urljoin(url, location))
+            if not target:
+                return {'ok': False, 'url': url, 'status': status, 'note': 'Redirect target rejected by URL safety checks'}
+            # Re-resolve and re-check every redirect target to prevent redirects
+            # from turning the verifier into an SSRF path.
+            return verify_url(target, college_name, timeout=timeout, _redirects=_redirects + 1)
         ctype = response.getheader('content-type', '')
         body = response.read(120000).decode('utf-8', 'ignore') if 'text' in ctype.lower() or 'html' in ctype.lower() else ''
-        # Redirects are intentionally not followed; the caller must review a redirect target separately.
         tokens = [x.lower() for x in re.findall(r'[a-z0-9]+', college_name) if len(x) > 2]
         hay = (url + ' ' + body[:100000]).lower()
         hits = sum(t in hay for t in tokens)
@@ -199,6 +210,49 @@ def _reference_contacts():
     return contacts
 
 
+def _city_key(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def infer_city_from_name(institution_name, known_cities):
+    """Infer a city only when a known city name appears as a whole phrase.
+
+    Longest-first matching avoids choosing a short city contained in a longer
+    place name. This is a deterministic fallback, not a substitute for source
+    verification when the name does not contain a known city.
+    """
+    name = " " + _city_key(institution_name) + " "
+    candidates = sorted(
+        {str(city).strip() for city in known_cities if str(city or '').strip()},
+        key=lambda city: len(_city_key(city)), reverse=True,
+    )
+    matches = []
+    for city in candidates:
+        key = _city_key(city)
+        if len(key) < 3 or key in {"india", "maharashtra", "vidarbha", "konkan"}:
+            continue
+        if " " + key + " " in name:
+            matches.append(city)
+    if not matches:
+        return None
+    longest = len(_city_key(matches[0]))
+    best = [city for city in matches if len(_city_key(city)) == longest]
+    return best[0] if len({_city_key(city) for city in best}) == 1 else None
+
+
+def _known_city_names(conn):
+    """Build a local city vocabulary from already populated CAP/reference rows."""
+    cities = set()
+    try:
+        cities.update(str(r[0]).strip() for r in conn.execute(
+            "SELECT DISTINCT city FROM institutes WHERE city IS NOT NULL AND TRIM(city)<>''"
+        ) if r[0])
+    except Exception:
+        pass
+    cities.update(str(row.get('city') or '').strip() for row in _reference_contacts().values() if row.get('city'))
+    return {city for city in cities if city}
+
+
 def seed_from_import(conn, job_id):
     """Create resolver rows from the colleges actually present in an import.
 
@@ -207,6 +261,7 @@ def seed_from_import(conn, job_id):
     invent unrelated resolver institutions.
     """
     refs = _reference_contacts()
+    known_cities = _known_city_names(conn)
     source_rows = conn.execute(
         "SELECT normalized_json FROM import_staging_records "
         "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') "
@@ -239,11 +294,11 @@ def seed_from_import(conn, job_id):
             or incoming['institution_name']
             or code
         )
-        city = (
-            (inst['city'] if inst else None)
-            or ref.get('city')
-            or None
-        )
+        city = (inst['city'] if inst else None) or ref.get('city')
+        city_source = 'institutes' if inst and inst['city'] else ('reference_csv' if ref.get('city') else None)
+        if not city:
+            city = infer_city_from_name(name, known_cities)
+            city_source = 'college_name_match' if city else None
         website = valid_url(inst['website']) if inst and inst['website'] else None
         website_source = 'institutes' if website else None
         if not website and ref.get('website'):
@@ -259,20 +314,21 @@ def seed_from_import(conn, job_id):
             # Never downgrade an already verified resolver result.
             conn.execute(
                 "UPDATE college_website_resolver SET institution_name=?,"
-                "city=COALESCE(city,?),updated_at=CURRENT_TIMESTAMP "
+                "city=COALESCE(city,?),city_source=CASE WHEN city IS NULL THEN COALESCE(?,city_source) ELSE city_source END,updated_at=CURRENT_TIMESTAMP "
                 "WHERE institution_code=?",
-                (name, city, code),
+                (name, city, city_source, code),
             )
         else:
             status = 'CANDIDATE' if website else 'PENDING'
             conn.execute(
                 """INSERT INTO college_website_resolver
                    (institution_code,institution_name,city,website,status,
-                    source,source_url,updated_at)
-                   VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                    source,source_url,city_source,website_source,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
                    ON CONFLICT(institution_code) DO UPDATE SET
                      institution_name=excluded.institution_name,
                      city=COALESCE(college_website_resolver.city,excluded.city),
+                     city_source=CASE WHEN college_website_resolver.city IS NULL THEN COALESCE(excluded.city_source,college_website_resolver.city_source) ELSE college_website_resolver.city_source END,
                      website=CASE
                          WHEN college_website_resolver.website IS NULL
                               OR college_website_resolver.website=''
@@ -295,7 +351,7 @@ def seed_from_import(conn, job_id):
                          ELSE excluded.source_url
                      END,
                      updated_at=CURRENT_TIMESTAMP""",
-                (code, name, city, website, status, website_source, website,
+                (code, name, city, website, status, website_source, website, city_source, website_source,
                  ),
             )
         seeded += 1
@@ -323,7 +379,7 @@ def _update_institute_resolution(conn, code, city=None, address=None, website=No
     )
 
 
-def resolve_import_job(job_id=None, limit=None):
+def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_codes=None):
     """Resolve a bounded number of colleges without running a long background loop.
 
     When job_id is supplied, only colleges from that import are considered.
@@ -348,15 +404,26 @@ def resolve_import_job(job_id=None, limit=None):
             c.commit()
 
         if job_id is None:
-            rows = [
-                dict(r) for r in c.execute(
-                    "SELECT institution_code,institution_name,city,website,status,source "
-                    "FROM college_website_resolver "
-                    "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW') "
-                    "ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 "
-                    "WHEN 'NEEDS_REVIEW' THEN 2 ELSE 3 END, LOWER(institution_name)"
-                )
-            ]
+            excluded = sorted({str(code).strip() for code in (exclude_codes or []) if str(code or '').strip()})
+            query = (
+                "SELECT institution_code,institution_name,city,website,status,source "
+                "FROM college_website_resolver"
+            )
+            clauses = []
+            params = []
+            if status_filter:
+                clauses.append("status = ?")
+                params.append(str(status_filter))
+            else:
+                # The empty/All filter deliberately includes every resolver status.
+                pass
+            if excluded:
+                clauses.append("institution_code NOT IN (" + ",".join("?" for _ in excluded) + ")")
+                params.extend(excluded)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name)"
+            rows = [dict(r) for r in c.execute(query, params)]
         else:
             source_rows = c.execute(
                 "SELECT normalized_json FROM import_staging_records "
@@ -376,7 +443,7 @@ def resolve_import_job(job_id=None, limit=None):
                 dict(r) for r in c.execute(
                     "SELECT institution_code,institution_name,city,website,status,source "
                     "FROM college_website_resolver ORDER BY institution_name"
-                ) if r['institution_code'] in codes and r['status'] != 'VERIFIED'
+                ) if r['institution_code'] in codes and r['status'] not in {'VERIFIED', 'NEEDS_REVIEW'}
             ]
 
     if limit is not None:
@@ -458,7 +525,7 @@ def resolve_import_job(job_id=None, limit=None):
                 # Use search only for the missing location field; never replace
                 # the already verified website with the search result.
                 try:
-                    location_ai, _ = gemini_find(name, None)
+                    location_ai, _ = gemini_find(name, None, institution_code=code)
                     found_city = str(location_ai.get('city')).strip() if location_ai.get('city') else None
                     found_address = str(location_ai.get('address')).strip() if location_ai.get('address') else None
                 except Exception:
@@ -487,7 +554,7 @@ def resolve_import_job(job_id=None, limit=None):
 
         try:
             searched += 1
-            ai, _ = gemini_find(name, city)
+            ai, _ = gemini_find(name, city, institution_code=code)
             url = ai.get('official_url')
             found_city = str(ai.get('city')).strip() if ai.get('city') else city
             address = str(ai.get('address')).strip() if ai.get('address') else None
@@ -511,7 +578,7 @@ def resolve_import_job(job_id=None, limit=None):
                 and (not ai_url or _same_site(result['url'], ai_url))
             ):
                 status = 'VERIFIED'
-            elif result.get('ok'):
+            elif result.get('ok') or result.get('status') in (408, 425, 429) or (result.get('status') and result.get('status') >= 500) or 'Unreachable' in str(result.get('note', '')):
                 status = 'NEEDS_REVIEW'
             else:
                 status = 'FAILED'
@@ -519,7 +586,9 @@ def resolve_import_job(job_id=None, limit=None):
             final_url = result.get('url') or url
             note = ' '.join(x for x in (
                 (ai.get('note') or '').strip(),
+                ('Evidence: ' + ', '.join(str(u) for u in ai.get('evidence_urls', [])[:4]) if isinstance(ai.get('evidence_urls'), list) and ai.get('evidence_urls') else ''),
                 (ai_check.get('note') or '').strip(),
+                ('Verification evidence: ' + ', '.join(str(u) for u in ai_check.get('evidence_urls', [])[:4]) if isinstance(ai_check.get('evidence_urls'), list) and ai_check.get('evidence_urls') else ''),
                 result.get('note', ''),
             ) if x)
             with connect() as c:
@@ -573,10 +642,19 @@ def resolve_import_job(job_id=None, limit=None):
                 c.commit()
 
     with connect() as c:
-        remaining = c.execute(
-            "SELECT COUNT(*) AS n FROM college_website_resolver "
-            "WHERE status IN ('PENDING','CANDIDATE','NEEDS_REVIEW')"
-        ).fetchone()['n']
+        excluded = sorted({str(code).strip() for code in (exclude_codes or []) if str(code or '').strip()})
+        remaining_sql = "SELECT COUNT(*) AS n FROM college_website_resolver"
+        remaining_clauses = []
+        remaining_params = []
+        if status_filter:
+            remaining_clauses.append("status = ?")
+            remaining_params.append(str(status_filter))
+        if excluded:
+            remaining_clauses.append("institution_code NOT IN (" + ",".join("?" for _ in excluded) + ")")
+            remaining_params.extend(excluded)
+        if remaining_clauses:
+            remaining_sql += " WHERE " + " AND ".join(remaining_clauses)
+        remaining = c.execute(remaining_sql, remaining_params).fetchone()['n']
     return {
         'ok': True,
         'seeded': seeded,
@@ -585,6 +663,42 @@ def resolve_import_job(job_id=None, limit=None):
         'failed': failed,
         'remaining': int(remaining),
     }
+
+
+def _import_names_for_codes(conn, codes):
+    """Recover real institution names from retained import staging records.
+
+    Only query codes whose institute name is missing or is just the code. The
+    staging payload is the original CAP-import evidence; never treat the code
+    itself as a valid display name when a better source exists.
+    """
+    codes = sorted({str(code).strip() for code in codes if str(code or '').strip()})
+    if not codes:
+        return {}
+    placeholders = ','.join('?' for _ in codes)
+    try:
+        rows = conn.execute(
+            "SELECT normalized_json FROM import_staging_records "
+            "WHERE result_type IN ('CUTOFFS','SEATS') "
+            "AND normalized_json IS NOT NULL "
+            f"AND (normalized_json::jsonb ->> 'institution_code') IN ({placeholders}) "
+            "ORDER BY id DESC",
+            tuple(codes),
+        ).fetchall()
+    except Exception:
+        log.exception('Could not recover institution names from import staging')
+        return {}
+    found = {}
+    for row in rows:
+        try:
+            data = json.loads(row.get('normalized_json') or '{}')
+        except Exception:
+            continue
+        code = str(data.get('institution_code') or '').strip()
+        name = str(data.get('institution_name') or '').strip()
+        if code in codes and name and name != code and code not in found:
+            found[code] = name
+    return found
 
 
 def sync_institutes_to_resolver(conn):
@@ -628,6 +742,15 @@ def sync_institutes_to_resolver(conn):
     else:
         log.info('Resolver scope returned %s production-backed rows', len(rows))
     count = 0
+    known_cities = _known_city_names(conn)
+    placeholder_codes = [
+        str(r['institution_code']).strip() for r in rows
+        if str(r['institution_code'] or '').strip()
+        and (not str(r['institution_name'] or '').strip()
+             or str(r['institution_name'] or '').strip() == str(r['institution_code']).strip())
+        and not str(refs.get(str(r['institution_code']).strip(), {}).get('institution_name') or '').strip()
+    ]
+    staged_names = _import_names_for_codes(conn, placeholder_codes)
     for r in rows:
         code = str(r['institution_code']).strip()
         if not code:
@@ -637,7 +760,10 @@ def sync_institutes_to_resolver(conn):
         db_name = str(r['institution_name'] or '').strip()
         # Imports can temporarily store only the CAP choice code as the name.
         # Prefer the maintained reference name when it is available.
-        name = ref_name if ref_name and (not db_name or db_name == code) else (db_name or ref_name or code)
+        staged_name = staged_names.get(code, '')
+        name = (ref_name if ref_name and (not db_name or db_name == code)
+                else staged_name if (not db_name or db_name == code) and staged_name
+                else db_name or ref_name or staged_name or code)
         # Repair a missing derived institute row from production-backed scope.
         conn.execute(
             "INSERT INTO institutes(institution_code,institution_name) VALUES(?,?) "
@@ -647,21 +773,25 @@ def sync_institutes_to_resolver(conn):
             (code, name),
         )
         city = r['city'] or ref.get('city')
+        city_source = 'institutes' if r['city'] else ('reference_csv' if ref.get('city') else None)
+        if not city:
+            city = infer_city_from_name(name, known_cities)
+            city_source = 'college_name_match' if city else None
         website = valid_url(r['website']) if r['website'] else ref.get('website')
         source = 'institutes' if r['website'] else ('reference_csv' if website else None)
         # Keep the public institute metadata aligned with the same maintained
         # reference source used by the resolver, without overwriting admin data.
-        if ref_name or city or website:
+        if (ref_name or (name and name != code) or city or website):
             conn.execute(
                 "UPDATE institutes SET "
                 "institution_name=CASE WHEN (institution_name IS NULL OR institution_name=?) AND ? IS NOT NULL THEN ? ELSE institution_name END,"
                 "city=COALESCE(city,?),website=COALESCE(website,?),"
-                "city_source=CASE WHEN city IS NULL AND ? IS NOT NULL THEN 'reference_csv' ELSE city_source END,"
+                "city_source=CASE WHEN city IS NULL AND ? IS NOT NULL THEN ? ELSE city_source END,"
                 "website_source=CASE WHEN website IS NULL AND ? IS NOT NULL THEN 'reference_csv' ELSE website_source END,"
                 "verified_at=CASE WHEN (? IS NOT NULL OR ? IS NOT NULL) THEN COALESCE(verified_at,CURRENT_TIMESTAMP) ELSE verified_at END "
                 "WHERE institution_code=?",
-                (code, ref_name or None, ref_name or None, city, website,
-                 city, website, city, website, code),
+                (code, (name if name != code else None), (name if name != code else None), city, website,
+                 city, city_source, website, city, website, code),
             )
         existing = conn.execute(
             "SELECT status,website FROM college_website_resolver WHERE institution_code=?",
@@ -677,11 +807,12 @@ def sync_institutes_to_resolver(conn):
         else:
             conn.execute(
                 """INSERT INTO college_website_resolver
-                   (institution_code,institution_name,city,website,status,source,source_url)
-                   VALUES (?,?,?,?,?,?,?)
+                   (institution_code,institution_name,city,website,status,source,source_url,city_source,website_source)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(institution_code) DO UPDATE SET
                      institution_name=excluded.institution_name,
                      city=COALESCE(college_website_resolver.city,excluded.city),
+                     city_source=CASE WHEN college_website_resolver.city IS NULL THEN COALESCE(excluded.city_source,college_website_resolver.city_source) ELSE college_website_resolver.city_source END,
                      website=CASE
                        WHEN college_website_resolver.website IS NULL
                             OR college_website_resolver.website=''
@@ -707,7 +838,7 @@ def sync_institutes_to_resolver(conn):
                 (
                     code, name, city, website,
                     'CANDIDATE' if website else 'PENDING',
-                    source, website,
+                    source, website, city_source, source,
                 ),
             )
         count += 1
@@ -731,12 +862,13 @@ def sync_github_india(conn):
         conn.execute("INSERT INTO college_website_resolver(institution_code,institution_name,website,status,source,source_url) VALUES (?,?,?,?,?,?) ON CONFLICT(institution_code) DO UPDATE SET website=excluded.website,source=excluded.source,source_url=excluded.source_url",(code,name,url,'CANDIDATE','github_india_2021',GITHUB_MAPPING_URL)); n+=1
     return n
 
-def gemini_find(college_name,city=None,excluded_url=None):
+def gemini_find(college_name,city=None,excluded_url=None,institution_code=None):
     key=os.getenv('GEMINI_API_KEY','').strip()
     if not key:raise RuntimeError('GEMINI_API_KEY is not configured')
     location=f', {city}' if city else ''
     exclusion=f' Do NOT return this previously rejected website: {excluded_url}.' if excluded_url else ''
-    prompt=f'''Find the official website of this Indian college/institution. College: {college_name}{location}. Use Google Search. Return ONLY valid JSON with keys official_url, city, address, confidence, note. The URL must be the institution's own official website, not a directory, social profile, ranking site, admissions portal, or aggregator. City must be the physical city/town of the institution, not a district or state. Address should be the official campus address when available. If uncertain, set the uncertain field to null and use a low confidence value.{exclusion}'''
+    code_hint=f' CAP/college code: {institution_code}.' if institution_code else ''
+    prompt=f'''Find the official website and physical campus location of this Indian college/institution. College: {college_name}{location}.{code_hint} Use Google Search and compare multiple results. Prefer the institution's own website, its affiliating university, AICTE/UGC, or official government sources. Do not use a district or state as the city and do not guess. Return ONLY valid JSON with keys official_url, city, address, confidence, evidence_urls, note. evidence_urls must list pages supporting the city and/or official URL. The URL must be the institution's own official website, not a directory, social profile, ranking site, admissions portal, or aggregator. Address should be the official campus address when available. If uncertain, set uncertain fields to null and confidence low.{exclusion}'''
     payload={'contents':[{'parts':[{'text':prompt}]}],'tools':[{'google_search':{}}]}
     req=urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe="")}:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':key},method='POST')
     try:
