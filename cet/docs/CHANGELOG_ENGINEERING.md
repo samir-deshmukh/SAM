@@ -31,3 +31,10 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Scope:** Replaced outdated Streamlit-first contributor instructions with current static frontend + FastAPI + PostgreSQL guidance, data-safety invariants, test commands, security rules, and one-change-per-commit requirements.
 - **Validation:** Documentation reviewed against the inspected current architecture and workflow files. Application tests were not run because this was a documentation-only change.
 - **Production impact:** None.
+
+### Expand import memory-risk inventory
+- **Commit:** `132d9b6056cf183522d6a99b1f679824b56deac9`
+- **Scope:** Extended `docs/REPOSITORY_INVENTORY.md` after inspecting cutoff comparison and approval helper implementations.
+- **Findings:** `_compare_cutoffs` materializes the normalized CSV and several record-count-scaled key structures; `_load_staged_rows` fetches all staged rows into memory. These are investigation targets; no implementation change was made.
+- **Validation:** Source inspection only. No runtime profiling or test execution has yet been performed.
+- **Production impact:** None.
