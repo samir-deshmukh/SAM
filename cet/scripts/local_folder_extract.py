@@ -137,7 +137,7 @@ def main() -> int:
             if args.hybrid:
                 cmd.append("--hybrid")
         else:
-            cmd = [sys.executable, str(SEAT_EXTRACTOR), str(pdf), "--out", str(workdir)]
+            cmd = [sys.executable, str(SEAT_EXTRACTOR), str(pdf), "--out", str(workdir), "--no-json"]
         log_path = REPORTS / f"{pdf.stem}.log"
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.Popen(cmd, cwd=BASE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
