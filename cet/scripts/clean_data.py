@@ -85,9 +85,9 @@ def clean_file(path: Path, out_dir: Path, rejects_dir: Path):
 
             with out_tmp.open("w", encoding="utf-8", newline="") as clean_stream, \
                     reject_tmp.open("w", encoding="utf-8", newline="") as reject_stream:
-                clean_writer = csv.DictWriter(clean_stream, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
+                clean_writer = csv.DictWriter(clean_stream, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
                 reject_fields = fieldnames + ["reject_reason"]
-                reject_writer = csv.DictWriter(reject_stream, fieldnames=reject_fields, quoting=csv.QUOTE_MINIMAL)
+                reject_writer = csv.DictWriter(reject_stream, fieldnames=reject_fields, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
                 clean_writer.writeheader()
                 reject_writer.writeheader()
                 for row in reader:
