@@ -20,7 +20,13 @@ import requests
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.admin.pipeline import detect_data_type, extract_pdf_metadata, identify, security_check
+from backend.admin.pipeline import (
+    SUPPORTED_COURSE_FAMILIES,
+    detect_data_type,
+    extract_pdf_metadata,
+    identify,
+    security_check,
+)
 from scripts.cutoff_extractor import process_single_pdf as extract_cutoffs
 from scripts.seat_matrix_extractor import process_single_pdf as extract_seats
 
@@ -153,7 +159,7 @@ def _process_job(job_id: int):
         family = family or pdf_family
         year = year or pdf_year
         round_name = round_name or pdf_round
-        if family not in {"BCA", "BBA", "MBA", "MCA"} or not year:
+        if family not in SUPPORTED_COURSE_FAMILIES or not year:
             raise RuntimeError(
                 "Could not identify course family or academic year. Rename the PDF to include "
                 "the course and year (for example BCA_2025.pdf), then retry."

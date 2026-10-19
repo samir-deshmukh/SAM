@@ -3,6 +3,14 @@ import re
 from pathlib import Path
 
 
+SUPPORTED_COURSE_FAMILIES = frozenset({
+    "BCA", "BBA", "MBA", "MCA", "BE", "BTECH", "BARCH", "MARCH",
+    "BPLAN", "MPLAN", "BPHARM", "MPHARM", "PHARMD", "ME", "LLB3",
+    "LLB5", "BED", "BPED", "MED", "MPED", "HMCT", "MHMCT", "BDES",
+    "MTECH",
+})
+
+
 def _pdf_text_probe(path, max_pages=8):
     """Read a small native-text sample for content-based PDF classification."""
     try:
