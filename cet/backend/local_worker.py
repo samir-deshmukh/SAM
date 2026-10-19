@@ -416,7 +416,32 @@ def retry_job(request: Request, job_id: int):
     (control / "CANCEL").unlink(missing_ok=True)
     try:
         if state.get("status") == "DONE":
-            _remote(state, "revalidate")
+            try:
+                _remote(state, "revalidate")
+            except RuntimeError as exc:
+                # A Render deploy can replace the server after it received the
+                # CSV but before validation/staging completed. The local copy is
+                # durable on this PC, so resend it if the server copy was lost.
+                if "returned 404:" not in str(exc):
+                    raise
+                data_type = str(state.get("data_type") or "").upper()
+                suffix = "_cutoffs.csv" if data_type == "CUTOFFS" else "_seats_long.csv"
+                artifact = DATA / f"job_{job_id}" / "artifacts" / f"{Path(state['filename']).stem}{suffix}"
+                if not artifact.is_file():
+                    raise RuntimeError("The saved extracted CSV is missing on this PC; retry extraction from the source PDF") from exc
+                with artifact.open("rb") as handle:
+                    _remote(
+                        state, "artifact",
+                        files={"file": (artifact.name, handle, "text/csv")},
+                        data={
+                            "data_type": data_type,
+                            "family": str(state.get("family") or ""),
+                            "year": str(state.get("year") or ""),
+                            "round_name": str(state.get("round_name") or ""),
+                            "source_sha256": state["sha256"],
+                            "summary_json": json.dumps(state.get("summary") or {}, ensure_ascii=False),
+                        },
+                    )
             state.update(status="DONE", message="Server validation retry started using the saved extracted CSV",
                          updated_at=time.time())
             _write_state(job_id, state)
