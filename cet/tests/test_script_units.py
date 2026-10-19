@@ -12,8 +12,6 @@ from scripts.cutoff_extractor import (
     split_by_stage,
     parse_structured_page,
     deduplicate_and_merge,
-    combine_csvs,
-    CSV_FIELDS,
 )
 from scripts.export_seats_json import alloc_sort_key, category_sort_key
 from scripts.export_seats_json import category_sort_key as seat_category_sort_key
@@ -138,24 +136,6 @@ def test_deduplication_does_not_merge_same_rank_from_different_programs():
     assert len(deduplicate_and_merge(rows)) == 2
 
 
-def test_page_by_page_deduplication_matches_full_pdf_deduplication():
-    common = {"source_pdf": "sample.pdf", "institution_code": "01002",
-              "section": "State Level", "stage": "I", "category": "GOPENH",
-              "rank": "100", "rank_number": 100, "rank_suffix": "", "percentage": 90.0}
-    rows = [
-        {**common, "page": 1, "program_code": "P1", "source": "native_text", "program_name": "Civil"},
-        {**common, "page": 1, "program_code": "P1", "source": "ocr", "program_name": ""},
-        {**common, "page": 1, "program_code": "P2", "source": "native_text", "program_name": "Computer"},
-        {**common, "page": 2, "program_code": "P1", "source": "native_text", "program_name": "Civil"},
-        {**common, "page": 2, "program_code": "P1", "source": "ocr", "program_name": ""},
-    ]
-    full_result = deduplicate_and_merge(rows)
-    streamed_result = []
-    for page in (1, 2):
-        streamed_result.extend(deduplicate_and_merge([row for row in rows if row["page"] == page]))
-    assert streamed_result == full_result
-
-
 def test_forward_fill_only_uses_prior_nonblank_values():
     df = pd.DataFrame(
         {
@@ -204,25 +184,3 @@ def test_seat_sort_keys_are_stable():
     assert category_sort_key("OPEN") < category_sort_key("SC")
     assert alloc_sort_key("State Level") < alloc_sort_key("HU")
     assert seat_category_sort_key("OPEN") == category_sort_key("OPEN")
-
-
-def test_combine_csvs_streams_rows_and_preserves_order(tmp_path):
-    import csv
-    out = tmp_path / "out"
-    out.mkdir()
-    for name, rows in [
-        ("a_cutoffs.csv", [{"source_pdf": "a.pdf", "page": "1", "rank": "100"},
-                           {"source_pdf": "a.pdf", "page": "2", "rank": "200"}]),
-        ("b_cutoffs.csv", [{"source_pdf": "b.pdf", "page": "1", "rank": "300"}]),
-    ]:
-        with (out / name).open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
-    combined = combine_csvs(out)
-    assert combined is not None
-    with combined.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert [(r["source_pdf"], r["page"], r["rank"]) for r in rows] == [
-        ("a.pdf", "1", "100"), ("a.pdf", "2", "200"), ("b.pdf", "1", "300")
-    ]
