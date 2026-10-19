@@ -359,7 +359,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 env["CAPFIND_WORKER_ID"] = str(worker_id or "")
                 env["PYTHONIOENCODING"] = "utf-8"
                 env["PYTHONUTF8"] = "1"
-                chunk_pages = str(max(10, min(250, int(env.get("CAPFIND_CHUNK_PAGES", "10")))))
+                chunk_pages = str(max(250, min(1000, int(env.get("CAPFIND_CHUNK_PAGES", "1000")))))
                 command = [
                     sys.executable, str(SCRIPTS / "chunked_cutoff_extractor.py"),
                     str(pdf_path), "--out", str(raw), "--chunk-pages", chunk_pages,

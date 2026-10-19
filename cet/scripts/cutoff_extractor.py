@@ -67,29 +67,53 @@ try:
     from scripts.worker_control import checkpoint as _worker_checkpoint
 except ImportError:
     from worker_control import checkpoint as _worker_checkpoint
-try:
-    from scripts import fitz_pdfium as fitz_pdfium
-except ImportError:
-    import fitz_pdfium
+# Optional engines are imported only when their feature is actually needed.
+# Native-only extraction must not pay the RSS cost of PDFium, Pillow and OCR.
+fitz_pdfium = None
+pytesseract = None
+Image = None
+ImageEnhance = None
+ImageFilter = None
+ImageOps = None
+_ocr_load_attempted = False
 
-try:
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-except ImportError:
-    pytesseract = None
-    Image = None
 
-# ----------------------------------------------------------------------
-# Auto-locate Tesseract
-# ----------------------------------------------------------------------
-tesseract_path = shutil.which("tesseract")
-if tesseract_path and pytesseract is not None:
-    pytesseract.pytesseract.tesseract_cmd = tesseract_path
-elif pytesseract is not None:
-    # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
-    windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    if windows_tesseract.is_file():
-        pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
+def _load_pdfium():
+    global fitz_pdfium
+    if fitz_pdfium is None:
+        try:
+            from scripts import fitz_pdfium as backend
+        except ImportError:
+            import fitz_pdfium as backend
+        fitz_pdfium = backend
+    return fitz_pdfium
+
+
+def _load_ocr() -> bool:
+    global pytesseract, Image, ImageEnhance, ImageFilter, ImageOps, _ocr_load_attempted
+    if _ocr_load_attempted:
+        return pytesseract is not None and Image is not None
+    _ocr_load_attempted = True
+    try:
+        import pytesseract as pytesseract_module
+        from PIL import Image as image_module, ImageEnhance as image_enhance_module
+        from PIL import ImageFilter as image_filter_module, ImageOps as image_ops_module
+    except ImportError:
+        return False
+    pytesseract = pytesseract_module
+    Image = image_module
+    ImageEnhance = image_enhance_module
+    ImageFilter = image_filter_module
+    ImageOps = image_ops_module
+    tesseract_path = shutil.which("tesseract")
+    if tesseract_path:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    else:
+        # Preserve Windows compatibility without forcing a Windows-only path on Linux/macOS.
+        windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+        if windows_tesseract.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(windows_tesseract)
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -493,8 +517,8 @@ def parse_structured_page(
 # OCR helpers
 # ----------------------------------------------------------------------
 def render_page(page: fitz.Page, dpi: int = 300) -> Any:
-    if Image is None:
-        raise RuntimeError("Pillow not installed. Run: pip install pillow")
+    if not _load_ocr():
+        raise RuntimeError("OCR dependencies are unavailable; install pytesseract and Pillow")
     scale = dpi / 72.0
     mat = fitz.Matrix(scale, scale)
     pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -510,8 +534,8 @@ def preprocess_image(img: "Image.Image") -> "Image.Image":
 
 
 def ocr_page(page: fitz.Page, dpi: int, lang: str = "eng") -> str:
-    if pytesseract is None:
-        raise RuntimeError("pytesseract not installed. Run: pip install pytesseract")
+    if not _load_ocr():
+        raise RuntimeError("OCR dependencies are unavailable; install pytesseract and Pillow")
     img = render_page(page, dpi)
     processed = preprocess_image(img)
     return pytesseract.image_to_string(processed, lang=lang, config="--psm 6")
@@ -599,7 +623,7 @@ def choose_extraction_technique(
     if native_hits >= len(sample_idx):
         return "native", scores
 
-    if pytesseract is not None:
+    if _load_ocr():
         ocr_hits = 0
         for i in sample_idx:
             try:
@@ -682,9 +706,18 @@ def process_single_pdf(
     use_camelot: bool,
     use_pdfium: bool = True,
     initial_context: Optional[Dict[str, str]] = None,
+    start_page: int = 1,
+    end_page: Optional[int] = None,
+    source_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     doc = fitz.open(pdf_path)
-    print(f"  pages: {len(doc)}")
+    source_page_count = len(doc)
+    selected_end_page = source_page_count if end_page is None else min(end_page, source_page_count)
+    if start_page < 1 or selected_end_page < start_page or start_page > source_page_count:
+        doc.close()
+        raise ValueError(f"Invalid page range {start_page}-{end_page} for {source_page_count}-page PDF")
+    selected_page_count = selected_end_page - start_page + 1
+    print(f"  pages: {selected_page_count} (source pages {start_page}-{selected_end_page} of {source_page_count})")
     technique = "hybrid" if use_pdfium else "native_only"
     scores = {"native": 0, "pdfium": 0, "ocr": 0}
     if use_pdfium:
@@ -695,13 +728,36 @@ def process_single_pdf(
     pdfium_doc = None
     if use_pdfium:
         try:
-            pdfium_doc = fitz_pdfium.open(pdf_path)
+            pdfium_doc = _load_pdfium().open(pdf_path)
         except Exception as exc:
             print(f"  PDFium open failed; using PyMuPDF: {exc}")
 
-    all_records_raw: List[Dict[str, Any]] = []
-    page_audits: List[Dict[str, Any]] = []
-    camelot_all_tables: List[Dict] = []
+    # Output is streamed page by page. The deduplication key includes the source
+    # page, so records from different pages can never merge with each other.
+    # Keeping only one page's records bounds memory independently of PDF length.
+    outdir.mkdir(parents=True, exist_ok=True)
+    base_stem = pdf_path.stem
+    csv_path = outdir / f"{base_stem}_cutoffs.csv"
+    json_path = outdir / f"{base_stem}_cutoffs.json"
+    audit_path = outdir / f"{base_stem}_page_audit.json"
+    csv_tmp = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    json_tmp = json_path.with_suffix(json_path.suffix + ".tmp")
+    audit_tmp = audit_path.with_suffix(audit_path.suffix + ".tmp")
+    csv_file = csv_tmp.open("w", newline="", encoding="utf-8-sig")
+    json_file = json_tmp.open("w", encoding="utf-8")
+    audit_file = audit_tmp.open("w", encoding="utf-8")
+    json_file.write("[\n")
+    audit_file.write("[\n")
+    csv_writer = None
+    first_json = True
+    first_audit = True
+    raw_record_count = 0
+    merged_record_count = 0
+    page_count = 0
+    suffixed_count = 0
+    first_suffixed = None
+    bad_code_count = 0
+    first_bad_code = None
     carry_context = {
         "institution_code": "", "institution_name": "", "program_code": "",
         "program_name": "", "status": "", "home_university": "",
@@ -717,8 +773,8 @@ def process_single_pdf(
         if isinstance(initial_state, dict):
             carry_parser_state.update(initial_state)
 
-    for pnum in range(1, len(native_doc) + 1):
-        _worker_checkpoint(pnum, len(native_doc))
+    for pnum in range(start_page, selected_end_page + 1):
+        _worker_checkpoint(pnum - start_page + 1, selected_page_count)
         native_page = native_doc[pnum - 1]
         native_text = native_page.get_text("text") or ""
         native_lines = merge_split_rank_lines(normalize_lines(native_text))
@@ -757,7 +813,7 @@ def process_single_pdf(
             selected_context = native_context
             selected_parser_state = native_state
 
-        if not records and pytesseract is not None:
+        if not records and _load_ocr():
             try:
                 ocr_text = ocr_page(native_page, dpi, lang)
                 ocr_lines = merge_split_rank_lines(normalize_lines(ocr_text))
@@ -778,7 +834,7 @@ def process_single_pdf(
         carry_parser_state = dict(selected_parser_state)
 
         for r in records:
-            r["source_pdf"] = pdf_path.name
+            r["source_pdf"] = source_name or pdf_path.name
 
         scores["native"] += len(native_records)
         scores["pdfium"] += len(pdfium_records)
@@ -795,13 +851,37 @@ def process_single_pdf(
             else:
                 tables = run_camelot_on_page(pdf_path, pnum)
             if tables:
-                camelot_all_tables.extend(tables)
                 records_camelot = camelot_to_records(tables, dict(carry_context), pnum)
                 for r in records_camelot:
-                    r["source_pdf"] = pdf_path.name
+                    r["source_pdf"] = source_name or pdf_path.name
 
-        all_records_raw.extend(records + records_camelot)
-        page_audits.append({
+        page_records = records + records_camelot
+        raw_record_count += len(page_records)
+        merged_page_records = deduplicate_and_merge(page_records)
+        merged_record_count += len(merged_page_records)
+        for record in merged_page_records:
+            if record.get("rank_suffix"):
+                suffixed_count += 1
+                if first_suffixed is None:
+                    first_suffixed = record.get("rank")
+            code = record.get("institution_code")
+            if code and not re.fullmatch(r"\d{5}", str(code)):
+                bad_code_count += 1
+                if first_bad_code is None:
+                    first_bad_code = code
+            if csv_writer is None:
+                csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS, extrasaction="ignore")
+                csv_writer.writeheader()
+            row = {key: record.get(key, "") for key in CSV_FIELDS}
+            if isinstance(row["merged_from"], list):
+                row["merged_from"] = ", ".join(row["merged_from"])
+            csv_writer.writerow(row)
+            if not first_json:
+                json_file.write(",\n")
+            json.dump(record, json_file, ensure_ascii=False)
+            first_json = False
+
+        audit = {
             "page": pnum,
             "native_records": len(native_records),
             "pdfium_records": len(pdfium_records),
@@ -810,43 +890,40 @@ def process_single_pdf(
             "rank_value_hits": _count_value_hits(native_lines),
             "program_header_count": sum(bool(PROGRAM_RE.match(line)) for line in native_lines),
             "institution_header_count": sum(bool(INSTITUTE_RE.match(line)) for line in native_lines),
-            "selected_records": len(records) + len(records_camelot),
+            "selected_records": len(page_records),
             "source": source_used,
             "pdfium_error": pdfium_error,
-        })
+        }
+        if not first_audit:
+            audit_file.write(",\n")
+        json.dump(audit, audit_file, ensure_ascii=False)
+        first_audit = False
+        page_count += 1
         print(f"    p{pnum:>3}: source={source_used:<12} native={len(native_records):>3} pdfium={len(pdfium_records):>3} camelot={len(records_camelot):>3}")
 
-    merged_records = deduplicate_and_merge(all_records_raw)
-    if not merged_records:
+    json_file.write("\n]\n")
+    audit_file.write("\n]\n")
+    csv_file.close()
+    json_file.close()
+    audit_file.close()
+    if merged_record_count == 0:
+        for temp_path in (csv_tmp, json_tmp, audit_tmp):
+            temp_path.unlink(missing_ok=True)
         raise RuntimeError(
             "Cutoff extractor found no rank/percentile records. "
             "The PDF may be image-only, use an unsupported text encoding, "
             "or have an unsupported table layout."
         )
+    csv_tmp.replace(csv_path)
+    json_tmp.replace(json_path)
+    audit_tmp.replace(audit_path)
 
-    suffixed = [r for r in merged_records if r.get("rank_suffix")]
-    if suffixed:
-        print(f"    letter-suffixed ranks recovered: {len(suffixed)} "
-              f"(e.g. {suffixed[0]['rank']!r})")
-
-    # Safety net: flag any institution_code that isn't exactly 5 digits.
-    bad = [r for r in merged_records
-           if r.get("institution_code")
-           and not re.fullmatch(r"\d{5}", str(r["institution_code"]))]
-    if bad:
-        print(f"    WARNING: {len(bad)} rows have non-5-digit institution_code "
-              f"(e.g. {bad[0]['institution_code']!r})")
-
-    base_stem = pdf_path.stem
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    csv_path = outdir / f"{base_stem}_cutoffs.csv"
-    json_path = outdir / f"{base_stem}_cutoffs.json"
-    audit_path = outdir / f"{base_stem}_page_audit.json"
-
-    write_csv(csv_path, merged_records)
-    write_json(json_path, merged_records)
-    write_json(audit_path, page_audits)
+    if suffixed_count:
+        print(f"    letter-suffixed ranks recovered: {suffixed_count} "
+              f"(e.g. {first_suffixed!r})")
+    if bad_code_count:
+        print(f"    WARNING: {bad_code_count} rows have non-5-digit institution_code "
+              f"(e.g. {first_bad_code!r})")
     # Chunked extraction consumes this to preserve program/institution context
     # when a CAP table continues across a chunk boundary.
     write_json(outdir / "final_context.json", {
@@ -860,13 +937,13 @@ def process_single_pdf(
             pdfium_doc.close()
         except Exception:
             pass
-    print(f"    -> {len(merged_records)} unique rows -> {csv_path.name}")
+    print(f"    -> {merged_record_count} unique rows -> {csv_path.name}")
     return {
         "pdf": str(pdf_path),
-        "pages": len(page_audits),
+        "pages": page_count,
         "technique": technique,
-        "raw_records": len(all_records_raw),
-        "merged_records": len(merged_records),
+        "raw_records": raw_record_count,
+        "merged_records": merged_record_count,
         "csv": str(csv_path),
     }
 
@@ -909,11 +986,12 @@ def combine_csvs(outdir: Path) -> Optional[Path]:
         writer = csv.writer(fout)
         writer.writerow(CSV_FIELDS)
         for path in per_pdf:
-            with path.open("r", encoding="utf-8-sig") as fin:
-                rows = list(csv.reader(fin))
-            if not rows:
-                continue
-            writer.writerows(rows[1:])
+            # Stream each input file. Materializing list(csv.reader(...)) creates
+            # a second in-memory copy of every extracted row after parsing ends.
+            with path.open("r", encoding="utf-8-sig", newline="") as fin:
+                rows = csv.reader(fin)
+                next(rows, None)  # skip this file's header
+                writer.writerows(rows)
     return combined_path
 
 
@@ -935,8 +1013,18 @@ def main() -> int:
                         help="Skip PDFium and use PyMuPDF native text; lowers peak memory on large PDFs")
     parser.add_argument("--initial-context", type=Path, default=None,
                         help="JSON metadata context from the previous chunk of the same source PDF")
+    parser.add_argument("--start-page", type=int, default=1,
+                        help="First 1-based source page to process (default: 1)")
+    parser.add_argument("--end-page", type=int, default=None,
+                        help="Last 1-based source page to process (default: final page)")
+    parser.add_argument("--source-name", default=None,
+                        help="Original uploaded filename to preserve in provenance fields")
     args = parser.parse_args()
 
+    if args.start_page < 1 or (args.end_page is not None and args.end_page < args.start_page):
+        parser.error("Page range must be 1-based and end-page must be >= start-page")
+    if (args.start_page != 1 or args.end_page is not None) and not (args.input.is_file() and args.input.suffix.lower() == ".pdf"):
+        parser.error("--start-page/--end-page require a single PDF input")
     if args.input.is_file() and args.input.suffix.lower() == ".pdf":
         pdf_files = [args.input]
     elif args.input.is_dir():
@@ -969,11 +1057,16 @@ def main() -> int:
                 use_camelot=args.camelot,
                 use_pdfium=not args.native_only,
                 initial_context=initial_context,
+                start_page=args.start_page,
+                end_page=args.end_page,
+                source_name=args.source_name,
             ))
         except Exception as e:
             print(f"  ERROR: {e}", file=sys.stderr)
 
-    combined = combine_csvs(args.out)
+    # A page-range worker writes one partial dataset. Building a second combined
+    # CSV here only duplicates I/O; the coordinator combines validated parts once.
+    combined = combine_csvs(args.out) if args.start_page == 1 and args.end_page is None else None
     write_json(args.out / "batch_summary.json", summary)
     print(f"\nDone. {total} PDFs processed.")
     if combined:

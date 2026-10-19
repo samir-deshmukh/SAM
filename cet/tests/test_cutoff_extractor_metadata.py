@@ -31,7 +31,7 @@ def test_extractor_uses_hybrid_pdf_backends():
     from scripts import cutoff_extractor
 
     assert cutoff_extractor.fitz.__name__ == "fitz"
-    assert cutoff_extractor.fitz_pdfium.__name__.endswith("fitz_pdfium")
+    assert cutoff_extractor._load_pdfium().__name__.endswith("fitz_pdfium")
 
 
 def test_program_code_with_letter_suffix_is_parsed():
@@ -55,3 +55,34 @@ def test_bare_roman_rank_layout_is_not_promoted_to_stage():
     assert lines[0] == 'GOPENH LOPENH'
     assert lines[1] == 'I 2414 (55.0372530)'
     assert lines[2] == '1047 (75.3093618)'
+
+
+def test_extractor_processes_selected_source_page_range_without_renumbering(tmp_path):
+    import csv
+    import json
+    import fitz
+    from scripts.cutoff_extractor import process_single_pdf
+
+    pdf_path = tmp_path / "range.pdf"
+    with fitz.open() as document:
+        for index in range(3):
+            page = document.new_page()
+            page.insert_text((40, 40), "01002 - Example College, Amravati\n"
+                "0100219110 - Civil Engineering\n"
+                "Status: Government Autonomous Home University : Autonomous Institute\n"
+                "State Level\nI\nGOPENH\n100 (90.0)", fontsize=8)
+        document.save(pdf_path)
+
+    output = tmp_path / "range-output"
+    summary = process_single_pdf(
+        pdf_path, output, dpi=300, lang="eng", use_camelot=False,
+        use_pdfium=False, start_page=2, end_page=3, source_name="original.pdf",
+    )
+    assert summary["pages"] == 2
+    with (output / "range_cutoffs.csv").open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows
+    assert {int(row["page"]) for row in rows} == {2, 3}
+    assert all(row["source_pdf"] == "original.pdf" for row in rows)
+    audits = json.loads((output / "range_page_audit.json").read_text())
+    assert [item["page"] for item in audits] == [2, 3]

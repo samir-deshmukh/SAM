@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Memory-bounded, resumable cutoff PDF extraction by page-range chunks.
 
-The original PDF is never modified. Each chunk is extracted independently by
-the existing cutoff extractor, and page/source provenance is remapped to the
-original document before the combined artifacts are written.
+The original PDF is never modified or split. Each page range is extracted
+independently from the source file, then validated and streamed into combined
+artifacts with original page numbers and source provenance preserved.
 """
 from __future__ import annotations
 
@@ -12,12 +12,11 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-
-import fitz
 
 BASE = Path(__file__).resolve().parents[1]
 EXTRACTOR = Path(__file__).with_name("cutoff_extractor.py")
@@ -37,8 +36,55 @@ def atomic_json(path: Path, payload: Any) -> None:
     temp.replace(path)
 
 
-def split_pdf(source: fitz.Document, destination: Path, start: int, end: int) -> None:
-    """Write original zero-based page interval [start, end) as a new PDF."""
+def iter_json_array(path: Path):
+    """Yield array items incrementally, bounding memory to one JSON object."""
+    decoder = json.JSONDecoder()
+    with path.open("r", encoding="utf-8") as stream:
+        buffer = stream.read(65536)
+        eof = not buffer
+        started = False
+        while True:
+            buffer = buffer.lstrip()
+            if not started:
+                if not buffer:
+                    if eof:
+                        raise ValueError(f"Empty JSON array: {path}")
+                    buffer = stream.read(65536)
+                    eof = not buffer
+                    continue
+                if not buffer.startswith("["):
+                    raise ValueError(f"Expected JSON array: {path}")
+                buffer = buffer[1:]
+                started = True
+                continue
+
+            buffer = buffer.lstrip()
+            if not buffer:
+                if eof:
+                    raise ValueError(f"Unterminated JSON array: {path}")
+                buffer = stream.read(65536)
+                eof = not buffer
+                continue
+            if buffer.startswith("]"):
+                return
+            if buffer.startswith(","):
+                buffer = buffer[1:]
+                continue
+            try:
+                item, consumed = decoder.raw_decode(buffer)
+            except json.JSONDecodeError:
+                if eof:
+                    raise
+                buffer += stream.read(65536)
+                eof = not buffer
+                continue
+            yield item
+            buffer = buffer[consumed:]
+
+
+def split_pdf(source, destination: Path, start: int, end: int) -> None:
+    """Legacy helper retained for tests; production extraction no longer splits PDFs."""
+    import fitz
     chunk = fitz.open()
     try:
         chunk.insert_pdf(source, from_page=start, to_page=end - 1, links=True, annots=True)
@@ -88,14 +134,63 @@ def remap_chunk_artifacts(chunk_out: Path, chunk_stem: str, source_name: str,
     return csv_path, json_path, audit_path, row_count
 
 
-def combine_outputs(outdir: Path, source: Path, parts: list[dict], total_pages: int) -> dict:
+
+def validate_chunk_artifacts(chunk_out: Path, artifact_stem: str, source_name: str,
+                             start_page: int, end_page: int) -> tuple[Path, Path, Path, int]:
+    """Validate a source-page-range extraction without rewriting its artifacts."""
+    csv_path = chunk_out / f"{artifact_stem}_cutoffs.csv"
+    json_path = chunk_out / f"{artifact_stem}_cutoffs.json"
+    audit_path = chunk_out / f"{artifact_stem}_page_audit.json"
+    if not (csv_path.is_file() and json_path.is_file() and audit_path.is_file()):
+        raise RuntimeError(f"Extractor did not create all expected artifacts for {artifact_stem}")
+
+    csv_count = 0
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as fin:
+        csv_rows = iter(csv.DictReader(fin))
+        json_rows = iter_json_array(json_path)
+        sentinel = object()
+        while True:
+            csv_row = next(csv_rows, sentinel)
+            json_row = next(json_rows, sentinel)
+            if csv_row is sentinel and json_row is sentinel:
+                break
+            if csv_row is sentinel or json_row is sentinel:
+                raise RuntimeError(f"CSV/JSON row-count mismatch in {artifact_stem}")
+            try:
+                csv_page = int(csv_row.get("page", ""))
+                json_page = int(json_row.get("page", 0))
+            except (AttributeError, TypeError, ValueError):
+                raise RuntimeError(f"Invalid page value in {artifact_stem}")
+            if not start_page <= csv_page <= end_page or csv_page != json_page:
+                raise RuntimeError(f"CSV/JSON page mismatch in {artifact_stem}")
+            if csv_row.get("source_pdf") != source_name or json_row.get("source_pdf") != source_name:
+                raise RuntimeError(f"Source provenance mismatch in {artifact_stem}")
+            for field, csv_value in csv_row.items():
+                json_value = json_row.get(field)
+                if isinstance(json_value, list):
+                    json_value = ", ".join(str(value) for value in json_value)
+                expected_value = "" if json_value is None else str(json_value)
+                if csv_value != expected_value:
+                    raise RuntimeError(f"CSV/JSON data mismatch in {artifact_stem}, page {csv_page}, field {field}")
+            csv_count += 1
+
+    expected_page = start_page
+    for audit in iter_json_array(audit_path):
+        if int(audit.get("page", 0)) != expected_page:
+            raise RuntimeError(f"Page-audit coverage mismatch in {audit_path}; expected page {expected_page}")
+        expected_page += 1
+    if expected_page != end_page + 1:
+        raise RuntimeError(f"Page-audit coverage mismatch in {audit_path}; ended at page {expected_page - 1}")
+    return csv_path, json_path, audit_path, csv_count
+
+def combine_outputs(outdir: Path, source: Path, parts: list[dict], total_pages: int, source_hash: str) -> dict:
     final_csv = outdir / f"{source.stem}_cutoffs.csv"
     final_json = outdir / f"{source.stem}_cutoffs.json"
     final_audit = outdir / f"{source.stem}_page_audit.json"
     csv_tmp = final_csv.with_suffix(".csv.tmp")
     json_tmp = final_json.with_suffix(".json.tmp")
-    audit_rows: list[dict] = []
     total_rows = 0
+    audit_count = 0
 
     with csv_tmp.open("w", encoding="utf-8-sig", newline="") as fout:
         writer = None
@@ -118,36 +213,50 @@ def combine_outputs(outdir: Path, source: Path, parts: list[dict], total_pages: 
         first = True
         for part in parts:
             part_json = outdir / part["json"]
-            with part_json.open("r", encoding="utf-8") as fin:
-                rows = json.load(fin)  # one bounded chunk only, never the whole PDF
-            for row in rows:
+            for row in iter_json_array(part_json):
                 if not first:
                     fout.write(",\n")
                 json.dump(row, fout, ensure_ascii=False)
                 first = False
-            del rows
         fout.write("\n]\n")
     json_tmp.replace(final_json)
 
-    for part in parts:
-        with (outdir / part["audit"]).open("r", encoding="utf-8") as f:
-            audit_rows.extend(json.load(f))
-    audit_rows.sort(key=lambda x: int(x["page"]))
-    pages = [int(x["page"]) for x in audit_rows]
-    if pages != list(range(1, total_pages + 1)):
+    audit_tmp = final_audit.with_suffix(".json.tmp")
+    expected_page = 1
+    with audit_tmp.open("w", encoding="utf-8") as fout:
+        fout.write("[\n")
+        first = True
+        for part in parts:
+            part_audit = outdir / part["audit"]
+            for audit in iter_json_array(part_audit):
+                page = int(audit["page"])
+                if page != expected_page:
+                    audit_tmp.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"Page audit coverage mismatch: expected page {expected_page}, got {page}"
+                    )
+                if not first:
+                    fout.write(",\n")
+                json.dump(audit, fout, ensure_ascii=False)
+                first = False
+                expected_page += 1
+                audit_count += 1
+        fout.write("\n]\n")
+    if expected_page != total_pages + 1:
+        audit_tmp.unlink(missing_ok=True)
         raise RuntimeError(
             f"Page audit coverage mismatch: expected pages 1..{total_pages}; "
-            f"got {len(pages)} entries (duplicates={len(pages) - len(set(pages))})"
+            f"got {audit_count} entries"
         )
-    atomic_json(final_audit, audit_rows)
+    audit_tmp.replace(final_audit)
     return {
         "source_pdf": str(source),
-        "source_sha256": sha256_file(source),
+        "source_sha256": source_hash,
         "total_pages": total_pages,
         "chunk_count": len(parts),
         "chunk_pages": sorted({p["page_count"] for p in parts}),
         "rows_extracted": total_rows,
-        "page_audit_entries": len(audit_rows),
+        "page_audit_entries": audit_count,
         "csv": str(final_csv),
         "json": str(final_json),
         "page_audit": str(final_audit),
@@ -168,10 +277,10 @@ def main() -> int:
     parser.add_argument("input_pdf", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-name", default=None, help="Original uploaded filename for provenance fields")
-    parser.add_argument("--chunk-pages", type=int, default=10,
-                        help="Maximum pages per temporary PDF part (default: 10)")
+    parser.add_argument("--chunk-pages", type=int, default=1000,
+                        help="Maximum source pages per extraction worker (default: 1000)")
     parser.add_argument("--keep-parts", action="store_true",
-                        help="Keep temporary split PDFs for inspection")
+                        help="Deprecated compatibility flag; source PDFs are no longer split")
     parser.add_argument("--hybrid", action="store_true",
                         help="Use the dual-engine extractor instead of lower-memory native-only")
     args = parser.parse_args()
@@ -180,22 +289,32 @@ def main() -> int:
     outdir = args.out.resolve()
     if not source.is_file() or source.suffix.lower() != ".pdf":
         parser.error(f"Input must be an existing PDF: {source}")
-    if args.chunk_pages < 1 or args.chunk_pages > 1000:
-        parser.error("--chunk-pages must be between 1 and 1000")
+    if args.chunk_pages < 250 or args.chunk_pages > 1000:
+        parser.error("--chunk-pages must be between 250 and 1000")
     if source == outdir or outdir in source.parents:
         parser.error("Output directory must not contain or overwrite the source PDF")
 
     outdir.mkdir(parents=True, exist_ok=True)
     work = outdir / ".chunk_work"
-    chunk_dir = work / "pdf_parts"
     part_root = work / "extracted_parts"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
     part_root.mkdir(parents=True, exist_ok=True)
+    # Older versions generated temporary split PDFs here; they are no longer
+    # part of the pipeline and can safely be removed to reclaim disk space.
+    shutil.rmtree(work / "pdf_parts", ignore_errors=True)
     manifest_path = work / "manifest.json"
 
     source_hash = sha256_file(source)
-    with fitz.open(source) as doc:
-        total_pages = len(doc)
+    # Keep PyMuPDF out of the long-lived coordinator; it is loaded only in this
+    # short-lived page-count helper and in the bounded extraction subprocesses.
+    count_result = subprocess.run(
+        [sys.executable, "-c",
+         "import fitz,sys; d=fitz.open(sys.argv[1]); print(len(d)); d.close()",
+         str(source)],
+        cwd=str(BASE), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if count_result.returncode != 0:
+        raise RuntimeError("Unable to count source PDF pages: " + (count_result.stderr or count_result.stdout)[-2000:])
+    total_pages = int(count_result.stdout.strip().splitlines()[-1])
     if total_pages < 1:
         raise RuntimeError("Input PDF has no pages")
     source_name = args.source_name or source.name
@@ -210,12 +329,28 @@ def main() -> int:
     }
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for key, value in expected.items():
-            if manifest.get(key) != value:
-                raise RuntimeError(
-                    f"Existing manifest differs for {key}; use a fresh output directory "
-                    "to avoid mixing runs"
-                )
+        hard_mismatches = [
+            key for key in ("source_name", "source_sha256", "total_pages")
+            if manifest.get(key) != expected[key]
+        ]
+        if hard_mismatches:
+            raise RuntimeError(
+                "Existing manifest belongs to a different source PDF or page count "
+                f"({', '.join(hard_mismatches)}); use a fresh output directory to avoid mixing source data"
+            )
+        restart_keys = ("chunk_pages", "engine", "chunked_extractor_sha256", "page_extractor_sha256")
+        changed_settings = [key for key in restart_keys if manifest.get(key) != expected[key]]
+        if changed_settings:
+            # Code/chunk-setting changes invalidate partial outputs. Keep the uploaded
+            # source and any completed final artifacts until a complete replacement is
+            # built, but discard only disposable per-chunk work and restart cleanly.
+            print(
+                "Checkpoint was produced by different extraction settings/code "
+                f"({', '.join(changed_settings)}); restarting from the unchanged source PDF."
+            )
+            shutil.rmtree(part_root, ignore_errors=True)
+            manifest = {**expected, "status": "RUNNING", "parts": []}
+            atomic_json(manifest_path, manifest)
     else:
         manifest = {**expected, "status": "RUNNING", "parts": []}
         atomic_json(manifest_path, manifest)
@@ -244,12 +379,11 @@ def main() -> int:
         end = min(start + args.chunk_pages, total_pages)
         number = idx + 1
         stem = f"part_{number:04d}"
-        chunk_pdf = chunk_dir / f"{stem}.pdf"
         chunk_out = part_root / stem
         chunk_out.mkdir(parents=True, exist_ok=True)
-        expected_csv = chunk_out / f"{stem}_cutoffs.csv"
-        expected_json = chunk_out / f"{stem}_cutoffs.json"
-        expected_audit = chunk_out / f"{stem}_page_audit.json"
+        expected_csv = chunk_out / f"{source.stem}_cutoffs.csv"
+        expected_json = chunk_out / f"{source.stem}_cutoffs.json"
+        expected_audit = chunk_out / f"{source.stem}_page_audit.json"
         saved = prior.get(number)
 
         if (saved and saved.get("status") == "COMPLETED"
@@ -261,17 +395,18 @@ def main() -> int:
             continue
 
         write_progress("RUNNING", start + 1, number - 1, f"Extracting pages {start+1}-{end}")
-        print(f"[{number}/{count}] pages {start+1}-{end}: creating bounded PDF part")
-        if not chunk_pdf.exists():
-            with fitz.open(source) as split_source:
-                split_pdf(split_source, chunk_pdf, start, end)
+        print(f"[{number}/{count}] pages {start+1}-{end}: extracting directly from source PDF")
 
         env = os.environ.copy()
         env["CAPFIND_PAGE_OFFSET"] = str(start)
         env["CAPFIND_TOTAL_PAGES"] = str(total_pages)
         env["CAPFIND_CHUNK_INDEX"] = str(number)
         env["CAPFIND_TOTAL_CHUNKS"] = str(count)
-        command = [sys.executable, str(EXTRACTOR), str(chunk_pdf), "--out", str(chunk_out)]
+        command = [
+            sys.executable, str(EXTRACTOR), str(source), "--out", str(chunk_out),
+            "--start-page", str(start + 1), "--end-page", str(end),
+            "--source-name", source_name,
+        ]
         if number > 1:
             previous_context = part_root / f"part_{number - 1:04d}" / "final_context.json"
             if previous_context.is_file():
@@ -311,8 +446,8 @@ def main() -> int:
             print(f"Chunk {number} pages {start+1}-{end} failed after 3 attempts; completed chunks are retained for resume.", file=sys.stderr)
             return (result.returncode if result else 1) or 1
 
-        _, _, _, rows = remap_chunk_artifacts(
-            chunk_out, stem, source_name, start
+        _, _, _, rows = validate_chunk_artifacts(
+            chunk_out, source.stem, source_name, start + 1, end
         )
         part_info = {
             "index": number,
@@ -334,14 +469,12 @@ def main() -> int:
         ]
         manifest["status"] = "RUNNING"
         atomic_json(manifest_path, manifest)
-        if not args.keep_parts:
-            chunk_pdf.unlink(missing_ok=True)
         print(f"    completed: {rows:,} rows")
 
     manifest["parts"] = sorted(parts, key=lambda p: p["index"])
     manifest["status"] = "COMBINING"
     atomic_json(manifest_path, manifest)
-    result = combine_outputs(outdir, source, manifest["parts"], total_pages)
+    result = combine_outputs(outdir, source, manifest["parts"], total_pages, source_hash)
     manifest["status"] = "COMPLETED"
     manifest["result"] = result
     atomic_json(manifest_path, manifest)
