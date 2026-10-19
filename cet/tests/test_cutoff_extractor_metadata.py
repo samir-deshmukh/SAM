@@ -1,4 +1,8 @@
-from scripts.cutoff_extractor import extract_metadata, merge_split_rank_lines
+from scripts.cutoff_extractor import (
+    extract_metadata,
+    merge_split_rank_lines,
+    update_metadata_from_line,
+)
 
 
 def test_split_status_and_home_university_metadata_are_recovered():
@@ -44,6 +48,64 @@ def test_program_code_with_letter_suffix_is_parsed():
     meta = extract_metadata(lines)
     assert meta['program_code'] == '0131310170U'
     assert meta['program_name'] == 'BCA'
+
+
+def test_inline_program_status_and_university_do_not_contaminate_program_name():
+    line = (
+        '0314692010 - Computer Science and Engineering '
+        '(Internet of Things and Cyber Security Including Block Chain Technology) '
+        'Status: Un-Aided Home University : Mumbai University'
+    )
+    meta = {
+        'institution_code': '03146', 'institution_name': 'Example College',
+        'program_code': '', 'program_name': '', 'status': '', 'home_university': '',
+    }
+
+    assert update_metadata_from_line(line, meta) == 'program'
+    assert meta['program_name'] == (
+        'Computer Science and Engineering '
+        '(Internet of Things and Cyber Security Including Block Chain Technology)'
+    )
+    assert meta['status'] == 'Un-Aided'
+    assert meta['home_university'] == 'Mumbai University'
+
+
+def test_wrapped_program_name_and_inline_metadata_are_separated():
+    meta = {
+        'institution_code': '03146', 'institution_name': 'Example College',
+        'program_code': '', 'program_name': '', 'status': '', 'home_university': '',
+    }
+    state = {}
+    assert update_metadata_from_line(
+        '0314692010 - Computer Science and Engineering '
+        '(Internet of Things and Cyber Security Including Block Chain', meta, state
+    ) == 'program'
+    assert update_metadata_from_line(
+        'Technology) Status: Un-Aided Home University : Mumbai University', meta, state
+    ) == 'program_continuation'
+
+    assert meta['program_name'] == (
+        'Computer Science and Engineering '
+        '(Internet of Things and Cyber Security Including Block Chain Technology)'
+    )
+    assert meta['status'] == 'Un-Aided'
+    assert meta['home_university'] == 'Mumbai University'
+
+
+def test_extract_metadata_splits_program_header_metadata():
+    lines = [
+        '03146 - Example College',
+        '0314692010 - Computer Science and Engineering (Internet of Things and Cyber Security Including Block Chain Technology) Status: Un-Aided Home University : Mumbai University',
+    ]
+
+    meta = extract_metadata(lines)
+
+    assert meta['program_name'] == (
+        'Computer Science and Engineering '
+        '(Internet of Things and Cyber Security Including Block Chain Technology)'
+    )
+    assert meta['status'] == 'Un-Aided'
+    assert meta['home_university'] == 'Mumbai University'
 
 
 def test_bare_roman_rank_layout_is_not_promoted_to_stage():

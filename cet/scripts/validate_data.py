@@ -33,6 +33,8 @@ FILENAME_PATTERN = re.compile(
     r'^(?P<family>BCA|BBA|MBA|MCA|BTECH|BE|BARCH|MARCH|BPLAN|MPLAN|BPHARM|MPHARM|PHARMD|ME|LLB3|LLB5|BED|BPED|MED|MPED|HMCT|MHMCT|BDES|MTECH)_(?P<year>\d{2})_C(?P<round>\d)',
     re.IGNORECASE,
 )
+PROGRAM_CODE_PATTERN = re.compile(r"^\d{7,12}[A-Za-z]{0,3}$")
+PROGRAM_METADATA_BLEED_PATTERN = re.compile(r"\b(?:Status\s*:|Home University\s*:)", re.IGNORECASE)
 
 STAGE_MAP = {
     'Stage-I': 'Stage-I', 'Stage I': 'Stage-I',
@@ -126,6 +128,30 @@ def is_extraction_anomaly(row) -> bool:
         or cat_raw in KNOWN_BAD_CATEGORY_VALUES
 
 
+def is_valid_program_identity(row, known_programs: set[str]) -> bool:
+    """Accept new CAP branches when their source program code is trustworthy.
+
+    The alias CSV is a normalization/reference aid, not a closed list of
+    every branch the CET Cell may add each year. A clean program name paired
+    with the official-shaped code and source PDF can be staged as a new
+    program. Reject likely column bleed and malformed/missing identities.
+    """
+    name = str(row.get('program_name', '')).strip()
+    if not name:
+        return False
+    if name in known_programs:
+        return True
+    code = str(row.get('program_code', '')).strip()
+    source_pdf = str(row.get('source_pdf', '')).strip()
+    return bool(
+        PROGRAM_CODE_PATTERN.fullmatch(code)
+        and source_pdf.lower().endswith('.pdf')
+        and len(name) <= 200
+        and re.search(r'[A-Za-z]', name)
+        and not PROGRAM_METADATA_BLEED_PATTERN.search(name)
+    )
+
+
 def parse_category(raw: str):
     """
     'GOPENH'   -> ('OPEN',  False, 'HU')
@@ -195,6 +221,7 @@ def main(raw_dir: str):
     unknown_stages = Counter()
     unknown_sections = Counter()
     unknown_programs = Counter()
+    new_programs = Counter()
     forward_fill_count = 0
     dup_rows = 0
     file_errors = []
@@ -273,9 +300,11 @@ def main(raw_dir: str):
                 unknown_sections[sec] += 1
 
             prog = row['program_name'].strip()
-            if prog and prog not in valid_programs:
+            if prog and not is_valid_program_identity(row, valid_programs):
                 bad_prog += 1
                 unknown_programs[prog] += 1
+            elif prog and prog not in valid_programs:
+                new_programs[prog] += 1
 
             try:
                 float(row['percentage'])
@@ -330,6 +359,7 @@ def main(raw_dir: str):
     report('STAGES', unknown_stages)
     report('SECTIONS', unknown_sections)
     report('PROGRAM NAMES', unknown_programs)
+    report('NEW PROGRAM NAMES (validated by source code)', new_programs)
 
     if file_errors:
         print('\n=== FILE ERRORS ===')
