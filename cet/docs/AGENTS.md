@@ -83,3 +83,16 @@ Before any commit:
 ## Additional Documentation
 - docs/PRD.md, docs/ARCHITECTURE.md, docs/RULES.md,
   docs/DECISIONS.md, docs/TESTING.md
+
+
+## Defend What You Ship — contributor rules
+
+Use `ARCHITECTURE_CURRENT.md` as the current runtime architecture; older Streamlit-era docs are historical. Confirm repository, branch, base commit, and working-tree status before editing, and preserve user changes in an isolated worktree.
+
+Import invariant: preflight → extraction/normalization → validation → staging/review → explicit approval → release commit/publish. Never bypass staging, delete durable staging as a generic retry fix, or silently discard source rows. Tests must use a disposable database through `TEST_DATABASE_URL`, never production `DATABASE_URL`.
+
+For every code change, add or update meaningful comments where behavior or constraints are non-obvious. Explain why a safety guard, retry/idempotency rule, resource bound, or data-integrity invariant exists; do not merely paraphrase the next line.
+
+Before shipping, review the full diff, run relevant tests, review secrets/dependencies/network calls, and record blocked checks honestly. Do not deploy or mutate production data without an explicit release decision. Do not add paid services without authorization.
+
+Read the focused defense docs before changing architecture or import behavior: `HANDOVER.md`, `CONSTRAINTS.md`, `FLOW.md`, `DATA.md`, `THREAT.md`, `FAILURE.md`, `ROLLBACK.md`, `ALTERNATIVES.md`, `ASSUMPTIONS.md`, `DEPENDENCIES.md`, and `DEFENSE.md`.
