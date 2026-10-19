@@ -54,3 +54,10 @@ def test_remap_chunk_artifacts_restores_original_page_numbers(tmp_path: Path):
     assert all(row["source_pdf"] == "original.pdf" for row in rows)
     assert [row["page"] for row in json.loads(json_path.read_text())] == [101, 102]
     assert [row["page"] for row in json.loads(audit_path.read_text())] == [101, 102]
+
+
+def test_backend_enforces_ten_page_cutoff_chunks():
+    processing_source = (
+        Path(__file__).resolve().parents[1] / "backend" / "admin" / "processing.py"
+    ).read_text(encoding="utf-8")
+    assert 'chunk_pages = "10"' in processing_source
