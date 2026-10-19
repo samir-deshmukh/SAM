@@ -27,14 +27,12 @@ def _recover_interrupted_imports():
     """Requeue jobs whose database lease expired; never steal a live worker's job."""
     with connect() as connection:
         rows = connection.execute(
-            "SELECT id,stored_path FROM import_jobs WHERE status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') AND (worker_lease_until IS NULL OR worker_lease_until < CURRENT_TIMESTAMP) ORDER BY id"
+            "SELECT id,stored_path FROM import_jobs WHERE status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') AND (worker_lease_until IS NULL OR worker_lease_until < CURRENT_TIMESTAMP) AND COALESCE(stored_path,'') NOT LIKE 'local://%' ORDER BY id"
         ).fetchall()
         for row in rows:
             job_id = int(row['id'])
             source = str(row['stored_path'] or '')
-            source_exists = source.startswith('s3://') or (
-                not source.startswith('local://') and (BASE / source).is_file()
-            )
+            source_exists = source.startswith('s3://') or (BASE / source).is_file()
             saved = connection.execute(
                 """SELECT
                        EXISTS(SELECT 1 FROM import_staging_records WHERE job_id=? LIMIT 1) AS has_staging,
@@ -1828,7 +1826,7 @@ def runtime_metrics(request: Request):
     with connect() as connection:
         storage = connection.execute('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS bytes FROM import_jobs WHERE source_deleted=FALSE AND stored_path NOT LIKE ?',
                                      ('local://%',)).fetchone()
-        active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP) ORDER BY id DESC LIMIT 1").fetchone()
+        active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE (status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING') OR (status='CANCELLED' AND worker_lease_until > CURRENT_TIMESTAMP)) AND COALESCE(stored_path,'') NOT LIKE 'local://%' ORDER BY id DESC LIMIT 1").fetchone()
         latest_event = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (active['id'],)).fetchone() if active else None
         csv_progress = connection.execute('SELECT status,stage,processed,total,progress,message FROM import_commit_progress WHERE job_id=?', (active['id'],)).fetchone() if active else None
         queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']

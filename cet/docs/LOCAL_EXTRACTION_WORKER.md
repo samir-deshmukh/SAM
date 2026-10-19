@@ -51,6 +51,8 @@ pytesseract is a Python wrapper, not the Tesseract OCR executable. If a PDF cont
 - The original PDF is not uploaded to Render. The extracted CSV and audit summary are uploaded for server-side validation and staging.
 - The local queue and source PDFs are machine-local runtime data and are git-ignored.
 
-## Known integration constraint
+## Course identification
 
-The current server pipeline's supported course-family classifier and validators are BCA, BBA, MBA, and MCA. This worker intentionally follows those existing rules rather than broadening the import scope as part of the extraction migration.
+Course family, academic year, and CAP round are read from the PDF's native text before the filename is used. The identifier samples up to 24 pages so a cover or notice page does not hide the CAP heading. If native text cannot identify the family or year, the local worker uses Tesseract OCR on the first four pages. This supports generic or randomized PDF filenames when the document itself contains a readable course heading. If the document is scanned and Tesseract is unavailable, install the OS package `tesseract-ocr`; the worker reports a clear identification error rather than guessing a course.
+
+The supported course-family list is shared with the import preflight in `backend/admin/pipeline.py`.

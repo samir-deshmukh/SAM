@@ -154,8 +154,10 @@ def _process_job(job_id: int):
         if actual_sha != state["sha256"] or size != state["size_bytes"]:
             raise RuntimeError("The local PDF fingerprint does not match the queued import")
         _, filename_family, filename_year, filename_round, _ = identify(state["filename"])
-        data_type = detect_data_type(pdf_path, state["filename"])
-        pdf_family, pdf_year, pdf_round = extract_pdf_metadata(pdf_path, state["filename"])
+        data_type = detect_data_type(pdf_path, state["filename"], use_ocr=True)
+        pdf_family, pdf_year, pdf_round = extract_pdf_metadata(
+            pdf_path, state["filename"], use_ocr=True
+        )
         # The document's own title and CAP metadata are authoritative. Names
         # are often generic or misleading, so use them only when PDF text did
         # not provide a value (for example, for a scanned document).
@@ -164,14 +166,14 @@ def _process_job(job_id: int):
         round_name = pdf_round or filename_round
         if family not in SUPPORTED_COURSE_FAMILIES or not year:
             raise RuntimeError(
-                "Could not identify the course family or academic year from the PDF text or "
-                "filename. For scanned PDFs, rename the file to include the course and year "
-                "(for example BCA_2025.pdf), then retry."
+                "Could not identify the course family or academic year from the PDF text, "
+                "OCR, or filename. Check that the document contains a readable CAP course "
+                "heading and academic year, then retry."
             )
         if data_type == "CUTOFFS" and round_name not in {"C1", "C2", "C3", "C4"}:
             raise RuntimeError(
-                "Could not identify CAP round C1-C4 from the PDF text or filename. For scanned "
-                "PDFs, include the round in the filename (for example BCA_2025_C1.pdf), then retry."
+                "Could not identify CAP round C1-C4 from the PDF text, OCR, or filename. "
+                "Check that the document contains a readable CAP round heading, then retry."
             )
         _status(state, "EXTRACTING", f"Extracting {data_type} locally · {family} · {year}",
                 data_type=data_type, family=family, year=year, round_name=round_name)
