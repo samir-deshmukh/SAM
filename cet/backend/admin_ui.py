@@ -930,23 +930,28 @@ async function removeJob(id){const job=importJobs.find(x=>Number(x.id)===Number(
 async function retryJob(id){if(!confirm('Retry this failed or cancelled import?'))return;try{const job=importJobs.find(x=>Number(x.id)===Number(id));if(String(job?.stored_path||'').startsWith('local://'))await localWorkerRequest('/jobs/'+id+'/retry',{method:'POST'});else await api('/admin/api/imports/'+id+'/process',{method:'POST',headers:csrfHeaders()});toast('Retry started','ok');await load()}catch(e){toast(e.message,'err')}}
 function renderRuntime(d){const m=d.memory||{},c=d.cpu||{},j=d.active_job;window.activeRuntimeJob=j;document.querySelector('#ramValue').textContent=ramMegabytes(m.used_bytes,m.limit_bytes);document.querySelector('#ramDetail').textContent='';document.querySelector('#cpuValue').textContent=c.percent_of_available_capacity==null?'n/a':c.percent_of_available_capacity+'%';document.querySelector('#cpuDetail').textContent=c.quota_cores?'Quota '+c.quota_cores+' CPU core(s)':'CPU quota not exposed';const empty=document.querySelector('#liveExtractionEmpty'),details=document.querySelector('#liveExtractionDetails'),state=document.querySelector('#liveExtractionState');if(!j){empty.style.display='block';details.style.display='none';empty.textContent='No extraction is currently running.';state.textContent='';return}empty.style.display='none';details.style.display='block';const page=Number(j.page||0),total=Number(j.total_pages||0),chunk=Number(j.chunk_count||0),chunks=Number(j.total_chunks||0),isCsv=String(j.filename||'').toLowerCase().endsWith('.csv');let pct=Number(j.percent||(total?page/total*100:0));document.querySelector('#liveExtractionFile').textContent=(isCsv?'CSV · ':'PDF · ')+(j.filename||'Import #'+j.id);document.querySelector('#liveExtractionStep').textContent=String(j.message||j.status||'Processing').replaceAll('_',' ')+(j.paused_at_checkpoint?' · Paused at safe checkpoint':j.pause_requested?' · Pause requested':'');if(isCsv){const ep=Number(j.event_progress);if(Number.isFinite(ep)&&ep>=0)pct=ep;const processed=Number(j.rows_processed||0),totalRows=Number(j.total_rows||0);document.querySelector('#liveExtractionPages').textContent='Rows: '+processed.toLocaleString()+(totalRows?' / '+totalRows.toLocaleString():' processed');document.querySelector('#liveExtractionChunks').textContent='Stage: '+String(j.progress_stage||j.event_message||j.status||'Validating CSV');}else{document.querySelector('#liveExtractionPages').textContent='Pages: '+(total?page.toLocaleString()+' / '+total.toLocaleString():'Reading PDF / total not available');document.querySelector('#liveExtractionChunks').textContent=j.local_worker?'Source: this PC · local extraction':'Chunks: '+(chunks?chunk.toLocaleString()+' / '+chunks.toLocaleString():'Preparing chunk plan');}document.querySelector('#liveExtractionPercent').textContent=(isCsv&&!(Number(j.event_progress)>=0))?'Stage-based':Math.round(pct)+'%';document.querySelector('#liveExtractionBar').style.width=Math.max(0,Math.min(100,pct))+'%';state.textContent=j.paused_at_checkpoint?'Paused':j.pause_requested?'Pause requested':j.local_worker?'This PC':'Live';}
 function queueStatusDetail(x,s){const j=window.activeRuntimeJob&&Number(window.activeRuntimeJob.id)===Number(x.id)?window.activeRuntimeJob:null;if(s==='FAILED'&&x.error_message)return 'Failed: '+String(x.error_message).slice(0,220);if(['EXTRACTING','NORMALIZING','VALIDATING','COMPARING','QUEUED','PAUSED','RECEIVED','IDENTIFIED'].includes(s)){if(j&&s!=='QUEUED'){if(j.local_worker)return 'This PC · '+String(j.message||j.status||'Processing')+(Number(j.total_pages)>0?' · Page '+(j.page??0)+' / '+j.total_pages:'');if(String(j.filename||'').toLowerCase().endsWith('.csv'))return 'Stage: '+String(j.event_message||j.status||'Validating CSV')+(Number(j.event_progress)>=0?' · '+Number(j.event_progress)+'%':'');return 'Page '+(j.page??'—')+' / '+(j.total_pages??'—')+' · Chunk '+(j.chunk_count??'—')+' / '+(j.total_chunks??'—');}return s==='QUEUED'?'Processing':s==='PAUSED'?'Paused':'Processing'}if(['STAGED','REVIEW_REQUIRED'].includes(s))return 'Staged';if(['COMMITTING','COMMITTED','CANCELLED'].includes(s))return '';if(s==='COMPLETED')return 'Published / verified';return s.replaceAll('_',' ').toLowerCase()}
+let localProgressPollRunning=false;
+async function localProgressRequest(path){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),1800);try{return await localWorkerRequest(path,{signal:controller.signal})}finally{clearTimeout(timer)}}
+async function refreshLocalProgress(jobs,runtime){
+  if(localProgressPollRunning)return;
+  localProgressPollRunning=true;
+  try{
+    const health=await localProgressRequest('/health'),id=Number(health.active_job);
+    const localImport=jobs.find(x=>Number(x.id)===id&&String(x.stored_path||'').startsWith('local://'));
+    if(!id||!localImport)return;
+    const progress=await localProgressRequest('/jobs/'+id),total=Number(progress.total||0),page=Number(progress.page||0);
+    const active={id,filename:localImport.original_filename,status:progress.status,message:progress.message,page,total_pages:total,percent:total?Math.min(100,page/total*100):0,local_worker:true};
+    renderRuntime(Object.assign({},runtime,{active_job:active}));
+  }catch(_){/* Local progress is optional; it must never block the Import Center. */}
+  finally{localProgressPollRunning=false}
+}
 async function load(){
   try{
     const [jobs,runtime]=await Promise.all([api('/admin/api/imports'),api('/admin/api/runtime')]);
     importJobs=jobs;
-    // Render cannot read local:// source files, so its runtime endpoint omits
-    // those jobs. Read progress from the PC worker and merge only its active job
-    // into the runtime card; worker outages must not hide server-side status.
-    let localActive=null;
-    try{
-      const health=await localWorkerRequest('/health'),id=Number(health.active_job);
-      const localImport=jobs.find(x=>Number(x.id)===id&&String(x.stored_path||'').startsWith('local://'));
-      if(id&&localImport){
-        const progress=await localWorkerRequest('/jobs/'+id),total=Number(progress.total||0),page=Number(progress.page||0);
-        localActive={id,filename:localImport.original_filename,status:progress.status,message:progress.message,page,total_pages:total,percent:total?Math.min(100,page/total*100):0,local_worker:true};
-      }
-    }catch(_){/* The server runtime remains usable when the local worker is offline. */}
-    renderRuntime(Object.assign({},runtime,localActive?{active_job:localActive}:{}));
+    // Render the server-backed panel immediately. Local worker requests happen
+    // afterward because Brave can delay localhost access while requesting permission.
+    renderRuntime(runtime);
     document.querySelector('#list').innerHTML=jobs.slice(0,50).map(x=>{
       const s=String(x.status||'').toUpperCase();
       const isLocal=String(x.stored_path||'').startsWith('local://');
@@ -969,6 +974,7 @@ async function load(){
       const statusCell=badge(s==='QUEUED'?'PROCESSING':s)+(detail?'<div class="small muted status-detail">'+esc(detail)+'</div>':'');
       return '<tr><td><b>'+esc(meta||'Awaiting identification')+'</b>'+(sourceLabel?'<div class="small muted import-source-name">'+esc(sourceLabel)+'</div>':'')+'</td><td>'+statusCell+'</td><td>'+fmtTime(x.updated_at||x.created_at)+'</td><td><div class="rowactions">'+controls+'</div></td></tr>';
     }).join('')||'<tr><td colspan="4" class="empty">No imports yet.</td></tr>';
+    void refreshLocalProgress(jobs,runtime);
   }catch(e){toast(e.message,'err')}
 }
 window.refreshAdminData=load;window.__cetAdminRunPoll(load);setInterval(()=>window.__cetAdminRunPoll(load),5000);

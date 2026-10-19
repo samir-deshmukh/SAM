@@ -936,35 +936,6 @@ def _write_commit_progress(job_id: int, status: str, stage: str,
         progress_conn.commit()
 
 
-def _insert_release_items_batched(conn, release_id: int, inserted: list[tuple], batch_size: int = 500) -> None:
-    """Write release history in bounded batches without changing its contents."""
-    for start in range(0, len(inserted), batch_size):
-        batch = inserted[start:start + batch_size]
-        payload = json.dumps([
-            {
-                "table_name": table,
-                "row_id": int(row_id),
-                "operation": "INSERT",
-                "before_json": None,
-                "after_json": json.dumps(after, ensure_ascii=False),
-            }
-            for table, row_id, after in batch
-        ], ensure_ascii=False)
-        result = conn.execute(
-            """INSERT INTO data_release_items
-               (release_id,table_name,row_id,operation,before_json,after_json)
-               SELECT ?, item.table_name, item.row_id, item.operation,
-                      item.before_json, item.after_json
-               FROM jsonb_to_recordset(?) AS item(
-                   table_name TEXT, row_id INTEGER, operation TEXT,
-                   before_json TEXT, after_json TEXT
-               ) RETURNING id""",
-            (release_id, payload),
-        )
-        # Connection.execute consumes the first RETURNING row to preserve its
-        # single-insert lastrowid behavior; drain the rest of this bounded batch.
-        result.fetchall()
-
 def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
     """Atomically promote a clean staged import into production and create a release."""
     job=conn.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone()
@@ -987,10 +958,7 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         inserted=[]
         source_pdf=job["original_filename"]
         staged_rows = _load_staged_rows(conn,job_id,dtype)
-        # Progress is persisted on a separate connection so the UI can poll
-        # during the atomic transaction. Keep it useful without making every
-        # percentage point an extra database transaction.
-        progress_interval = max(100, (total_rows + 19) // 20) if total_rows else 1
+        progress_interval = max(25, total_rows // 100) if total_rows else 1
         processed_rows = 0
         seat_metadata_written = set()
         reference_cache = ({"institutes": set(), "base_categories": set(), "sections": set(), "stages": set(), "program_ids": {}}
@@ -1032,7 +1000,11 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         if not release_row:
             raise RuntimeError("Unable to resolve newly created release id")
         release_id=release_row["id"]
-        _insert_release_items_batched(conn, release_id, inserted)
+        for table,rid,after in inserted:
+            conn.execute("""INSERT INTO data_release_items
+                (release_id,table_name,row_id,operation,before_json,after_json)
+                VALUES (?,?,?,?,?,?)""",
+                (release_id,table,rid,"INSERT",None,json.dumps(after,ensure_ascii=False)))
         event(conn,job_id,"COMMIT",f"Committed {len(inserted)} new production rows",90)
         update_status(conn,job_id,JobStatus.COMMITTING.value,"Production commit completed; release created; publishing is the next phase")
         event(conn,job_id,"RELEASE",f"Release {release_key} committed",100)
