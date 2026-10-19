@@ -35,9 +35,25 @@ def _recover_interrupted_imports():
             source_exists = source.startswith('s3://') or (
                 not source.startswith('local://') and (BASE / source).is_file()
             )
-            connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
-            connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
-            if source_exists:
+            saved = connection.execute(
+                """SELECT
+                       EXISTS(SELECT 1 FROM import_staging_records WHERE job_id=? LIMIT 1) AS has_staging,
+                       EXISTS(SELECT 1 FROM import_results WHERE job_id=? LIMIT 1) AS has_results""",
+                (job_id, job_id),
+            ).fetchone()
+            has_saved_data = bool(saved and (saved.get('has_staging') or saved.get('has_results')))
+
+            # Recovery must never erase staged rows or comparison results.
+            # If any durable output exists, stop for explicit admin review instead
+            # of rerunning extraction over data that may already be valuable.
+            if has_saved_data:
+                connection.execute(
+                    "UPDATE import_jobs SET status='REVIEW_REQUIRED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    ('Worker lease expired; existing staged data/results were preserved. Review this import before retrying.', job_id),
+                )
+                event(connection, job_id, 'RECOVERY_REVIEW_REQUIRED',
+                      'Expired worker lease; staged data/results preserved for admin review', None)
+            elif source_exists:
                 connection.execute(
                     "UPDATE import_jobs SET status='QUEUED',worker_id=NULL,worker_lease_until=NULL,current_page=0,current_chunk=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (job_id,),
@@ -46,9 +62,9 @@ def _recover_interrupted_imports():
             else:
                 connection.execute(
                     "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    ('Worker stopped and the source PDF is missing. Re-upload the original PDF.', job_id),
+                    ('Worker stopped and the source PDF is missing and no staged output exists. Re-upload the original PDF.', job_id),
                 )
-                event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing after worker lease expired; upload again', None)
+                event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing and no staged output exists after worker lease expired; upload again', None)
         connection.commit()
 
 
