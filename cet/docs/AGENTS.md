@@ -1,85 +1,107 @@
-# AGENTS.md
+# CETFind Engineering Instructions
 
-## Project Overview
-CET CAP Decision Support — parses official State CET admission PDFs,
-stores cutoffs in PostgreSQL, serves a Streamlit app for candidates.
+These instructions apply to work under `cet/`. The current implementation and `docs/ARCHITECTURE_CURRENT.md` are the starting references. Older Streamlit-era docs are historical unless code inspection proves a particular detail is still current.
 
-## Architecture Overview
-See ARCHITECTURE.md.
+## Product and architecture
 
-## Repository Structure
-- data/reference/  → whitelists (committed)
-- data/raw/        → source CSVs (gitignored)
-- scripts/         → ETL and validation
-- db/schema_postgres.sql    → database DDL
-- src/cet_cap/     → query layer
-- app/             → Streamlit app
-- docs/            → this and other docs
+CETFind processes official Maharashtra State CET CAP cutoff and seat-matrix source data and presents candidate-facing search, college details, and historical trends.
 
-## Development Commands
-- `python -m venv .venv && source .venv/bin/activate`
-- `pip install -r requirements.txt`
-- `python scripts/validate_data.py data/raw/`
-- `python scripts/ingest.py data/raw/`
-- `streamlit run app/Home.py`
+Current intended runtime:
+- `site/`: static HTML/CSS/JavaScript frontend and derived public artifacts.
+- `backend/main.py`: FastAPI application and background import queue lifecycle.
+- `backend/api.py`: public candidate API and query orchestration.
+- `backend/admin/`: authentication, import processing/state, staging, review/approval, publishing, rollback, resolver and admin UI.
+- `scripts/`: PDF/CSV extraction, normalization, validation, ingestion and derived-data exports.
+- `db/schema_postgres.sql` and admin schema/migration code: database structure.
+- `data/reference/`: canonical whitelists and mappings.
+- `tests/`: unit, fixture, API and extraction regression tests.
+- `docs/`: product, architecture, data decisions, testing and operational documentation.
 
-## Build Commands
-None — pure Python.
+PostgreSQL is the authoritative application database. Do not introduce SQLite fallback or a second authoritative data store. The public browser must not receive the master cutoff/seat dataset; generated artifacts are derived from approved data.
 
-## Testing Commands
-- `pytest`
+## Read before changing a subsystem
 
-## Code Conventions
-- Python 3.11+, PEP8, 4-space indent.
-- Type hints on all functions.
-- One module = one responsibility.
-- No global mutable state.
+- Architecture or deployment: `docs/ARCHITECTURE_CURRENT.md`, `docs/REBUILD_PLAN.md`.
+- Import/extraction/validation/staging: `docs/REPOSITORY_INVENTORY.md`, `docs/DECISIONS.md`, `docs/TESTING.md`, then the implementation and tests.
+- Database/schema: `db/schema_postgres.sql`, admin schema, migration code, and the corresponding data-flow code.
+- Publishing/rollback: inspect the complete approval, publishing and rollback transaction path before editing.
+- Security: inspect the relevant authentication, authorization, CSRF, CORS, rate-limiting and file-handling guards before changing behavior.
 
-## Architecture Conventions
-- ETL: extract → staging → validate → load.
-- UI: queries only through src/cet_cap/queries.py.
-- Never bypass SQLAlchemy for writes.
+If documentation conflicts with current code, do not silently pick whichever is convenient. Verify behavior, update the relevant documentation in a separate logical commit, and record unresolved uncertainty.
 
-## Database Conventions
-- All schema changes via db/schema_postgres.sql and Alembic (later).
-- Never change schema by hand in production.
-- Always parameterise SQL.
+## Development and tests
 
-## API Conventions
-No external API.
+Use Python 3.13 for CI parity unless a dependency or deployment constraint is deliberately changed and documented.
 
-## Security Requirements
-- Never commit secrets.
-- Sentry send_default_pii=False.
-- Never log user percentile/category/section.
-- Parameterised SQL only.
+From the `cet/` directory:
 
-## Dependency Guidelines
-- Pin exact versions in requirements.txt.
-- No new dependency without a reason in DECISIONS.md.
+```bash
+python -m venv .venv
+# Activate .venv for the current shell.
+python -m pip install -r requirements-dev.txt
+python -m pytest -o addopts='' -q
+```
 
-## Testing Requirements
-- Unit tests for parse_category.
-- Integration test for ingest on a small fixture CSV.
-- No test may touch the production DB.
+The default `pytest.ini` adds coverage options; the explicit CI command above overrides those options. Do not claim tests pass unless they were actually run and the result was observed. If required services are unavailable, state the exact skipped/unrun checks rather than substituting production.
 
-## Verification Checklist
-Before any commit:
-- validate_data.py exits 0.
-- pytest passes.
-- No secrets in git status.
-- No raw data files staged.
+Never point tests, scripts, migrations, benchmarks or local development at the production `DATABASE_URL`. Use a dedicated disposable test database or synthetic fixtures. A local test must fail safely when its required test database is missing; it must not fall back to production.
 
-## Forbidden Changes
-- Do not rename files in data/reference/.
-- Do not modify db/schema_postgres.sql without updating ARCHITECTURE.md.
-- Do not remove indexes.
-- Do not add a category/program/section value to a whitelist
-  without first inspecting its source rows (institute name, rank,
-  percentile) to confirm it is real data and not an extraction
-  artifact — see docs/DECISIONS.md for the standard this project
-  now holds itself to.
+## Code conventions
 
-## Additional Documentation
-- docs/PRD.md, docs/ARCHITECTURE.md, docs/RULES.md,
-  docs/DECISIONS.md, docs/TESTING.md
+- Use type hints and keep modules focused on one responsibility.
+- Parameterize SQL. Prefer explicit SQLAlchemy binds and preserve existing database semantics.
+- Do not silently swallow exceptions. Report actionable context without leaking secrets or sensitive candidate values.
+- Add regression tests for bug fixes and tests for each non-trivial parser/normalization rule.
+- Comments must explain non-obvious invariants, safety guards, resource bounds, idempotency, retries, recovery, or compatibility decisions. Do not add comments that merely restate syntax.
+- Keep dependencies pinned or bounded deliberately; justify dependency changes in `docs/DECISIONS.md`.
+- Do not perform unrelated formatting or refactoring in a bug-fix commit.
+
+## Import and data-integrity invariants
+
+- Preserve the sequence: preflight/security checks → extraction/normalization → validation → staging/review → explicit approval → production commit → publication/verification.
+- Extraction and staging must not mutate production fact tables.
+- A restart must never imply approval.
+- Never silently drop records. Reconcile input records into accepted, quarantined/rejected, or explicitly unresolved outcomes.
+- Preserve source PDF, source page, file fingerprint and other available provenance through extraction and staging.
+- Retried work must not duplicate rows or mix outputs from different source files/manifests.
+- Approval must reject validation findings unless an explicitly reviewed, narrowly scoped repair path is applicable.
+- Rollback must affect only rows attributable to the target release.
+- Do not change category/program/section whitelists without inspecting representative source rows and adding regression coverage. Extraction artifacts must not be accepted as real data.
+
+## Reliability and performance
+
+- Large PDFs are a resource-risk. Bound memory, page batches, DB batches, CPU concurrency, subprocess duration and temporary disk use where applicable.
+- A page-count chunk limit alone does not prove bounded memory: inspect buffers, DataFrames, sets, JSON/audit accumulation, subprocesses and intermediate copies.
+- Preserve page coverage, row reconciliation and resumability when optimizing.
+- Measure peak memory, elapsed time, pages/chunks processed, and accepted/quarantined row counts using safe representative fixtures.
+- Keep long-running processing off the HTTP request path when feasible and preserve durable job state/leases.
+- Never weaken validation or discard data to improve throughput.
+
+## Security and privacy
+
+- Never commit secrets, credentials, private source PDFs, raw datasets, or generated master data.
+- Use parameterized SQL and validate external inputs.
+- Preserve authentication/authorization, secure cookies, CSRF protections, CORS restrictions, rate limits and security headers unless a reviewed change proves a safer replacement.
+- Never log credentials or sensitive candidate filter values.
+- Do not expose private import artifacts or master data through public static paths.
+- Do not test production capacity by bypassing production rate limits or altering production configuration.
+
+## Git, commits, and releases
+
+- Work on the isolated rebuild branch unless explicitly instructed otherwise; do not commit directly to `main`.
+- Make one logical, reviewable change per commit. Do not accumulate unrelated changes.
+- Before each change, inspect relevant implementation and tests. Add/update tests, run the focused suite, inspect the diff, and commit only the verified scope.
+- Use a descriptive commit message. Record the commit, tests, result, and remaining risk in `docs/CHANGELOG_ENGINEERING.md`.
+- If tests fail, stop and diagnose or revert the isolated change before continuing.
+- Do not force-push or rewrite history.
+- A commit is not deployment approval. No production deploy, production data mutation, schema migration on production, or infrastructure change without explicit release approval.
+- Prefer free/open-source solutions. Do not introduce paid services or paid add-ons without explicit approval.
+
+## Before every commit
+
+- Confirm the diff contains only the intended logical change.
+- Run focused regression tests and relevant broader tests, or explicitly record why they could not run.
+- Check for secrets, credentials, raw source data and generated master datasets.
+- Verify no production database or deployment was touched.
+- Update documentation if behavior, architecture, operational steps, or known risks changed.
+- Record the change and test outcome in the engineering changelog.
