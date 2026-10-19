@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session,hash_password
 from .admin.network import client_ip
-from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file
+from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file,SUPPORTED_COURSE_FAMILIES
 from .admin.source_storage import store_source_pdf, materialize_source, delete_source, storage_backend, StorageNotConfigured
 from .admin.processing import process_import,approve_import,rollback_release,purge_rolled_back_release,revalidate_legacy_mh_staging
 from .admin.publishing import publish_release
@@ -946,7 +946,7 @@ def derived_data_source_coverage(request: Request):
 
 
 LOCAL_ARTIFACT_MAX_BYTES = 150 * 1024 * 1024
-LOCAL_WORKER_FAMILIES = {'BCA', 'BBA', 'MBA', 'MCA'}
+LOCAL_WORKER_FAMILIES = SUPPORTED_COURSE_FAMILIES
 LOCAL_WORKER_ROUNDS = {'C1', 'C2', 'C3', 'C4'}
 
 
@@ -1451,7 +1451,7 @@ def upload_csv(request: Request, background_tasks: BackgroundTasks, file: Upload
     if not name.lower().endswith('.csv'): raise HTTPException(400,'Only .csv files are accepted in CSV Import')
     data_type = str(data_type or '').strip().upper(); family = str(course_family or '').strip().upper()
     if data_type not in {'CUTOFFS','SEATS'}: raise HTTPException(400,'Choose Cutoff data or Seat matrix data')
-    if family not in {'BCA','BBA','MBA','MCA','BE','BTECH','BARCH','MARCH','BPLAN','MPLAN','BPHARM','MPHARM','PHARMD','ME','LLB3','LLB5','BED','BPED','MED','MPED','HMCT','MHMCT','BDES','MTECH'}: raise HTTPException(400,'Unsupported course family')
+    if family not in SUPPORTED_COURSE_FAMILIES: raise HTTPException(400,'Unsupported course family')
     if year < 2000 or year > 2100: raise HTTPException(400,'Academic year must be a four-digit year')
     round_name = str(round_name or '').strip().upper()
     if data_type == 'CUTOFFS' and round_name not in {'C1','C2','C3','C4'}: raise HTTPException(400,'Select CAP cutoff round C1, C2, C3 or C4')
