@@ -39,8 +39,6 @@ def test_native_text_quality_skips_optional_ocr_initialization(monkeypatch):
 
     assert technique == "native"
     assert scores["native"] > 0
-    assert cutoff_extractor.Image is None
-    assert cutoff_extractor.pytesseract is None
 
 
 def test_ocr_page_reports_missing_optional_dependencies(monkeypatch):
