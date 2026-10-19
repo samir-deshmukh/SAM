@@ -66,6 +66,13 @@ The current `docs/ARCHITECTURE_CURRENT.md` describes the static frontend + FastA
 ### R8 — Test configuration and CI differ
 `pytest.ini` adds coverage instrumentation and a 30% coverage threshold. The inspected GitHub Actions workflow runs `python -m pytest -o addopts='' -q`, overriding configured addopts, and its push branches are `main` and `security-hardening`; pull requests target `main`. The new rebuild branch will not run that workflow on ordinary pushes unless configuration is deliberately changed. Evaluate whether CI should run coverage and how to gate the rebuild branch without accidentally broadening unrelated workflow triggers.
 
+
+### R9 — Cutoff comparison multiplies in-memory representations
+Further inspection of `_compare_cutoffs` confirms that it loads the entire normalized cutoff CSV into a pandas DataFrame, loads matching existing production rows into a Python set, derives a second identity-to-values structure, and builds a set of staged keys. This is a strong memory-risk candidate for large imports because several structures can scale with the total record count. The comparison's exact-key, changed-key, and within-stage duplicate semantics must be preserved by any rewrite. Profile realistic row counts and memory before changing the algorithm.
+
+### R10 — Approval helper materializes all staged rows
+The helper `_load_staged_rows` calls `fetchall()` for all staged records for a job/result type. Inspect all callers and approval transaction logic to determine whether large imports create another full in-memory copy at commit time. If bounded iteration is introduced, preserve transaction consistency and ensure a partial approval cannot be mistaken for a completed release.
+
 ## 4. Files inspected in this pass
 
 - `cet/README.md`
