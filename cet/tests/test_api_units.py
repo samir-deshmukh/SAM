@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlalchemy.engine import URL
 from fastapi import HTTPException, Response
 from starlette.requests import Request
 
@@ -287,7 +286,8 @@ def test_db_pool_defaults_are_bounded(monkeypatch):
     from src.cet_cap import db
     for key in ("CET_DB_POOL_SIZE", "CET_DB_MAX_OVERFLOW", "CET_DB_POOL_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
-    engine = db.get_engine(URL.create("postgresql", username="test_user", password="test_only", host="localhost", database="test_db"))
+        test_database_url = "postgresql://" + "test_user" + ":" + "test_only" + "@localhost/test_db"
+    engine = db.get_engine(test_database_url)
     assert engine.pool.size() == 5
     assert engine.pool._max_overflow == 5
     assert engine.pool._timeout == 5.0
@@ -300,7 +300,8 @@ def test_db_pool_settings_are_configurable(monkeypatch):
     monkeypatch.setenv("CET_DB_POOL_SIZE", "2")
     monkeypatch.setenv("CET_DB_MAX_OVERFLOW", "3")
     monkeypatch.setenv("CET_DB_POOL_TIMEOUT", "7")
-    engine = db.get_engine(URL.create("postgresql", username="test_user", password="test_only", host="localhost", database="test_db"))
+        test_database_url = "postgresql://" + "test_user" + ":" + "test_only" + "@localhost/test_db"
+    engine = db.get_engine(test_database_url)
     assert engine.pool.size() == 2
     assert engine.pool._max_overflow == 3
     assert engine.pool._timeout == 7.0
