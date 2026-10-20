@@ -974,6 +974,22 @@ LOCAL_WORKER_FAMILIES = SUPPORTED_COURSE_FAMILIES
 LOCAL_WORKER_ROUNDS = {'C1', 'C2', 'C3', 'C4'}
 
 
+def _local_import_artifact_path(job_id: int, data_type: str) -> Path:
+    suffix = '_cutoffs.csv' if str(data_type).upper() == 'CUTOFFS' else '_seats_long.csv'
+    artifact_dir = BASE / 'data' / 'local_import_artifacts' / f'job_{int(job_id)}'
+    canonical = artifact_dir / f'job_{int(job_id)}{suffix}'
+    if canonical.is_file():
+        return canonical
+    # Older worker versions used a user-supplied PDF stem. Find that legacy
+    # artifact by a fixed suffix inside the job-scoped directory; never build a
+    # server filesystem path from the original filename.
+    try:
+        legacy = sorted(path for path in artifact_dir.glob(f'*{suffix}') if path.is_file())
+    except OSError:
+        legacy = []
+    return legacy[0] if len(legacy) == 1 else canonical
+
+
 def _local_worker_token(request: Request, job_id: int):
     """Validate a one-job capability token without exposing it via admin APIs."""
     header = (request.headers.get('authorization') or '').strip()
@@ -1491,8 +1507,7 @@ def revalidate_local_import(request: Request, job_id: int, background_tasks: Bac
         receipt = connection.execute('SELECT artifact_sha256 FROM local_worker_receipts WHERE job_id=?', (job_id,)).fetchone()
         if not receipt or not job['data_type'] or not job['course_family'] or not job['year']:
             raise HTTPException(409, 'No complete extracted artifact is available; rerun local extraction instead')
-        suffix = '_cutoffs.csv' if job['data_type'] == 'CUTOFFS' else '_seats_long.csv'
-        artifact = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}' / f"{Path(job['original_filename']).stem}{suffix}"
+        artifact = _local_import_artifact_path(job_id, job['data_type'])
         if not artifact.is_file():
             raise HTTPException(404, 'Saved extracted artifact is missing; rerun local extraction')
         connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
@@ -1558,11 +1573,10 @@ def receive_local_artifact(
         if data_type == 'CUTOFFS'
         else {'source_pdf', 'page', 'institution_code', 'choice_code', 'allocation_type', 'category', 'seats'}
     )
-    suffix = '_cutoffs.csv' if data_type == 'CUTOFFS' else '_seats_long.csv'
-    stem = Path(str(job['original_filename'])).stem
     artifact_dir = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}'
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = artifact_dir / f'{stem}{suffix}'
+    suffix = '_cutoffs.csv' if data_type == 'CUTOFFS' else '_seats_long.csv'
+    artifact_path = artifact_dir / f'job_{job_id}{suffix}'
     temp_path = artifact_dir / (artifact_path.name + '.upload')
     total = 0
     digest = hashlib.sha256()
@@ -2044,8 +2058,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
             )
             artifact = None
             if reusable_artifact:
-                suffix = '_cutoffs.csv' if job['data_type'] == 'CUTOFFS' else '_seats_long.csv'
-                artifact = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}' / f"{Path(job['original_filename']).stem}{suffix}"
+                artifact = _local_import_artifact_path(job_id, job['data_type'])
                 reusable_artifact = artifact.is_file()
             connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))

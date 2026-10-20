@@ -42,3 +42,15 @@ def test_remote_worker_claim_requires_shared_secret(monkeypatch, configured, aut
         main._remote_worker_auth(request)
 
     assert error.value.status_code == expected_status
+
+
+def test_server_artifact_paths_use_job_ids_not_uploaded_filenames(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'BASE', tmp_path)
+    artifact_dir = tmp_path / 'data' / 'local_import_artifacts' / 'job_42'
+    artifact_dir.mkdir(parents=True)
+    canonical = artifact_dir / 'job_42_cutoffs.csv'
+
+    assert main._local_import_artifact_path(42, 'CUTOFFS') == canonical
+
+    canonical.write_text('source_pdf,page\n')
+    assert main._local_import_artifact_path(42, 'CUTOFFS') == canonical
