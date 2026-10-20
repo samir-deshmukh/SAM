@@ -27,7 +27,7 @@ def _recover_interrupted_imports():
     """Requeue jobs whose database lease expired; never steal a live worker's job."""
     with connect() as connection:
         rows = connection.execute(
-            "SELECT id,stored_path FROM import_jobs WHERE status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') AND (worker_lease_until IS NULL OR worker_lease_until < CURRENT_TIMESTAMP) AND COALESCE(stored_path,'') NOT LIKE 'local://%' ORDER BY id"
+            "SELECT j.id,j.stored_path,j.original_filename,j.data_type,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id) AS local_artifact_received FROM import_jobs j LEFT JOIN import_worker_leases l ON l.job_id=j.id WHERE (j.status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') OR (j.status='PAUSED' AND (COALESCE(j.stored_path,'') LIKE 'local://%' OR EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id)))) AND (COALESCE(l.lease_until,j.worker_lease_until,(SELECT MAX(e.created_at)+INTERVAL '2 minutes' FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT')) IS NULL OR COALESCE(l.lease_until,j.worker_lease_until,(SELECT MAX(e.created_at)+INTERVAL '2 minutes' FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT')) < CURRENT_TIMESTAMP) ORDER BY j.id FOR UPDATE OF j SKIP LOCKED"
         ).fetchall()
         for row in rows:
             job_id = int(row['id'])
@@ -57,12 +57,25 @@ def _recover_interrupted_imports():
                     (job_id,),
                 )
                 event(connection, job_id, 'RECOVERED', 'Worker lease expired; requeued from retained source PDF', 0)
+            elif source.startswith('local://'):
+                if row.get('local_artifact_received'):
+                    error_message = 'Server staging stopped before completion. The local worker retains the extracted CSV; retry from Import Center to resend it.'
+                    recovery_message = 'Server staging stopped; retry will resend the retained local CSV artifact'
+                else:
+                    error_message = 'Local extraction stopped without returning a CSV. Retry this import to extract the PDF again on this PC.'
+                    recovery_message = 'Local extraction heartbeat expired; retry extraction from the PDF on this PC'
+                connection.execute(
+                    "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (error_message, job_id),
+                )
+                event(connection, job_id, 'RECOVERY_FAILED', recovery_message, None)
             else:
                 connection.execute(
                     "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     ('Worker stopped and the source PDF is missing and no staged output exists. Re-upload the original PDF.', job_id),
                 )
                 event(connection, job_id, 'RECOVERY_FAILED', 'Source PDF missing and no staged output exists after worker lease expired; upload again', None)
+            connection.execute('DELETE FROM import_worker_leases WHERE job_id=?', (job_id,))
         connection.commit()
 
 
@@ -72,7 +85,7 @@ def _heartbeat_import_job(job_id: int, stop: threading.Event):
         try:
             with connect() as connection:
                 connection.execute(
-                    "UPDATE import_jobs SET worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes' WHERE id=? AND worker_id=? AND status IN ('EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING','CANCELLED')",
+                    "UPDATE import_worker_leases SET lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND worker_id=?",
                     (job_id, _WORKER_ID),
                 )
                 connection.commit()
@@ -105,6 +118,10 @@ def _import_queue_loop():
                     ).rowcount
                     if claimed:
                         job_id = candidate
+                        connection.execute(
+                            "INSERT INTO import_worker_leases(job_id,worker_id,lease_until) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '2 minutes') ON CONFLICT(job_id) DO UPDATE SET worker_id=EXCLUDED.worker_id,lease_until=EXCLUDED.lease_until,updated_at=CURRENT_TIMESTAMP",
+                            (job_id, _WORKER_ID),
+                        )
                         event(connection, job_id, 'WORKER_CLAIMED',
                               'Server worker claimed the queued canonical CSV' if is_csv_job else 'Server worker claimed the queued PDF',
                               25 if is_csv_job else 42)
@@ -138,6 +155,10 @@ def _import_queue_loop():
             if job_id is not None:
                 try:
                     with connect() as connection:
+                        connection.execute(
+                            'DELETE FROM import_worker_leases WHERE job_id=? AND worker_id=?',
+                            (job_id, _WORKER_ID),
+                        )
                         connection.execute(
                             'UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=? AND worker_id=?',
                             (job_id, _WORKER_ID),
@@ -981,36 +1002,121 @@ def _local_worker_fail(job_id: int, message: str):
         connection.commit()
 
 
+def _reserve_local_artifact_worker(connection, job_id: int) -> None:
+    """Make CSV staging visible and protected before returning the upload response."""
+    connection.execute(
+        "UPDATE import_jobs SET worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (_WORKER_ID, job_id),
+    )
+    connection.execute(
+        "INSERT INTO import_worker_leases(job_id,worker_id,lease_until) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '2 minutes') ON CONFLICT(job_id) DO UPDATE SET worker_id=EXCLUDED.worker_id,lease_until=EXCLUDED.lease_until,updated_at=CURRENT_TIMESTAMP",
+        (job_id, _WORKER_ID),
+    )
+
+
 def _process_local_import_background(job_id: int, artifact_path: str,
                                      data_type: str, family: str, year: int,
                                      round_name: str | None, summary: dict):
     """Validate/stage a locally extracted artifact using the existing pipeline."""
-    with _IMPORT_PROCESS_LOCK:
+    worker_id = _WORKER_ID
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = None
+    try:
         with connect() as connection:
             job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
-            if not job:
+            if not job or job['status'] not in {'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING'}:
                 return
-            try:
-                result = process_import(
-                    connection, job_id, Path(job['original_filename']),
-                    data_type=data_type, family=family, year=year,
-                    round_name=round_name or '', claimed=True,
-                    pre_extracted_path=Path(artifact_path), extraction_summary=summary,
-                )
-                if not result.get('ok'):
-                    log.error('Local-artifact import failed: job_id=%s error=%s', job_id, result.get('error'))
-                if result.get('status') not in {'FAILED', 'CANCELLED'}:
-                    connection.execute('DELETE FROM local_worker_tokens WHERE job_id=?', (job_id,))
+            claimed = connection.execute(
+                "UPDATE import_jobs SET worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING')",
+                (worker_id, job_id),
+            ).rowcount
+            if not claimed:
+                return
+            connection.execute(
+                "INSERT INTO import_worker_leases(job_id,worker_id,lease_until) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '2 minutes') ON CONFLICT(job_id) DO UPDATE SET worker_id=EXCLUDED.worker_id,lease_until=EXCLUDED.lease_until,updated_at=CURRENT_TIMESTAMP",
+                (job_id, worker_id),
+            )
+            connection.commit()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_import_job, args=(job_id, heartbeat_stop),
+            daemon=True, name=f'import-heartbeat-local-artifact-{job_id}',
+        )
+        heartbeat_thread.start()
+        _write_local_artifact_progress(
+            job_id, 0, 0, stage='Waiting for server processing slot',
+            message='Extracted CSV received; waiting for validation and staging to begin.',
+        )
+        with _IMPORT_PROCESS_LOCK:
+            with connect() as connection:
+                job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+                if not job or job['status'] not in {'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING'}:
+                    return
+                try:
+                    result = process_import(
+                        connection, job_id, Path(job['original_filename']),
+                        data_type=data_type, family=family, year=year,
+                        round_name=round_name or '', claimed=True,
+                        pre_extracted_path=Path(artifact_path), extraction_summary=summary,
+                        worker_id=worker_id,
+                        progress_callback=lambda processed, total: _write_local_artifact_progress(
+                            job_id, processed, total,
+                        ),
+                    )
+                    if not result.get('ok'):
+                        log.error('Local-artifact import failed: job_id=%s error=%s', job_id, result.get('error'))
+                    if result.get('status') == JobStatus.CANCELLED.value:
+                        _write_local_artifact_progress(job_id, 0, 0, status='CANCELLED', stage='Cancelled',
+                                                       message='Local artifact staging was cancelled.')
+                    elif result.get('ok'):
+                        _write_local_artifact_progress(job_id, 1, 1, status='COMPLETED', stage='Staging complete',
+                                                       message='Validation and staging finished.')
+                    else:
+                        _write_local_artifact_progress(job_id, 0, 0, status='FAILED', stage='Staging failed',
+                                                       message=str(result.get('error') or 'Local artifact staging failed.'))
+                    if result.get('status') not in {'FAILED', 'CANCELLED'}:
+                        connection.execute('DELETE FROM local_worker_tokens WHERE job_id=?', (job_id,))
+                        connection.commit()
+                except Exception as exc:
+                    log.exception('Unexpected local-artifact processing failure: job_id=%s', job_id)
+                    connection.rollback()
+                    connection.execute(
+                        "UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (str(exc)[:4000], job_id),
+                    )
+                    event(connection, job_id, 'ERROR', str(exc)[:1000], None)
                     connection.commit()
-            except Exception as exc:
-                log.exception('Unexpected local-artifact processing failure: job_id=%s', job_id)
-                connection.rollback()
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=2)
+        try:
+            with connect() as connection:
                 connection.execute(
-                    "UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (str(exc)[:4000], job_id),
+                    'DELETE FROM import_worker_leases WHERE job_id=? AND worker_id=?',
+                    (job_id, worker_id),
                 )
-                event(connection, job_id, 'ERROR', str(exc)[:1000], None)
+                connection.execute(
+                    'UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=? AND worker_id=?',
+                    (job_id, worker_id),
+                )
                 connection.commit()
+        except Exception:
+            log.exception('Could not release local artifact worker lease: job_id=%s', job_id)
+
+
+def _write_local_artifact_progress(job_id: int, processed: int, total: int, *,
+                                   status: str = 'RUNNING', stage: str = 'Staging extracted rows',
+                                   message: str | None = None) -> None:
+    from .admin.processing import _write_commit_progress
+    total = max(0, int(total))
+    processed = max(0, int(processed))
+    try:
+        _write_commit_progress(
+            job_id, status, stage, processed, total,
+            message or f'Staging {processed:,} of {total:,} extracted rows',
+        )
+    except Exception:
+        log.exception('Could not update local artifact staging progress: job_id=%s', job_id)
 
 
 @app.post('/admin/api/local-imports')
@@ -1169,8 +1275,13 @@ def revalidate_local_import(request: Request, job_id: int, background_tasks: Bac
             "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (job_id,),
         )
+        _reserve_local_artifact_worker(connection, job_id)
         event(connection, job_id, 'LOCAL_REVALIDATE', 'Revalidating the previously extracted CSV artifact', 60)
         connection.commit()
+    _write_local_artifact_progress(
+        job_id, 0, 0, stage='Preparing saved CSV',
+        message='Saved extracted CSV received; preparing validation and staging.',
+    )
     background_tasks.add_task(
         _process_local_import_background, job_id, str(artifact),
         job['data_type'], job['course_family'], int(job['year']), job['round'] or '',
@@ -1269,9 +1380,14 @@ def receive_local_artifact(
             'INSERT INTO local_worker_receipts(job_id,artifact_sha256) VALUES (?,?)',
             (job_id, digest.hexdigest()),
         )
+        _reserve_local_artifact_worker(connection, job_id)
         event(connection, job_id, 'LOCAL_ARTIFACT_RECEIVED',
               f'Received {total:,} bytes of locally extracted {data_type.lower()} records', 60)
         connection.commit()
+    _write_local_artifact_progress(
+        job_id, 0, 0, stage='Preparing extracted CSV',
+        message='Extracted CSV received; preparing validation and staging.',
+    )
     background_tasks.add_task(
         _process_local_import_background, job_id, str(artifact_path),
         data_type, family, year, round_name, summary,
@@ -1637,7 +1753,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
         job = connection.execute(
-            'SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?',
+            'SELECT *, COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=import_jobs.id),(worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive FROM import_jobs WHERE id=?',
             (job_id,),
         ).fetchone()
         if not job:
@@ -1724,10 +1840,10 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
 def pause_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        job = connection.execute('SELECT status,stored_path FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT status,stored_path,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id) AS local_artifact_received FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
-        if str(job['stored_path'] or '').startswith('local://'):
+        if str(job['stored_path'] or '').startswith('local://') and not job.get('local_artifact_received'):
             raise HTTPException(409, 'This legacy import belongs to the local worker')
         if job['status'] not in {'QUEUED', 'EXTRACTING', 'NORMALIZING', 'VALIDATING', 'COMPARING', 'PAUSED'}:
             raise HTTPException(409, f'Import cannot be paused while in {job["status"]}')
@@ -1744,13 +1860,15 @@ def pause_import(request: Request, job_id: int):
 def resume_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        job = connection.execute('SELECT status,stored_path,original_filename,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT status,stored_path,original_filename,worker_id,COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=import_jobs.id),(worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id) AS local_artifact_received FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
-        if str(job['stored_path'] or '').startswith('local://'):
+        if str(job['stored_path'] or '').startswith('local://') and not job.get('local_artifact_received'):
             raise HTTPException(409, 'This legacy import belongs to the local worker')
         if job['status'] not in {'EXTRACTING', 'PAUSED'}:
             raise HTTPException(409, f'Only an extracting import can be resumed (current status: {job["status"]})')
+        if job.get('local_artifact_received') and not job.get('worker_alive'):
+            raise HTTPException(409, 'Server staging stopped. Retry from Import Center to resend the CSV retained on this PC.')
         control = BASE / 'data' / 'import_staging' / f'job_{job_id}'
         (control / 'PAUSE').unlink(missing_ok=True)
         is_csv = str(job.get('original_filename') or '').lower().endswith('.csv')
@@ -1826,7 +1944,8 @@ def runtime_metrics(request: Request):
     with connect() as connection:
         storage = connection.execute('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS bytes FROM import_jobs WHERE source_deleted=FALSE AND stored_path NOT LIKE ?',
                                      ('local://%',)).fetchone()
-        active = connection.execute("SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,(worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE (status='PAUSED' OR (status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING','CANCELLED') AND worker_lease_until > CURRENT_TIMESTAMP)) AND COALESCE(stored_path,'') NOT LIKE 'local://%' ORDER BY id DESC LIMIT 1").fetchone()
+        lease_live = "COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=import_jobs.id),(worker_lease_until > CURRENT_TIMESTAMP))"
+        active = connection.execute(f"SELECT id,status,original_filename,data_type,size_bytes,current_page,total_pages,current_chunk,total_chunks,worker_id,{lease_live} AS worker_alive,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id) AS local_artifact_received FROM import_jobs WHERE ((status='PAUSED' AND (COALESCE(stored_path,'') NOT LIKE 'local://%' OR ({lease_live} AND EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id)))) OR (status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING','CANCELLED') AND {lease_live})) AND (COALESCE(stored_path,'') NOT LIKE 'local://%' OR EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id)) ORDER BY id DESC LIMIT 1").fetchone()
         latest_event = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (active['id'],)).fetchone() if active else None
         csv_progress = connection.execute('SELECT status,stage,processed,total,progress,message FROM import_commit_progress WHERE job_id=?', (active['id'],)).fetchone() if active else None
         queued_count = connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE status='QUEUED'").fetchone()['n']
@@ -1854,9 +1973,10 @@ def runtime_metrics(request: Request):
         job_progress = {
             'id': active['id'], 'status': active['status'], 'filename': active['original_filename'],
             'data_type': active['data_type'] or 'CUTOFFS',
-            'event_progress': (csv_progress['progress'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['progress'] if latest_event else None)),
-            'event_message': (csv_progress['message'] if str(active['original_filename'] or '').lower().endswith('.csv') and csv_progress else (latest_event['message'] if latest_event else '')),
-            'progress_stage': csv_progress['stage'] if csv_progress else '',
+            'event_progress': (csv_progress['progress'] if (str(active['original_filename'] or '').lower().endswith('.csv') or active.get('local_artifact_received')) and csv_progress else (latest_event['progress'] if latest_event else None)),
+            'event_message': (csv_progress['message'] if (str(active['original_filename'] or '').lower().endswith('.csv') or active.get('local_artifact_received')) and csv_progress else (latest_event['message'] if latest_event else '')),
+            'progress_stage': csv_progress['stage'] if csv_progress and (str(active['original_filename'] or '').lower().endswith('.csv') or active.get('local_artifact_received')) else '',
+            'local_artifact_received': bool(active.get('local_artifact_received')),
             'rows_processed': int(csv_progress['processed'] or 0) if csv_progress else 0,
             'total_rows': int(csv_progress['total'] or 0) if csv_progress else 0,
             'page': current_page, 'total_pages': total_pages,
@@ -1887,7 +2007,7 @@ def runtime_metrics(request: Request):
 def cancel_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
-        job = connection.execute('SELECT * FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT *,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=import_jobs.id) AS local_artifact_received FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
         active = {
@@ -1896,7 +2016,7 @@ def cancel_import(request: Request, job_id: int):
             JobStatus.EXTRACTING.value, JobStatus.NORMALIZING.value,
             JobStatus.VALIDATING.value, JobStatus.COMPARING.value,
         }
-        if str(job['stored_path'] or '').startswith('local://'):
+        if str(job['stored_path'] or '').startswith('local://') and not job.get('local_artifact_received'):
             raise HTTPException(409, 'Use the local worker controls in Import Center to pause or cancel this extraction.')
         if job['status'] not in active:
             raise HTTPException(409, f"Import cannot be stopped while in {job['status']}")
@@ -1917,7 +2037,7 @@ def delete_import_source(request: Request, job_id: int):
     user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as connection:
         job = connection.execute(
-            'SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?',
+            'SELECT *, COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=import_jobs.id),(worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive FROM import_jobs WHERE id=?',
             (job_id,),
         ).fetchone()
         if not job:
@@ -1954,7 +2074,7 @@ def delete_import_source(request: Request, job_id: int):
 def delete_import(request: Request, job_id: int):
     u = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
     with connect() as c:
-        job = c.execute('SELECT *, (worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = c.execute('SELECT *, COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=import_jobs.id),(worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
         if _ACTIVE_IMPORT_JOB_ID == job_id or job.get('worker_alive') or job['status'] in {'QUEUED','EXTRACTING','PAUSED','NORMALIZING','VALIDATING','COMPARING'}:
@@ -2029,7 +2149,9 @@ def imports(request: Request):
         return [
             dict(row)
             for row in connection.execute(
-                "SELECT j.*, (j.worker_lease_until > CURRENT_TIMESTAMP) AS worker_alive, "
+                "SELECT j.*, COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=j.id),(j.worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive, "
+                "EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id) AS local_artifact_received, "
+                "EXISTS(SELECT 1 FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT' AND e.created_at > CURRENT_TIMESTAMP-INTERVAL '2 minutes') AS local_worker_alive, "
                 "COALESCE((SELECT progress FROM import_events e WHERE e.job_id=j.id ORDER BY e.id DESC LIMIT 1),0) AS progress "
                 "FROM import_jobs j ORDER BY j.id DESC LIMIT 100"
             )

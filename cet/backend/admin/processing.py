@@ -131,20 +131,32 @@ def _csv_control_checkpoint(conn, job_id: int) -> None:
 
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                valid: bool, validation_message: str, required_fields=(),
-               progress_callback=None) -> tuple[int, int]:
+               progress_callback=None, expected_rows: int | None = None) -> tuple[int, int]:
     rows = 0
     quarantined = 0
     total_rows = 0
     if progress_callback:
-        # Count CSV records with the CSV parser (not physical lines, since quoted
-        # fields may contain newlines) so progress remains accurate for large files.
-        with path.open("r", encoding="utf-8-sig", newline="") as count_file:
-            total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
+        try:
+            expected = int(expected_rows or 0)
+        except (TypeError, ValueError):
+            expected = 0
+        if expected > 0:
+            # Extractors already report the number of emitted records. Reuse
+            # that count instead of parsing a large CSV just to calculate progress.
+            total_rows = expected
+        else:
+            # For uploaded CSVs without an extractor summary, count records
+            # (not physical lines, since quoted fields can contain newlines).
+            with path.open("r", encoding="utf-8-sig", newline="") as count_file:
+                total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
         try:
             progress_callback(0, total_rows)
         except Exception:
             pass
-    progress_interval = max(250, total_rows // 100) if total_rows else 250
+    # Progress is persisted using a separate database connection. Keep updates
+    # coarse enough that telemetry does not become a material part of staging
+    # time for large PDFs.
+    progress_interval = max(5000, total_rows // 20) if total_rows else 5000
     # The trusted validator treats these columns as block-level merged cells:
     # a blank value means "same as the preceding row". Apply the same
     # normalization before staging so continuation pages do not become false
@@ -158,6 +170,22 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
         from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
         seat_valid_categories, seat_lane_map, seat_alias_map = load_whitelists(BASE / "data" / "reference")
     last_values = {field: "" for field in fill_columns}
+    batch = []
+
+    def flush_batch():
+        if not batch:
+            return
+        values_per_row = 8
+        placeholders = ",".join(["(" + ",".join(["?"] * values_per_row) + ")"] * len(batch))
+        params = tuple(value for record in batch for value in record)
+        conn.execute_many_values(
+            "INSERT INTO import_staging_records "
+            "(job_id,result_type,source_file,source_page,raw_json,normalized_json,validation_status,validation_message) "
+            f"VALUES {placeholders}",
+            params,
+        )
+        batch.clear()
+
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             raw = dict(row)
@@ -205,21 +233,18 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
             else:
                 row_status = "VALID"
                 message = None
-            conn.execute(
-                """INSERT INTO import_staging_records
-                   (job_id,result_type,source_file,source_page,raw_json,
-                    normalized_json,validation_status,validation_message)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (job_id, result_type, path.name, _page_from(normalized),
-                 json.dumps(raw, ensure_ascii=False),
-                 json.dumps(normalized, ensure_ascii=False),
-                 row_status,
-                 message)
-            )
+            batch.append((job_id, result_type, path.name, _page_from(normalized),
+                          json.dumps(raw, ensure_ascii=False),
+                          json.dumps(normalized, ensure_ascii=False),
+                          row_status, message))
             rows += 1
+            if len(batch) >= 1000:
+                _csv_control_checkpoint(conn, job_id)
+                flush_batch()
             if progress_callback and (rows % progress_interval == 0 or (total_rows and rows == total_rows)):
+                _csv_control_checkpoint(conn, job_id)
+                flush_batch()
                 try:
-                    _csv_control_checkpoint(conn, job_id)
                     progress_callback(rows, total_rows)
                 except ImportCancelled:
                     raise
@@ -227,6 +252,16 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                     # Telemetry must never interrupt the import itself.
                     pass
     _csv_control_checkpoint(conn, job_id)
+    flush_batch()
+    if progress_callback:
+        try:
+            # The emitted CSV can differ slightly from the extractor's
+            # estimate after safe cleaning. Publish the exact final count.
+            progress_callback(rows, rows)
+        except ImportCancelled:
+            raise
+        except Exception:
+            pass
     return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
@@ -246,11 +281,6 @@ def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
 
 
 def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) -> dict:
-    import pandas as pd
-    sys.path.insert(0, str(SCRIPTS))
-    from validate_data import SECTION_MAP, STAGE_MAP, parse_category, forward_fill_block_columns
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-    forward_fill_block_columns(df)
     existing = set()
     q = conn.execute("""SELECT c.institution_code,p.program_name_raw,c.base_category,
                                c.is_ladies,c.section_code,c.stage_code,c.rank_number,c.rank_suffix,c.percentile
@@ -271,53 +301,71 @@ def _compare_cutoffs(conn, path: Path, family: str, year: int, round_name: str) 
     changed_examples = []
     duplicate_in_stage = 0
     uncomparable_rows = 0
-    for _, row in df.iterrows():
-        # A malformed category has already been quarantined by _stage_csv.
-        # Do not let one bad extracted row abort comparison of a large PDF.
-        try:
-            base, ladies, section, stage = _resolve_cutoff_dimensions(row)
-        except (ValueError, KeyError):
-            uncomparable_rows += 1
-            continue
-        rs = row["rank_suffix"].strip() or None
-        rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
-        pct = float(row["percentage"]) if row["percentage"].strip() else None
-        key = (row["institution_code"].strip(), row["program_name"].strip(), base,
-               int(bool(ladies)), section, stage, rn, rs, pct)
-        identity = key[:6]
-        if key in seen:
-            duplicate_in_stage += 1
-        seen.add(key)
-        if key in existing:
-            duplicates += 1
-        elif identity in identity_existing:
-            changed += 1
-            if len(changed_examples) < 100:
-                changed_examples.append({"identity": identity, "new": key[6:]})
-        else:
-            new_rows += 1
-    return {"rows_compared": len(df), "rows_uncomparable_quarantined": uncomparable_rows,
+    fill_columns = (
+        "institution_code", "institution_name", "program_code",
+        "program_name", "status", "section",
+    )
+    last_values = {field: "" for field in fill_columns}
+    rows_compared = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            row = dict(raw_row)
+            rows_compared += 1
+            for field in fill_columns:
+                value = str(row.get(field, "")).strip()
+                if value:
+                    last_values[field] = value
+                elif last_values[field]:
+                    row[field] = last_values[field]
+            # A malformed category has already been quarantined by _stage_csv.
+            # Do not let one bad extracted row abort comparison of a large PDF.
+            try:
+                base, ladies, section, stage = _resolve_cutoff_dimensions(row)
+            except (ValueError, KeyError):
+                uncomparable_rows += 1
+                continue
+            rs = row["rank_suffix"].strip() or None
+            rn = int(row["rank_number"]) if row["rank_number"].strip().isdigit() else None
+            pct = float(row["percentage"]) if row["percentage"].strip() else None
+            key = (row["institution_code"].strip(), row["program_name"].strip(), base,
+                   int(bool(ladies)), section, stage, rn, rs, pct)
+            identity = key[:6]
+            if key in seen:
+                duplicate_in_stage += 1
+            seen.add(key)
+            if key in existing:
+                duplicates += 1
+            elif identity in identity_existing:
+                changed += 1
+                if len(changed_examples) < 100:
+                    changed_examples.append({"identity": identity, "new": key[6:]})
+            else:
+                new_rows += 1
+    return {"rows_compared": rows_compared, "rows_uncomparable_quarantined": uncomparable_rows,
             "already_present_exact_key": duplicates, "new_candidates": new_rows,
             "changed_candidates": changed, "duplicate_in_staged_input": duplicate_in_stage,
             "changed_examples": changed_examples}
 
 def _compare_seats(conn, path: Path, family: str, year: int) -> dict:
-    import pandas as pd
     from scripts.ingest_seats import load_whitelists
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     valid_cats, lane_map, alias_map = load_whitelists(BASE / "data" / "reference")
     existing = set(tuple(r) for r in conn.execute(
         """SELECT institution_code,choice_code,allocation_lane,raw_category,raw_gender
            FROM seats WHERE capture_year=? AND program_family=?""", (year,family)))
     duplicates = 0
-    for _, row in df.iterrows():
-        cat = row["category"].strip()
-        base = alias_map.get(cat, cat)
-        lane = lane_map.get(row["allocation_type"].strip(), row["allocation_type"].strip())
-        key=(row["institution_code"].strip(),row["choice_code"].strip(),lane,cat,row.get("gender","").strip())
-        if key in existing: duplicates += 1
-    return {"rows_compared":len(df),"already_present_exact_key":duplicates,
-            "new_candidates":len(df)-duplicates}
+    rows_compared = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            rows_compared += 1
+            cat = row["category"].strip()
+            lane = lane_map.get(row["allocation_type"].strip(), row["allocation_type"].strip())
+            key = (row["institution_code"].strip(), row["choice_code"].strip(), lane,
+                   cat, row.get("gender", "").strip())
+            if key in existing:
+                duplicates += 1
+    return {"rows_compared": rows_compared, "already_present_exact_key": duplicates,
+            "new_candidates": rows_compared - duplicates}
 
 def process_import(conn, job_id: int, pdf_path: Path, *,
                    data_type: str, family: str, year: int, round_name: str,
@@ -439,6 +487,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 conn, job_id, "CUTOFFS", canonical, valid, validation,
                 ("institution_code", "program_name", "category", "percentage"),
                 progress_callback=progress_callback,
+                expected_rows=summary.get("merged_records"),
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
@@ -541,6 +590,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 conn, job_id, "SEATS", canonical, valid, validation,
                 ("institution_code", "choice_code", "allocation_type", "category", "seats"),
                 progress_callback=progress_callback,
+                expected_rows=summary.get("seat_rows_extracted"),
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)

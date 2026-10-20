@@ -162,6 +162,12 @@ class Connection:
                 inserted_id = row[0]
         return Result(result, inserted_id)
 
+    def execute_many_values(self, sql: str, params=()):
+        """Execute one explicitly multi-row SQL statement without RETURNING ids."""
+        converted, values = _convert_positional(sql, params)
+        result = self._conn.execute(text(converted), values)
+        return Result(result)
+
     def executescript(self, sql: str):
         # PostgreSQL accepts the schema statements individually; comments and
         # blank statements are harmless after splitting on semicolons here.

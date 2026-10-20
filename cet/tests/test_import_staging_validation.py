@@ -8,6 +8,10 @@ class FakeConnection:
     def __init__(self):
         self.rows = []
 
+    def execute_many_values(self, query, values):
+        assert "INSERT INTO import_staging_records" in query
+        self.rows.extend(tuple(values[index:index + 8]) for index in range(0, len(values), 8))
+
     def execute(self, query, values):
         if "INSERT INTO import_staging_records" in query:
             self.rows.append(values)

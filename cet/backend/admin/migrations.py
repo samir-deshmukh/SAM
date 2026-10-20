@@ -23,6 +23,13 @@ def ensure_part4_schema():
         )""")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS worker_lease_until TIMESTAMPTZ")
+        c.execute("""CREATE TABLE IF NOT EXISTS import_worker_leases (
+            job_id INTEGER PRIMARY KEY REFERENCES import_jobs(id) ON DELETE CASCADE,
+            worker_id TEXT NOT NULL,
+            lease_until TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_import_worker_leases_expiry ON import_worker_leases(lease_until)")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER NOT NULL DEFAULT 0")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS total_pages INTEGER NOT NULL DEFAULT 0")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_chunk INTEGER NOT NULL DEFAULT 0")
