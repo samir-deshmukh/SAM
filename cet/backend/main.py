@@ -27,7 +27,7 @@ def _recover_interrupted_imports():
     """Requeue jobs whose database lease expired; never steal a live worker's job."""
     with connect() as connection:
         rows = connection.execute(
-            "SELECT j.id,j.stored_path,j.original_filename,j.data_type FROM import_jobs j LEFT JOIN import_worker_leases l ON l.job_id=j.id WHERE (j.status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') OR (j.status='PAUSED' AND EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id))) AND (COALESCE(l.lease_until,j.worker_lease_until) IS NULL OR COALESCE(l.lease_until,j.worker_lease_until) < CURRENT_TIMESTAMP) AND (COALESCE(j.stored_path,'') NOT LIKE 'local://%' OR EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id)) ORDER BY j.id FOR UPDATE OF j SKIP LOCKED"
+            "SELECT j.id,j.stored_path,j.original_filename,j.data_type,EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id) AS local_artifact_received FROM import_jobs j LEFT JOIN import_worker_leases l ON l.job_id=j.id WHERE (j.status IN ('EXTRACTING','NORMALIZING','VALIDATING','COMPARING') OR (j.status='PAUSED' AND (COALESCE(j.stored_path,'') LIKE 'local://%' OR EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id)))) AND (COALESCE(l.lease_until,j.worker_lease_until,(SELECT MAX(e.created_at)+INTERVAL '2 minutes' FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT')) IS NULL OR COALESCE(l.lease_until,j.worker_lease_until,(SELECT MAX(e.created_at)+INTERVAL '2 minutes' FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT')) < CURRENT_TIMESTAMP) ORDER BY j.id FOR UPDATE OF j SKIP LOCKED"
         ).fetchall()
         for row in rows:
             job_id = int(row['id'])
@@ -58,12 +58,17 @@ def _recover_interrupted_imports():
                 )
                 event(connection, job_id, 'RECOVERED', 'Worker lease expired; requeued from retained source PDF', 0)
             elif source.startswith('local://'):
+                if row.get('local_artifact_received'):
+                    error_message = 'Server staging stopped before completion. The local worker retains the extracted CSV; retry from Import Center to resend it.'
+                    recovery_message = 'Server staging stopped; retry will resend the retained local CSV artifact'
+                else:
+                    error_message = 'Local extraction stopped without returning a CSV. Retry this import to extract the PDF again on this PC.'
+                    recovery_message = 'Local extraction heartbeat expired; retry extraction from the PDF on this PC'
                 connection.execute(
                     "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    ('Server staging stopped before completion. The local worker retains the extracted CSV; retry from Import Center to resend it.', job_id),
+                    (error_message, job_id),
                 )
-                event(connection, job_id, 'RECOVERY_FAILED',
-                      'Server staging stopped; retry will resend the retained local CSV artifact', None)
+                event(connection, job_id, 'RECOVERY_FAILED', recovery_message, None)
             else:
                 connection.execute(
                     "UPDATE import_jobs SET status='FAILED',worker_id=NULL,worker_lease_until=NULL,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -2146,6 +2151,7 @@ def imports(request: Request):
             for row in connection.execute(
                 "SELECT j.*, COALESCE((SELECT l.lease_until > CURRENT_TIMESTAMP FROM import_worker_leases l WHERE l.job_id=j.id),(j.worker_lease_until > CURRENT_TIMESTAMP)) AS worker_alive, "
                 "EXISTS(SELECT 1 FROM local_worker_receipts r WHERE r.job_id=j.id) AS local_artifact_received, "
+                "EXISTS(SELECT 1 FROM import_events e WHERE e.job_id=j.id AND e.event_type='LOCAL_EXTRACT' AND e.created_at > CURRENT_TIMESTAMP-INTERVAL '2 minutes') AS local_worker_alive, "
                 "COALESCE((SELECT progress FROM import_events e WHERE e.job_id=j.id ORDER BY e.id DESC LIMIT 1),0) AS progress "
                 "FROM import_jobs j ORDER BY j.id DESC LIMIT 100"
             )

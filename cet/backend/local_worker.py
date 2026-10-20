@@ -148,8 +148,16 @@ def _process_job(job_id: int):
         pdf_path = folder / "source.pdf"
     control = folder / "control"
     control.mkdir(exist_ok=True)
+    outdir = folder / "artifacts"
+    outdir.mkdir(exist_ok=True)
+    monitor_stop = threading.Event()
+    monitor = threading.Thread(target=_monitor_job_progress,
+                               args=(state, control, monitor_stop), daemon=True,
+                               name=f"capfind-progress-{job_id}")
     try:
         _status(state, "EXTRACTING", "Checking the PDF on this PC")
+        os.environ["CAPFIND_JOB_CONTROL_DIR"] = str(control)
+        monitor.start()
         size, actual_sha = security_check(pdf_path)
         if actual_sha != state["sha256"] or size != state["size_bytes"]:
             raise RuntimeError("The local PDF fingerprint does not match the queued import")
@@ -177,45 +185,15 @@ def _process_job(job_id: int):
             )
         _status(state, "EXTRACTING", f"Extracting {data_type} locally · {family} · {year}",
                 data_type=data_type, family=family, year=year, round_name=round_name)
-        os.environ["CAPFIND_JOB_CONTROL_DIR"] = str(control)
-        outdir = folder / "artifacts"
-        outdir.mkdir(exist_ok=True)
-        monitor_stop = threading.Event()
-        def monitor_progress():
-            last_sent = 0.0
-            while not monitor_stop.wait(1.0):
-                progress_path = control / "progress.json"
-                if not progress_path.exists():
-                    continue
-                try:
-                    progress = json.loads(progress_path.read_text(encoding="utf-8"))
-                    state.update(page=int(progress.get("page", 0)), total=int(progress.get("total", 0)))
-                    if time.time() - last_sent >= 3:
-                        _progress(state, state["page"], state["total"], str(progress.get("state", "RUNNING")))
-                        last_sent = time.time()
-                    if progress.get("state") == "PAUSED":
-                        state.update(status="PAUSED", message=f"Paused at page {state['page']} of {state['total']}")
-                    elif state.get("status") == "PAUSED":
-                        state.update(status="EXTRACTING", message=f"Resumed at page {state['page']} of {state['total']}")
-                    _write_state(job_id, state)
-                except Exception:
-                    # Progress reporting is best-effort; it must never interrupt parsing.
-                    pass
-        monitor = threading.Thread(target=monitor_progress, daemon=True, name=f"capfind-progress-{job_id}")
-        monitor.start()
-        try:
-            if data_type == "CUTOFFS":
-                summary = extract_cutoffs(pdf_path=pdf_path, outdir=outdir, dpi=300, lang="eng", use_camelot=False)
-                artifact = outdir / f"{pdf_path.stem}_cutoffs.csv"
-                artifact_type = "CUTOFFS"
-            else:
-                summary = extract_seats(pdf_path=pdf_path, outdir=outdir, dpi=200, lang="eng",
-                                        use_ocr=True, force_ocr=False, write_json=False)
-                artifact = outdir / f"{pdf_path.stem}_seats_long.csv"
-                artifact_type = "SEATS"
-        finally:
-            monitor_stop.set()
-            monitor.join(timeout=2)
+        if data_type == "CUTOFFS":
+            summary = extract_cutoffs(pdf_path=pdf_path, outdir=outdir, dpi=300, lang="eng", use_camelot=False)
+            artifact = outdir / f"{pdf_path.stem}_cutoffs.csv"
+            artifact_type = "CUTOFFS"
+        else:
+            summary = extract_seats(pdf_path=pdf_path, outdir=outdir, dpi=200, lang="eng",
+                                    use_ocr=True, force_ocr=False, write_json=False)
+            artifact = outdir / f"{pdf_path.stem}_seats_long.csv"
+            artifact_type = "SEATS"
         if not artifact.is_file() or artifact.stat().st_size <= 0:
             raise RuntimeError("The extractor did not produce a non-empty CSV artifact")
         if artifact.stat().st_size > MAX_ARTIFACT_BYTES:
@@ -251,9 +229,36 @@ def _process_job(job_id: int):
             except Exception:
                 pass
     finally:
+        monitor_stop.set()
+        if monitor.ident is not None:
+            monitor.join(timeout=2)
         os.environ.pop("CAPFIND_JOB_CONTROL_DIR", None)
         with LOCK:
             ACTIVE_JOB = None
+
+
+def _monitor_job_progress(state: dict, control: Path, stop: threading.Event) -> None:
+    """Keep the server informed even while PDF metadata/OCR has no page file yet."""
+    last_sent = 0.0
+    while not stop.wait(1.0):
+        progress_path = control / "progress.json"
+        try:
+            worker_state = "PAUSED" if state.get("status") == "PAUSED" else "RUNNING"
+            if progress_path.exists():
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                state.update(page=int(progress.get("page", 0)), total=int(progress.get("total", 0)))
+                worker_state = str(progress.get("state", "RUNNING"))
+                if worker_state == "PAUSED":
+                    state.update(status="PAUSED", message=f"Paused at page {state['page']} of {state['total']}")
+                elif state.get("status") == "PAUSED":
+                    state.update(status="EXTRACTING", message=f"Resumed at page {state['page']} of {state['total']}")
+            if time.time() - last_sent >= 15:
+                _progress(state, int(state.get("page") or 0), int(state.get("total") or 0), worker_state)
+                last_sent = time.time()
+            _write_state(int(state["job_id"]), state)
+        except Exception:
+            # Progress reporting is best-effort; it must never interrupt parsing.
+            pass
 
 
 def _recover_jobs():
