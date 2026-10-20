@@ -52,6 +52,61 @@ def test_infer_city_from_name_does_not_match_short_substrings():
     assert infer_city_from_name("Vidarbha College", ["Nagpur", "Vidarbha"]) is None
 
 
+def test_gemini_search_uses_cap_code_and_grounded_location_requirements(monkeypatch):
+    import io
+    import json
+    from backend.admin import resolver
+
+    captured = {}
+    response_data = {
+        "candidates": [{"content": {"parts": [{"text": json.dumps({
+            "official_url": None, "city": "Pune", "address": None,
+            "confidence": 0.8, "evidence_urls": ["https://example.edu/contact"],
+            "note": "Official contact page",
+        })}]}}]
+    }
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response(json.dumps(response_data).encode())
+
+    monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
+    monkeypatch.setattr(resolver.urllib.request, "urlopen", fake_urlopen)
+    result, _ = resolver.gemini_find(
+        "Example College of Engineering", institution_code="1234567"
+    )
+
+    prompt = captured["payload"]["contents"][0]["parts"][0]["text"]
+    assert "1234567" in prompt
+    assert "Do not infer a city from the college name alone" in prompt
+    assert result["city"] == "Pune"
+
+
+def test_institute_resolution_treats_blank_metadata_as_missing():
+    from backend.admin.resolver import _update_institute_resolution
+
+    class FakeConnection:
+        statement = None
+
+        def execute(self, query, params):
+            self.statement = (query, params)
+
+    conn = FakeConnection()
+    _update_institute_resolution(conn, "1234", city="Pune", source="gemini_google_search")
+
+    query, params = conn.statement
+    assert "NULLIF(TRIM(city),'')" in query
+    assert params[:2] == ("Pune", "Pune")
+
+
 def test_import_name_recovery_uses_real_staged_names_not_codes():
     import json
     from backend.admin.resolver import _import_names_for_codes

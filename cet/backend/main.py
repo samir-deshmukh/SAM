@@ -17,7 +17,7 @@ from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
-                              resolve_import_job, valid_url)
+                              resolve_import_job, valid_url, _update_institute_resolution)
 from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -2428,12 +2428,53 @@ async def resolver_find(request: Request):
             row=c.execute('SELECT * FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
             if not row: continue
             r = dict(row)
+            if r.get('status') == 'VERIFIED' and not str(r.get('city') or '').strip() and not force_research:
+                try:
+                    location_ai, _ = gemini_find(r['institution_name'], None, institution_code=code)
+                    city = str(location_ai.get('city') or '').strip() or None
+                    address = str(location_ai.get('address') or '').strip() or None
+                    evidence = location_ai.get('evidence_urls')
+                    note_parts = [str(location_ai.get('note') or '').strip()]
+                    if isinstance(evidence, list) and evidence:
+                        note_parts.append('Location evidence: ' + ', '.join(str(url) for url in evidence[:4]))
+                    note = ' '.join(x for x in note_parts if x)
+                    c.execute(
+                        """UPDATE college_website_resolver
+                           SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,
+                               address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,
+                               verification_note=CASE WHEN ?<>'' THEN ? ELSE verification_note END,
+                               last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                           WHERE institution_code=? AND status='VERIFIED'""",
+                        (city, address, note, note, code),
+                    )
+                    _update_institute_resolution(
+                        c, code, city=city, address=address,
+                        source='gemini_google_search',
+                    )
+                    results.append({
+                        'institution_code': code,
+                        'institution_name': r['institution_name'],
+                        'city': city or r.get('city'),
+                        'website': r.get('website'),
+                        'status': 'VERIFIED',
+                        'note': note or 'Verified website preserved; location research completed.',
+                    })
+                except Exception as exc:
+                    results.append({
+                        'institution_code': code,
+                        'institution_name': r['institution_name'],
+                        'city': r.get('city'),
+                        'website': r.get('website'),
+                        'status': 'VERIFIED',
+                        'note': f'Verified website preserved; location lookup failed: {str(exc)[:300]}',
+                    })
+                continue
             candidate = r.get('website')
             v = ({'ok': False, 'url': None, 'note': 'Forced AI re-research after website rejection'}
                  if force_research else (verify_url(candidate, r['institution_name']) if candidate else {'ok': False}))
             if v.get('ok'):
                 try:
-                    ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'))
+                    ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'), code)
                     ai_conf = float(ai_check.get('confidence') or 0)
                     ai_url = ai_check.get('official_url')
                 except Exception as exc:
@@ -2473,7 +2514,7 @@ async def resolver_find(request: Request):
                 ai_check = {}
                 if v.get('ok'):
                     try:
-                        ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city)
+                        ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city, code)
                     except Exception as exc:
                         ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
                                     'note': f'AI verification failed: {exc}'}
@@ -2482,7 +2523,7 @@ async def resolver_find(request: Request):
                 verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
                     not ai_url or _same_site(v.get('url'), ai_url)
                 )
-                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') in (408, 425, 429) or (v.get('status') and v.get('status') >= 500) or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
+                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') is not None or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
                 note = ' '.join(x for x in (
                     (ai.get('note') or ''),
                     (ai_check.get('note') or ''),

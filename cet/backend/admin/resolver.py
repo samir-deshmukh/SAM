@@ -125,19 +125,23 @@ def _same_site(a, b):
         return False
 
 
-def gemini_verify_candidate(college_name, candidate_url, city=None):
+def gemini_verify_candidate(college_name, candidate_url, city=None, institution_code=None):
     """Use Gemini + Google Search to verify that a working URL belongs to the college."""
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
     location = f", {city}" if city else ""
+    code_hint = f"\nMaharashtra CAP institute code: {institution_code}" if institution_code else ""
     prompt = f'''Verify whether this URL is the official website of the exact Indian college/institution.
 College: {college_name}{location}
+{code_hint}
 Candidate URL: {candidate_url}
 Search the web and inspect the candidate identity. Do not accept directories, social profiles,
 ranking sites, admission aggregators, unrelated universities, or another institution with a
-similar name. Return ONLY JSON with keys verified, confidence, official_url, city, address, note.
-Set verified=true only when the candidate clearly belongs to the named institution.'''
+similar name. Use the CAP institute code to distinguish similarly named colleges. Return ONLY JSON
+with keys verified, confidence, official_url, city, address, evidence_urls, note. Evidence URLs must
+be actual official or government source pages that support the decision. Set verified=true only when
+the candidate clearly belongs to the named institution.'''
     payload = {"contents":[{"parts":[{"text":prompt}]}],"tools":[{"google_search":{}}]}
     req = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe='')}:generateContent",
@@ -364,16 +368,16 @@ def _update_institute_resolution(conn, code, city=None, address=None, website=No
         return
     conn.execute(
         """UPDATE institutes
-           SET city=COALESCE(?,city),
-               address=COALESCE(?,address),
-               website=COALESCE(?,website),
+           SET city=CASE WHEN ? IS NOT NULL THEN ? ELSE NULLIF(TRIM(city),'') END,
+               address=CASE WHEN ? IS NOT NULL THEN ? ELSE NULLIF(TRIM(address),'') END,
+               website=CASE WHEN ? IS NOT NULL THEN ? ELSE NULLIF(TRIM(website),'') END,
                city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END,
                address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END,
                website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END,
                verified_at=CURRENT_TIMESTAMP
            WHERE institution_code=?""",
         (
-            city, address, website,
+            city, city, address, address, website, website,
             city, source, address, source, website, source, code,
         ),
     )
@@ -443,7 +447,10 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
                 dict(r) for r in c.execute(
                     "SELECT institution_code,institution_name,city,website,status,source "
                     "FROM college_website_resolver ORDER BY institution_name"
-                ) if r['institution_code'] in codes and r['status'] not in {'VERIFIED', 'NEEDS_REVIEW'}
+                ) if r['institution_code'] in codes and (
+                    r['status'] not in {'VERIFIED', 'NEEDS_REVIEW'}
+                    or (r['status'] == 'VERIFIED' and not str(r.get('city') or '').strip())
+                )
             ]
 
     if limit is not None:
@@ -458,6 +465,40 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
         code = row['institution_code']
         name = row['institution_name']
         city = row.get('city')
+        if row.get('status') == 'VERIFIED' and not str(city or '').strip():
+            # A verified website does not imply that its location is known.
+            # Enrich the missing location without re-verifying or overwriting
+            # the trusted website/status/source fields.
+            searched += 1
+            try:
+                location_ai, _ = gemini_find(name, None, institution_code=code)
+                found_city = str(location_ai.get('city') or '').strip() or None
+                found_address = str(location_ai.get('address') or '').strip() or None
+                evidence = location_ai.get('evidence_urls')
+                note_parts = [str(location_ai.get('note') or '').strip()]
+                if isinstance(evidence, list) and evidence:
+                    note_parts.append('Location evidence: ' + ', '.join(str(url) for url in evidence[:4]))
+                with connect() as c:
+                    c.execute(
+                        """UPDATE college_website_resolver
+                           SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,
+                               address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,
+                               verification_note=CASE WHEN ?<>'' THEN ? ELSE verification_note END,
+                               last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                           WHERE institution_code=? AND status='VERIFIED'""",
+                        (found_city, found_address, ' '.join(x for x in note_parts if x),
+                         ' '.join(x for x in note_parts if x), code),
+                    )
+                    _update_institute_resolution(
+                        c, code, city=found_city, address=found_address,
+                        source='gemini_google_search',
+                    )
+                    c.commit()
+                if found_city or found_address:
+                    resolved += 1
+            except Exception as exc:
+                log.warning("AI location lookup failed for verified college %s: %s", code, exc)
+            continue
         candidate_urls = []
         if row.get('website'):
             candidate_urls.append((row['website'], row.get('source') or 'existing_data'))
@@ -477,7 +518,7 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             # A reachable URL is only a candidate. Gemini + Google Search must
             # confirm the site's identity before we mark it VERIFIED.
             try:
-                ai_check = gemini_verify_candidate(name, result['url'], city)
+                ai_check = gemini_verify_candidate(name, result['url'], city, code)
                 ai_conf = float(ai_check.get('confidence') or 0)
                 ai_url = ai_check.get('official_url')
                 if bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
@@ -566,7 +607,7 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             ai_check = {}
             if result.get('ok'):
                 try:
-                    ai_check = gemini_verify_candidate(name, result['url'], found_city)
+                    ai_check = gemini_verify_candidate(name, result['url'], found_city, code)
                 except Exception as exc:
                     ai_check = {'verified': False, 'confidence': 0, 'note': f'AI verification failed: {exc}'}
             ai_conf = float(ai_check.get('confidence') or 0)
@@ -578,7 +619,7 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
                 and (not ai_url or _same_site(result['url'], ai_url))
             ):
                 status = 'VERIFIED'
-            elif result.get('ok') or result.get('status') in (408, 425, 429) or (result.get('status') and result.get('status') >= 500) or 'Unreachable' in str(result.get('note', '')):
+            elif result.get('ok') or result.get('status') is not None or 'Unreachable' in str(result.get('note', '')):
                 status = 'NEEDS_REVIEW'
             else:
                 status = 'FAILED'
@@ -868,7 +909,10 @@ def gemini_find(college_name,city=None,excluded_url=None,institution_code=None):
     location=f', {city}' if city else ''
     exclusion=f' Do NOT return this previously rejected website: {excluded_url}.' if excluded_url else ''
     code_hint=f' CAP/college code: {institution_code}.' if institution_code else ''
-    prompt=f'''Find the official website and physical campus location of this Indian college/institution. College: {college_name}{location}.{code_hint} Use Google Search and compare multiple results. Prefer the institution's own website, its affiliating university, AICTE/UGC, or official government sources. Do not use a district or state as the city and do not guess. Return ONLY valid JSON with keys official_url, city, address, confidence, evidence_urls, note. evidence_urls must list pages supporting the city and/or official URL. The URL must be the institution's own official website, not a directory, social profile, ranking site, admissions portal, or aggregator. Address should be the official campus address when available. If uncertain, set uncertain fields to null and confidence low.{exclusion}'''
+    prompt=f'''Find the official website and physical campus location of this Maharashtra CAP college/institution.
+College name: {college_name}{location}
+{code_hint}
+Use Google Search. Search using the exact college name and CAP code, then compare at least two independent results when available. Prefer the college's own domain and official CET Cell, AICTE, UGC, or affiliating-university pages. The official URL must be the college's own website, not a directory, social profile, ranking site, admissions portal, or aggregator. Find the city from the campus/contact address; return the actual city/town/locality and never a district, division, region, or state. Do not infer a city from the college name alone. Return ONLY one valid JSON object with keys official_url, city, address, confidence, evidence_urls, note. evidence_urls must contain actual source page URLs that support each non-null field. If the evidence does not establish a field, set that field to null and confidence low.{exclusion}'''
     payload={'contents':[{'parts':[{'text':prompt}]}],'tools':[{'google_search':{}}]}
     req=urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe="")}:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':key},method='POST')
     try:
