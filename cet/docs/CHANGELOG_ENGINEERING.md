@@ -19,6 +19,13 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Validation:** Full CET suite: 193 passed, 5 skipped because `TEST_DATABASE_URL` was not set. Python compileall and `git diff --check` passed.
 - **Production impact:** None. No database, storage, or deployment changes.
 
+### Clear retry markers with scoped directory lookup
+- **Commit:** `9e74e67256f101d9d04ae81ab45e8fe5b57d3923`
+- **Scope:** Remove retry-time pause/cancel markers only after locating the numeric job directory beneath the fixed import-staging root.
+- **Purpose:** Address the remaining CodeQL path-flow alert without constructing a filesystem path from request-controlled data.
+- **Validation:** Full CET suite: 194 passed, 5 skipped because `TEST_DATABASE_URL` was not set. Python compileall and `git diff --check` passed.
+- **Production impact:** None.
+
 ### Establish rebuild baseline
 - **Commit:** `ebb03f28163d147058eaa78e02cf588dec688847`
 - **Scope:** Added `docs/REBUILD_PLAN.md` and created isolated branch `rebuild/cetfind-engineering-baseline` from the known `main` baseline.
