@@ -50,26 +50,19 @@ LOCK = threading.RLock()
 JOBS: dict[int, dict] = {}
 ACTIVE_JOB: int | None = None
 
-class LocalNetworkCORSMiddleware(CORSMiddleware):
-    """Add Chrome's Private Network Access opt-in to CORS preflight replies."""
-    async def __call__(self, scope, receive, send):
-        async def send_with_private_network(message):
-            if message.get("type") == "http.response.start":
-                headers = list(message.get("headers", []))
-                headers.append((b"access-control-allow-private-network", b"true"))
-                message["headers"] = headers
-            await send(message)
-        await super().__call__(scope, receive, send_with_private_network)
-
-
 app = FastAPI(title="CAPFind Local Extraction Worker", docs_url=None, redoc_url=None)
 app.add_middleware(
-    LocalNetworkCORSMiddleware,
+    CORSMiddleware,
     allow_origins=sorted(ALLOWED_ORIGINS),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
     expose_headers=["Content-Length"],
+    # Brave/Chromium send this on a cross-origin request from the hosted admin
+    # page to this loopback-only service. Starlette rejects it unless this is
+    # enabled at preflight time; adding the response header after that check
+    # (the old custom middleware) still left the preflight at HTTP 400.
+    allow_private_network=True,
 )
 
 
