@@ -67,3 +67,9 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Purpose:** Avoid rejecting future official category codes simply because they were not anticipated in a static list.
 - **Validation:** Python syntax compilation and `git diff --check` passed. The test suite was not run because test execution was not requested. No production database or deployment was touched.
 - **Production impact:** None until this change is reviewed, merged, and deployed. New codes initially display their raw code because no curated label/group metadata exists.
+
+### Align category regression tests with dynamic codes
+- **Commit:** `c34cfbd15f50adda9b31c42da4eb82b2aa1f8d21`
+- **Scope:** Keep `Total` and known extraction artifacts unchanged during seat-category normalization, and cover new valid cutoff and seat category codes in staging tests.
+- **Validation:** Focused tests: 16 passed. Full CET suite: 196 passed, 5 skipped. Python syntax compilation and `git diff --check` passed.
+- **Production impact:** None. No production database or deployment was touched.
