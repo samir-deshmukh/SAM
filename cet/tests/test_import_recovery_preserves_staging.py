@@ -34,10 +34,8 @@ class _Connection:
     def execute(self, sql, params=None):
         self.statements.append((sql, params))
         normalized = " ".join(sql.split()).upper()
-        if normalized.startswith("SELECT ID,STORED_PATH FROM IMPORT_JOBS"):
+        if normalized.startswith("SELECT J.ID,J.STORED_PATH"):
             rows = self.jobs
-            if "NOT LIKE 'LOCAL://%'" in normalized:
-                rows = [row for row in rows if not str(row.get("stored_path") or "").startswith("local://")]
             return _Cursor(rows=rows)
         if normalized.startswith("SELECT EXISTS"):
             return _Cursor(row=self.saved)
@@ -91,7 +89,7 @@ def test_expired_job_without_saved_output_can_be_requeued(monkeypatch, tmp_path)
     assert not any("DELETE FROM import_results" in sql for sql, _ in connection.statements)
 
 
-def test_expired_local_worker_job_is_left_to_its_local_owner(monkeypatch, tmp_path):
+def test_expired_local_worker_job_is_marked_retryable(monkeypatch, tmp_path):
     connection, events = _run_recovery(
         monkeypatch,
         tmp_path,
@@ -99,10 +97,9 @@ def test_expired_local_worker_job_is_left_to_its_local_owner(monkeypatch, tmp_pa
         jobs=[{"id": 42, "stored_path": "local://job_42"}],
     )
 
-    statements = [sql.upper() for sql, _ in connection.statements]
-    assert any("NOT LIKE 'LOCAL://%'" in sql for sql in statements)
-    assert not any("UPDATE IMPORT_JOBS" in sql for sql in statements)
-    assert not any(event_args[1] == 42 for event_args in events)
+    update = next(params for sql, params in connection.statements if "UPDATE import_jobs SET status='FAILED'" in sql)
+    assert "Local extraction stopped without returning a CSV" in update[0]
+    assert any(event_args[1] == 42 and event_args[2] == "RECOVERY_FAILED" for event_args in events)
     assert connection.committed
 
 
