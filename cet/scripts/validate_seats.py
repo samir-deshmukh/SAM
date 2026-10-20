@@ -64,6 +64,8 @@ def normalize_category(raw: str, alias_map: dict[str, str]) -> str:
     Denotified Tribe as 'VJDT' (no slash) while the cutoffs whitelist
     (and the BCA seat file) use 'VJ/DT'. Falls through unchanged for
     every other value, including 'Total'."""
+    if raw.casefold() == TOTAL_MARKER.casefold() or raw in KNOWN_BAD_CATEGORY_VALUES:
+        return raw
     return alias_map.get(raw, alias_map.get(raw.upper(), raw.upper()))
 
 

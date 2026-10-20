@@ -1,7 +1,7 @@
 import csv
 from pathlib import Path
 
-from backend.admin.processing import _stage_csv
+from backend.admin.processing import _resolve_cutoff_dimensions, _stage_csv
 
 
 class FakeConnection:
@@ -27,7 +27,7 @@ class FakeConnection:
         raise AssertionError(f"Unexpected SQL in test: {query}")
 
 
-def test_file_validation_failure_does_not_mark_every_cutoff_row_as_row_error(tmp_path):
+def test_unknown_but_well_formed_category_is_accepted_and_file_issue_stays_file_level(tmp_path):
     csv_path = tmp_path / "BCA_26_C2_cutoffs.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -41,12 +41,18 @@ def test_file_validation_failure_does_not_mark_every_cutoff_row_as_row_error(tmp
     conn = FakeConnection()
     rows, quarantined = _stage_csv(
         conn, 56, "CUTOFFS", csv_path, False,
-        "=== UNKNOWN CATEGORIES (1) ===\n[ZZZ] : 1\nTotal issues: 1",
+        "=== NEW CATEGORY CODES (accepted) (1) ===\n[ZZZ] : 1\nTotal issues: 0",
         ("institution_code", "program_name", "category", "percentage"),
     )
 
     assert rows == 2
-    assert quarantined == 1
-    assert [row[6] for row in conn.rows] == ["FILE_REVIEW", "REVIEW"]
-    assert "Unknown category" in conn.rows[1][7]
+    assert quarantined == 0
+    assert [row[6] for row in conn.rows] == ["FILE_REVIEW", "FILE_REVIEW"]
+    assert all("Unknown category" not in row[7] for row in conn.rows)
     assert "Total issues" not in conn.rows[0][7]
+
+
+def test_new_cutoff_category_resolves_without_reference_whitelist_entry():
+    assert _resolve_cutoff_dimensions({
+        "category": "GNEWCODEH", "section": "", "stage": "Stage-I",
+    }) == ("NEWCODE", False, "HU", "Stage-I")
