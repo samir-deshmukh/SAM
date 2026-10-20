@@ -131,20 +131,32 @@ def _csv_control_checkpoint(conn, job_id: int) -> None:
 
 def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                valid: bool, validation_message: str, required_fields=(),
-               progress_callback=None) -> tuple[int, int]:
+               progress_callback=None, expected_rows: int | None = None) -> tuple[int, int]:
     rows = 0
     quarantined = 0
     total_rows = 0
     if progress_callback:
-        # Count CSV records with the CSV parser (not physical lines, since quoted
-        # fields may contain newlines) so progress remains accurate for large files.
-        with path.open("r", encoding="utf-8-sig", newline="") as count_file:
-            total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
+        try:
+            expected = int(expected_rows or 0)
+        except (TypeError, ValueError):
+            expected = 0
+        if expected > 0:
+            # Extractors already report the number of emitted records. Reuse
+            # that count instead of parsing a large CSV just to calculate progress.
+            total_rows = expected
+        else:
+            # For uploaded CSVs without an extractor summary, count records
+            # (not physical lines, since quoted fields can contain newlines).
+            with path.open("r", encoding="utf-8-sig", newline="") as count_file:
+                total_rows = max(0, sum(1 for _ in csv.DictReader(count_file)))
         try:
             progress_callback(0, total_rows)
         except Exception:
             pass
-    progress_interval = max(1000, total_rows // 50) if total_rows else 1000
+    # Progress is persisted using a separate database connection. Keep updates
+    # coarse enough that telemetry does not become a material part of staging
+    # time for large PDFs.
+    progress_interval = max(5000, total_rows // 20) if total_rows else 5000
     # The trusted validator treats these columns as block-level merged cells:
     # a blank value means "same as the preceding row". Apply the same
     # normalization before staging so continuation pages do not become false
@@ -226,7 +238,7 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                           json.dumps(normalized, ensure_ascii=False),
                           row_status, message))
             rows += 1
-            if len(batch) >= 250:
+            if len(batch) >= 1000:
                 _csv_control_checkpoint(conn, job_id)
                 flush_batch()
             if progress_callback and (rows % progress_interval == 0 or (total_rows and rows == total_rows)):
@@ -241,6 +253,15 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                     pass
     _csv_control_checkpoint(conn, job_id)
     flush_batch()
+    if progress_callback:
+        try:
+            # The emitted CSV can differ slightly from the extractor's
+            # estimate after safe cleaning. Publish the exact final count.
+            progress_callback(rows, rows)
+        except ImportCancelled:
+            raise
+        except Exception:
+            pass
     return rows, quarantined
 
 def _insert_result(conn, job_id, result_type, raw_path, normalized_path,
@@ -466,6 +487,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 conn, job_id, "CUTOFFS", canonical, valid, validation,
                 ("institution_code", "program_name", "category", "percentage"),
                 progress_callback=progress_callback,
+                expected_rows=summary.get("merged_records"),
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
@@ -568,6 +590,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
                 conn, job_id, "SEATS", canonical, valid, validation,
                 ("institution_code", "choice_code", "allocation_type", "category", "seats"),
                 progress_callback=progress_callback,
+                expected_rows=summary.get("seat_rows_extracted"),
             )
             valid = valid and row_quarantine == 0
             shutil.copy2(canonical, staging / canonical.name)
