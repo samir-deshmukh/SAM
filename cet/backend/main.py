@@ -2469,6 +2469,18 @@ async def resolver_find(request: Request):
                         'note': f'Verified website preserved; location lookup failed: {str(exc)[:300]}',
                     })
                 continue
+            if r.get('status') == 'VERIFIED' and not force_research:
+                # Read-only scans must not replace a verified website. An
+                # explicit Research action is required to propose a different URL.
+                results.append({
+                    'institution_code': code,
+                    'institution_name': r['institution_name'],
+                    'city': r.get('city'),
+                    'website': r.get('website'),
+                    'status': 'VERIFIED',
+                    'note': 'Verified website preserved. Use Research to search for a replacement.',
+                })
+                continue
             candidate = r.get('website')
             v = ({'ok': False, 'url': None, 'note': 'Forced AI re-research after website rejection'}
                  if force_research else (verify_url(candidate, r['institution_name']) if candidate else {'ok': False}))
@@ -2526,12 +2538,18 @@ async def resolver_find(request: Request):
                 status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') is not None or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
                 note = ' '.join(x for x in (
                     (ai.get('note') or ''),
+                    ('Grounded sources: ' + ', '.join(str(item.get('url')) for item in ai.get('grounding_evidence', [])[:5] if item.get('url')) if isinstance(ai.get('grounding_evidence'), list) and ai.get('grounding_evidence') else ''),
                     (ai_check.get('note') or ''),
+                    ('Verification sources: ' + ', '.join(str(item.get('url')) for item in ai_check.get('grounding_evidence', [])[:5] if item.get('url')) if isinstance(ai_check.get('grounding_evidence'), list) and ai_check.get('grounding_evidence') else ''),
                     v.get('note', ''),
                 ) if x)
-                c.execute('UPDATE college_website_resolver SET city=?,website=?,address=?,status=?,source=?,source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,v.get('url') or url,address,status,'gemini_google_search',v.get('url') or url,note,code))
+                c.execute("UPDATE college_website_resolver SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,website=?,address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,status=?,source=?,source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?",(city,v.get('url') or url,address,status,'gemini_google_search',v.get('url') or url,note,code))
                 if city or address or (verified_by_ai and v.get('url')):
-                    c.execute('UPDATE institutes SET city=COALESCE(?,city), address=COALESCE(?,address), website=COALESCE(?,website), city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END, address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END, website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,address,v.get('url') if verified_by_ai else None,city,'gemini_google_search',address,'gemini_google_search',v.get('url') if verified_by_ai else None,'gemini_google_search',code))
+                    _update_institute_resolution(
+                        c, code, city=city, address=address,
+                        website=v.get('url') if verified_by_ai else None,
+                        source='gemini_google_search',
+                    )
                 results.append({'institution_code':code,'institution_name':r['institution_name'],'city':city,'address':address,'website':v.get('url') or url,'status':status,'note':note})
             except Exception as e:
                 c.execute(

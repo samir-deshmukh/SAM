@@ -125,6 +125,128 @@ def _same_site(a, b):
         return False
 
 
+def _json_object_from_text(text):
+    """Decode the first complete JSON object without greedy brace matching."""
+    text = str(text or "")
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        depth = 0
+        in_string = escaped = False
+        for end in range(start, len(text)):
+            current = text[end]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = False
+                continue
+            if current == '"':
+                in_string = True
+            elif current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        value = json.loads(text[start:end + 1])
+                    except (json.JSONDecodeError, TypeError):
+                        break
+                    if isinstance(value, dict):
+                        return value
+                    break
+    raise RuntimeError("Gemini returned no valid JSON object")
+
+
+def _grounding_evidence(data):
+    """Extract actual Google Search citations, not URLs asserted by the model."""
+    evidence = []
+    queries = []
+    for candidate in (data or {}).get("candidates", []):
+        metadata = candidate.get("groundingMetadata") or candidate.get("grounding_metadata") or {}
+        for query in metadata.get("webSearchQueries", metadata.get("web_search_queries", [])) or []:
+            query = str(query or "").strip()
+            if query and query not in queries:
+                queries.append(query)
+        candidate_evidence = []
+        for chunk in metadata.get("groundingChunks", metadata.get("grounding_chunks", [])) or []:
+            web = chunk.get("web") or {}
+            uri = valid_url(web.get("uri") or web.get("url"))
+            title = str(web.get("title") or "").strip()
+            if uri:
+                candidate_evidence.append({"url": uri, "title": title, "supporting_text": []})
+        for support in metadata.get("groundingSupports", metadata.get("grounding_supports", [])) or []:
+            segment = support.get("segment") or {}
+            segment_text = str(segment.get("text") or "").strip()
+            for index in support.get("groundingChunkIndices", support.get("grounding_chunk_indices", [])) or []:
+                if isinstance(index, int) and 0 <= index < len(candidate_evidence) and segment_text:
+                    candidate_evidence[index]["supporting_text"].append(segment_text)
+        for item in candidate_evidence:
+            if not any(existing["url"] == item["url"] for existing in evidence):
+                evidence.append(item)
+        for part in candidate.get("content", {}).get("parts", []):
+            for annotation in part.get("annotations", []) or []:
+                citation = annotation.get("url_citation") or annotation.get("urlCitation") or {}
+                uri = valid_url(citation.get("url") or citation.get("uri") or annotation.get("url"))
+                title = str(citation.get("title") or annotation.get("title") or "").strip()
+                if uri and not any(item["url"] == uri for item in evidence):
+                    evidence.append({"url": uri, "title": title, "supporting_text": []})
+    return evidence, queries
+
+
+def _grounding_supports_site(url, evidence):
+    """Require a citation to the candidate site (or its own subdomain)."""
+    candidate = valid_url(url)
+    if not candidate:
+        return False
+    candidate_host = (urllib.parse.urlparse(candidate).hostname or "").lower().removeprefix("www.")
+    for item in evidence or []:
+        source_url = valid_url(item.get("url"))
+        source_host = (urllib.parse.urlparse(source_url).hostname or "").lower().removeprefix("www.") if source_url else ""
+        if source_host and not source_host.endswith("vertexaisearch.cloud.google.com") and (
+            source_host == candidate_host or source_host.endswith("." + candidate_host)
+        ):
+            return True
+        host_pattern = re.compile(r"(?<![a-z0-9.-])" + re.escape(candidate_host) + r"(?![a-z0-9.-])", re.I)
+        if candidate_host and any(host_pattern.search(str(text)) for text in item.get("supporting_text", [])):
+            return True
+        # Some legacy search citations use a Google redirect URI and put the
+        # original result domain only in its title. Never trust a title from a
+        # normal third-party result as proof of the candidate domain.
+        if source_host == "vertexaisearch.cloud.google.com" or (
+            source_host in {"google.com", "www.google.com"}
+            and urllib.parse.urlparse(source_url).path == "/url"
+        ):
+            title = str(item.get("title") or "").lower()
+            domains = re.findall(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}", title)
+            if any(domain.removeprefix("www.") == candidate_host
+                   or domain.removeprefix("www.").endswith("." + candidate_host)
+                   for domain in domains):
+                return True
+    return False
+
+
+def _grounding_supports_value(value, evidence):
+    """Return true only when Google linked a response segment containing value."""
+    value = str(value or "").strip()
+    if not value:
+        return False
+    pattern = re.compile(r"(?<![a-z0-9])" + re.escape(value) + r"(?![a-z0-9])", re.I)
+    for item in evidence or []:
+        for segment in item.get("supporting_text", []):
+            text = str(segment)
+            for match in pattern.finditer(text):
+                # Do not treat the last word of a compound city (e.g. Mumbai
+                # in Navi Mumbai) as evidence for a different city value.
+                preceding = re.search(r"([A-Z][a-z]+)\s+$", text[:match.start()])
+                if len(value.split()) == 1 and preceding:
+                    continue
+                return True
+    return False
+
+
 def gemini_verify_candidate(college_name, candidate_url, city=None, institution_code=None):
     """Use Gemini + Google Search to verify that a working URL belongs to the college."""
     key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -136,7 +258,9 @@ def gemini_verify_candidate(college_name, candidate_url, city=None, institution_
 College: {college_name}{location}
 {code_hint}
 Candidate URL: {candidate_url}
-Search the web and inspect the candidate identity. Do not accept directories, social profiles,
+Search the web for the exact CAP code and candidate domain, then inspect the candidate identity.
+At least one Google Search citation must be from the candidate domain or an official government/
+university source that explicitly identifies or links to that domain. Do not accept directories, social profiles,
 ranking sites, admission aggregators, unrelated universities, or another institution with a
 similar name. Use the CAP institute code to distinguish similarly named colleges. Return ONLY JSON
 with keys verified, confidence, official_url, city, address, evidence_urls, note. Evidence URLs must
@@ -156,14 +280,15 @@ the candidate clearly belongs to the named institution.'''
         raise RuntimeError(f"Gemini verification failed ({e.code})")
     text = "".join(part.get("text","") for c in data.get("candidates",[])
                    for part in c.get("content",{}).get("parts",[]))
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise RuntimeError("Gemini returned no structured verification result")
-    try:
-        result = json.loads(m.group(0))
-    except Exception:
-        raise RuntimeError("Gemini returned invalid verification JSON")
+    result = _json_object_from_text(text)
+    evidence, queries = _grounding_evidence(data)
+    result["grounding_evidence"] = evidence
+    result["grounding_queries"] = queries
     result["official_url"] = valid_url(result.get("official_url"))
+    if not evidence or not _grounding_supports_site(candidate_url, evidence):
+        result["verified"] = False
+        result["note"] = str(result.get("note") or "").strip()
+        result["note"] = (result["note"] + " " if result["note"] else "") + "Google Search citations did not support the candidate website domain."
     return result
 
 
@@ -499,6 +624,10 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             except Exception as exc:
                 log.warning("AI location lookup failed for verified college %s: %s", code, exc)
             continue
+        if row.get('status') == 'VERIFIED':
+            # Scanning All statuses must never downgrade or replace an already
+            # verified URL. Use the explicit Research action for replacement.
+            continue
         candidate_urls = []
         if row.get('website'):
             candidate_urls.append((row['website'], row.get('source') or 'existing_data'))
@@ -574,7 +703,8 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             with connect() as c:
                 c.execute(
                     """UPDATE college_website_resolver
-                       SET city=COALESCE(?,city),address=COALESCE(?,address),
+                           SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,
+                               address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,
                            website=?,status='VERIFIED',source=?,
                            source_url=?,verification_note=?,
                            last_checked_at=CURRENT_TIMESTAMP,
@@ -635,7 +765,8 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             with connect() as c:
                 c.execute(
                     """UPDATE college_website_resolver
-                       SET city=?,website=?,address=?,status=?,source=?,
+                       SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,
+                           website=?,address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,status=?,source=?,
                            source_url=?,verification_note=?,
                            last_checked_at=CURRENT_TIMESTAMP,
                            updated_at=CURRENT_TIMESTAMP
@@ -912,13 +1043,24 @@ def gemini_find(college_name,city=None,excluded_url=None,institution_code=None):
     prompt=f'''Find the official website and physical campus location of this Maharashtra CAP college/institution.
 College name: {college_name}{location}
 {code_hint}
-Use Google Search. Search using the exact college name and CAP code, then compare at least two independent results when available. Prefer the college's own domain and official CET Cell, AICTE, UGC, or affiliating-university pages. The official URL must be the college's own website, not a directory, social profile, ranking site, admissions portal, or aggregator. Find the city from the campus/contact address; return the actual city/town/locality and never a district, division, region, or state. Do not infer a city from the college name alone. Return ONLY one valid JSON object with keys official_url, city, address, confidence, evidence_urls, note. evidence_urls must contain actual source page URLs that support each non-null field. If the evidence does not establish a field, set that field to null and confidence low.{exclusion}'''
+Use Google Search. Search using the exact college name and CAP code. First search official Maharashtra State CET Cell and DTE institute records for that code; open the institute summary/profile where possible. Then compare the college's own contact/about page and another independent official source. Prefer the college's own domain and official CET Cell, AICTE, UGC, or affiliating-university pages. The official URL must be the college's own website, not a directory, social profile, ranking site, admissions portal, or aggregator. Find the city from the campus/contact address or official institute profile; return the actual city/town/locality and never a district, division, region, or state. Do not infer a city from the college name alone. Return ONLY one valid JSON object with keys official_url, city, address, confidence, evidence_urls, note. evidence_urls must contain actual source page URLs that support each non-null field. If the evidence does not establish a field, set that field to null and confidence low.{exclusion}'''
     payload={'contents':[{'parts':[{'text':prompt}]}],'tools':[{'google_search':{}}]}
     req=urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(GEMINI_MODEL,safe="")}:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':key},method='POST')
     try:
         with urllib.request.urlopen(req,timeout=45) as r:data=json.load(r)
     except urllib.error.HTTPError as e:raise RuntimeError(f'Gemini request failed ({e.code})')
-    text=''.join(part.get('text','') for c in data.get('candidates',[]) for part in c.get('content',{}).get('parts',[])); m=re.search(r'\{.*\}',text,re.S)
-    if not m:raise RuntimeError('Gemini returned no structured result')
-    try:return json.loads(m.group(0)),data
-    except Exception:raise RuntimeError('Gemini returned invalid JSON')
+    text=''.join(part.get('text','') for c in data.get('candidates',[]) for part in c.get('content',{}).get('parts',[]))
+    result = _json_object_from_text(text)
+    evidence, queries = _grounding_evidence(data)
+    result['grounding_evidence'] = evidence
+    result['grounding_queries'] = queries
+    # Never present URLs typed by the model as citations. Keep those separately
+    # for diagnostics and expose only citations returned by Google as evidence.
+    result['model_evidence_urls'] = result.get('evidence_urls')
+    result['evidence_urls'] = [item['url'] for item in evidence]
+    # The model may return a plausible city without citing it. Only persist a
+    # city when Google's grounding metadata links a response segment containing
+    # that city to a search result.
+    if result.get('city') and not _grounding_supports_value(result['city'], evidence):
+        result['city'] = None
+    return result,data
