@@ -17,7 +17,7 @@ from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
-                              resolve_import_job, valid_url)
+                              resolve_import_job, valid_url, _update_institute_resolution)
 from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -2550,17 +2550,72 @@ async def resolver_find(request: Request):
             row=c.execute('SELECT * FROM college_website_resolver WHERE institution_code=?',(code,)).fetchone()
             if not row: continue
             r = dict(row)
+            if r.get('status') == 'VERIFIED' and not str(r.get('city') or '').strip() and not force_research:
+                try:
+                    location_ai, _ = gemini_find(r['institution_name'], None, institution_code=code)
+                    city = str(location_ai.get('city') or '').strip() or None
+                    address = str(location_ai.get('address') or '').strip() or None
+                    evidence = location_ai.get('evidence_urls')
+                    note_parts = [str(location_ai.get('note') or '').strip()]
+                    if isinstance(evidence, list) and evidence:
+                        note_parts.append('Location evidence: ' + ', '.join(str(url) for url in evidence[:4]))
+                    note = ' '.join(x for x in note_parts if x)
+                    c.execute(
+                        """UPDATE college_website_resolver
+                           SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,
+                               address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,
+                               verification_note=CASE WHEN ?<>'' THEN ? ELSE verification_note END,
+                               last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                           WHERE institution_code=? AND status='VERIFIED'""",
+                        (city, address, note, note, code),
+                    )
+                    _update_institute_resolution(
+                        c, code, city=city, address=address,
+                        source='gemini_google_search',
+                    )
+                    results.append({
+                        'institution_code': code,
+                        'institution_name': r['institution_name'],
+                        'city': city or r.get('city'),
+                        'website': r.get('website'),
+                        'status': 'VERIFIED',
+                        'note': note or 'Verified website preserved; location research completed.',
+                    })
+                except Exception:
+                    log.exception('Verified-college location lookup failed: institution_code=%s', code)
+                    results.append({
+                        'institution_code': code,
+                        'institution_name': r['institution_name'],
+                        'city': r.get('city'),
+                        'website': r.get('website'),
+                        'status': 'VERIFIED',
+                        'note': 'Verified website preserved; location lookup failed. Check server logs and retry.',
+                    })
+                continue
+            if r.get('status') == 'VERIFIED' and not force_research:
+                # Read-only scans must not replace a verified website. An
+                # explicit Research action is required to propose a different URL.
+                results.append({
+                    'institution_code': code,
+                    'institution_name': r['institution_name'],
+                    'city': r.get('city'),
+                    'website': r.get('website'),
+                    'status': 'VERIFIED',
+                    'note': 'Verified website preserved. Use Research to search for a replacement.',
+                })
+                continue
             candidate = r.get('website')
             v = ({'ok': False, 'url': None, 'note': 'Forced AI re-research after website rejection'}
                  if force_research else (verify_url(candidate, r['institution_name']) if candidate else {'ok': False}))
             if v.get('ok'):
                 try:
-                    ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'))
+                    ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'), code)
                     ai_conf = float(ai_check.get('confidence') or 0)
                     ai_url = ai_check.get('official_url')
-                except Exception as exc:
+                except Exception:
+                    log.exception('Existing candidate verification failed: institution_code=%s', code)
                     ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
-                                'note': f'AI verification failed: {exc}'}
+                                'note': 'AI verification failed. Check server logs and retry.'}
                     ai_conf = 0
                     ai_url = None
                 if bool(ai_check.get('verified')) and ai_conf >= 0.70 and (not ai_url or _same_site(v['url'], ai_url)):
@@ -2595,36 +2650,45 @@ async def resolver_find(request: Request):
                 ai_check = {}
                 if v.get('ok'):
                     try:
-                        ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city)
-                    except Exception as exc:
+                        ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city, code)
+                    except Exception:
+                        log.exception('Searched candidate verification failed: institution_code=%s', code)
                         ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
-                                    'note': f'AI verification failed: {exc}'}
+                                    'note': 'AI verification failed. Check server logs and retry.'}
                 ai_conf = float(ai_check.get('confidence') or 0)
                 ai_url = ai_check.get('official_url')
                 verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
                     not ai_url or _same_site(v.get('url'), ai_url)
                 )
-                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') in (408, 425, 429) or (v.get('status') and v.get('status') >= 500) or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
+                status = 'VERIFIED' if verified_by_ai else ('NEEDS_REVIEW' if (v.get('ok') or v.get('status') is not None or 'Unreachable' in str(v.get('note', ''))) else 'FAILED')
                 note = ' '.join(x for x in (
                     (ai.get('note') or ''),
+                    ('Grounded sources: ' + ', '.join(str(item.get('url')) for item in ai.get('grounding_evidence', [])[:5] if item.get('url')) if isinstance(ai.get('grounding_evidence'), list) and ai.get('grounding_evidence') else ''),
                     (ai_check.get('note') or ''),
+                    ('Verification sources: ' + ', '.join(str(item.get('url')) for item in ai_check.get('grounding_evidence', [])[:5] if item.get('url')) if isinstance(ai_check.get('grounding_evidence'), list) and ai_check.get('grounding_evidence') else ''),
                     v.get('note', ''),
                 ) if x)
-                c.execute('UPDATE college_website_resolver SET city=?,website=?,address=?,status=?,source=?,source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,v.get('url') or url,address,status,'gemini_google_search',v.get('url') or url,note,code))
+                c.execute("UPDATE college_website_resolver SET city=CASE WHEN city IS NULL OR TRIM(city)='' THEN ? ELSE city END,website=?,address=CASE WHEN address IS NULL OR TRIM(address)='' THEN ? ELSE address END,status=?,source=?,source_url=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?",(city,v.get('url') or url,address,status,'gemini_google_search',v.get('url') or url,note,code))
                 if city or address or (verified_by_ai and v.get('url')):
-                    c.execute('UPDATE institutes SET city=COALESCE(?,city), address=COALESCE(?,address), website=COALESCE(?,website), city_source=CASE WHEN ? IS NOT NULL THEN ? ELSE city_source END, address_source=CASE WHEN ? IS NOT NULL THEN ? ELSE address_source END, website_source=CASE WHEN ? IS NOT NULL THEN ? ELSE website_source END, verified_at=CURRENT_TIMESTAMP WHERE institution_code=?',(city,address,v.get('url') if verified_by_ai else None,city,'gemini_google_search',address,'gemini_google_search',v.get('url') if verified_by_ai else None,'gemini_google_search',code))
+                    _update_institute_resolution(
+                        c, code, city=city, address=address,
+                        website=v.get('url') if verified_by_ai else None,
+                        source='gemini_google_search',
+                    )
                 results.append({'institution_code':code,'institution_name':r['institution_name'],'city':city,'address':address,'website':v.get('url') or url,'status':status,'note':note})
-            except Exception as e:
+            except Exception:
+                log.exception('College website resolver failed: institution_code=%s', code)
+                safe_note = 'Website research failed. Check server logs and retry.'
                 c.execute(
                     'UPDATE college_website_resolver SET status=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',
-                    ('FAILED', str(e)[:500], code),
+                    ('FAILED', safe_note, code),
                 )
                 results.append({
                     'institution_code': code,
                     'institution_name': r['institution_name'],
                     'website': candidate,
                     'status': 'FAILED',
-                    'note': str(e)[:500],
+                    'note': safe_note,
                 })
         c.commit()
     return {'ok':True,'results':results}
