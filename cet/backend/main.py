@@ -2459,14 +2459,15 @@ async def resolver_find(request: Request):
                         'status': 'VERIFIED',
                         'note': note or 'Verified website preserved; location research completed.',
                     })
-                except Exception as exc:
+                except Exception:
+                    log.exception('Verified-college location lookup failed: institution_code=%s', code)
                     results.append({
                         'institution_code': code,
                         'institution_name': r['institution_name'],
                         'city': r.get('city'),
                         'website': r.get('website'),
                         'status': 'VERIFIED',
-                        'note': f'Verified website preserved; location lookup failed: {str(exc)[:300]}',
+                        'note': 'Verified website preserved; location lookup failed. Check server logs and retry.',
                     })
                 continue
             if r.get('status') == 'VERIFIED' and not force_research:
@@ -2489,9 +2490,10 @@ async def resolver_find(request: Request):
                     ai_check = gemini_verify_candidate(r['institution_name'], v['url'], r.get('city'), code)
                     ai_conf = float(ai_check.get('confidence') or 0)
                     ai_url = ai_check.get('official_url')
-                except Exception as exc:
+                except Exception:
+                    log.exception('Existing candidate verification failed: institution_code=%s', code)
                     ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
-                                'note': f'AI verification failed: {exc}'}
+                                'note': 'AI verification failed. Check server logs and retry.'}
                     ai_conf = 0
                     ai_url = None
                 if bool(ai_check.get('verified')) and ai_conf >= 0.70 and (not ai_url or _same_site(v['url'], ai_url)):
@@ -2527,9 +2529,10 @@ async def resolver_find(request: Request):
                 if v.get('ok'):
                     try:
                         ai_check = gemini_verify_candidate(r['institution_name'], v['url'], city, code)
-                    except Exception as exc:
+                    except Exception:
+                        log.exception('Searched candidate verification failed: institution_code=%s', code)
                         ai_check = {'verified': False, 'confidence': 0, 'official_url': None,
-                                    'note': f'AI verification failed: {exc}'}
+                                    'note': 'AI verification failed. Check server logs and retry.'}
                 ai_conf = float(ai_check.get('confidence') or 0)
                 ai_url = ai_check.get('official_url')
                 verified_by_ai = bool(ai_check.get('verified')) and ai_conf >= 0.70 and (
@@ -2551,7 +2554,7 @@ async def resolver_find(request: Request):
                         source='gemini_google_search',
                     )
                 results.append({'institution_code':code,'institution_name':r['institution_name'],'city':city,'address':address,'website':v.get('url') or url,'status':status,'note':note})
-            except Exception as e:
+            except Exception:
                 log.exception('College website resolver failed: institution_code=%s', code)
                 safe_note = 'Website research failed. Check server logs and retry.'
                 c.execute(
