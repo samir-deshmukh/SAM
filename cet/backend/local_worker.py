@@ -118,6 +118,8 @@ def _remote(state: dict, suffix: str, *, payload=None, files=None, data=None):
         data=data,
         timeout=(15, 300),
     )
+    if response.status_code == 429 or response.status_code >= 500:
+        response.raise_for_status()
     if response.status_code >= 400:
         raise RuntimeError(f"CAPFind server returned {response.status_code}: {response.text[:800]}")
     return response.json() if response.content else {}
@@ -129,9 +131,75 @@ def _remote_get(state: dict, suffix: str):
         url, headers={"Authorization": "Bearer " + state["upload_token"]},
         timeout=(10, 20),
     )
+    if response.status_code == 429 or response.status_code >= 500:
+        response.raise_for_status()
     if response.status_code >= 400:
         raise RuntimeError(f"CAPFind server returned {response.status_code}: {response.text[:800]}")
     return response.json() if response.content else {}
+
+
+def _wait_for_server_staging(state: dict) -> dict:
+    """Keep the single-job worker queue occupied through server staging.
+
+    Artifact receipt is asynchronous on the server. Starting the next PDF as
+    soon as the upload returns lets extraction overlap with staging and keeps
+    multiple large sets of temporary files alive at once.
+    """
+    while True:
+        try:
+            result = _remote_get(state, "status")
+        except requests.RequestException as exc:
+            _status(state, "WAITING_FOR_SERVER",
+                    "Extracted CSV is uploaded; waiting for CAPFind to resume staging",
+                    server_error=str(exc)[:500])
+            time.sleep(5)
+            continue
+        status = str(result.get("status") or "").upper()
+        if status in {"STAGED", "REVIEW_REQUIRED", "FAILED", "CANCELLED", "COMPLETED"}:
+            return result
+        message = str(result.get("message") or "Validation and staging are still queued")
+        _status(state, "STAGING", message, server_status=status)
+        time.sleep(3)
+
+
+def _cleanup_extraction_outputs(outdir: Path, keep_artifact: Path) -> None:
+    """Remove extractor intermediates but retain the source and retry CSV."""
+    keep = keep_artifact.absolute()
+    for child in outdir.iterdir():
+        if child.absolute() == keep:
+            continue
+        if child.is_symlink():
+            child.unlink(missing_ok=True)
+        elif child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
+def _finish_server_staging(state: dict) -> None:
+    result = _wait_for_server_staging(state)
+    status = str(result.get("status") or "").upper()
+    artifact_value = str(state.get("artifact_path") or "")
+    artifact = Path(artifact_value) if artifact_value else None
+    if artifact and artifact.is_file():
+        _cleanup_extraction_outputs(artifact.parent, artifact)
+    if status in {"STAGED", "REVIEW_REQUIRED", "COMPLETED"}:
+        if state.get("remote_worker"):
+            # Remote mode retains the source in private server storage.
+            # Remove the worker's duplicate PDF and CSV only after staging.
+            folder = DATA / f"job_{int(state['job_id'])}"
+            for name in {Path(state.get("filename") or "source.pdf").name, "source.pdf"}:
+                (folder / name).unlink(missing_ok=True)
+            if artifact:
+                artifact.unlink(missing_ok=True)
+        _status(state, "DONE", f"CAPFind finished validation and staging: {status}",
+                server_status=status)
+    elif status == "CANCELLED":
+        _status(state, "CANCELLED", "CAPFind cancelled validation and staging",
+                server_status=status)
+    else:
+        message = str(result.get("error") or "CAPFind validation or staging failed")
+        _status(state, "FAILED", message[:3000], server_status=status)
 
 
 def _status(state: dict, status: str, message: str, **extra):
@@ -218,8 +286,12 @@ def _process_job(job_id: int):
                     "summary_json": json.dumps(summary, ensure_ascii=False),
                 },
             )
-        _status(state, "DONE", "Extraction uploaded; CAPFind is validating and staging the records",
-                summary=summary)
+        monitor_stop.set()
+        if monitor.ident is not None:
+            monitor.join(timeout=2)
+        _status(state, "STAGING", "Extraction uploaded; waiting for CAPFind validation and staging",
+                summary=summary, artifact_uploaded=True, artifact_path=str(artifact))
+        _finish_server_staging(state)
     except Exception as exc:
         if "CAPFIND_WORKER_CANCELLED" in str(exc) or (control / "CANCEL").exists():
             _status(state, "CANCELLED", "Extraction cancelled by the administrator")
@@ -289,6 +361,10 @@ def _recover_jobs():
                 state["status"] = "WAITING_FOR_SERVER"
                 state["message"] = "Recovered after worker restart; waiting for the server to requeue this job"
                 _write_state(job_id, state)
+            elif state.get("artifact_uploaded") and state.get("status") in {"STAGING", "WAITING_FOR_SERVER"}:
+                state["status"] = "QUEUED"
+                state["message"] = "Recovered after worker restart; waiting for CAPFind staging to finish"
+                _write_state(job_id, state)
             elif state.get("status") in {"QUEUED", "EXTRACTING", "UPLOADING"}:
                 # The extractor does not serialize all in-memory parser state;
                 # after a worker crash, safely restart the PDF from page one.
@@ -326,7 +402,16 @@ def _queue_loop():
             else:
                 job_id = None
         if job_id is not None:
-            _process_job(job_id)
+            state = _load_state(job_id)
+            if state.get("artifact_uploaded"):
+                try:
+                    _finish_server_staging(state)
+                finally:
+                    with LOCK:
+                        if ACTIVE_JOB == job_id:
+                            ACTIVE_JOB = None
+            else:
+                _process_job(job_id)
         else:
             if time.time() >= next_remote_poll:
                 try:
