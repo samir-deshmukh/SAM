@@ -941,25 +941,27 @@ def derived_data_source_coverage(request: Request):
             WITH latest AS (
                 SELECT program_family, institution_code, MAX(capture_year) AS capture_year
                 FROM seats GROUP BY program_family, institution_code
-            ), latest_seats AS (
-                SELECT s.program_family,s.institution_code,s.capture_year,s.choice_code
+            ), latest_choices AS (
+                SELECT s.program_family,s.institution_code,s.capture_year,s.choice_code,
+                       COUNT(*) AS latest_seat_rows
                 FROM seats s JOIN latest l
                   ON l.program_family=s.program_family
                  AND l.institution_code=s.institution_code
                  AND l.capture_year=s.capture_year
+                GROUP BY s.program_family,s.institution_code,s.capture_year,s.choice_code
             )
-            SELECT s.program_family,
-                   COUNT(DISTINCT (s.institution_code, s.choice_code)) AS choice_codes,
-                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NOT NULL) AS metadata_codes,
-                   COUNT(DISTINCT (s.institution_code, s.choice_code)) FILTER (WHERE m.choice_code IS NULL) AS missing_metadata_codes,
-                   COUNT(*) AS latest_seat_rows
-            FROM latest_seats s
+            SELECT c.program_family,
+                   COUNT(*) AS choice_codes,
+                   COUNT(*) FILTER (WHERE m.choice_code IS NOT NULL) AS metadata_codes,
+                   COUNT(*) FILTER (WHERE m.choice_code IS NULL) AS missing_metadata_codes,
+                   SUM(c.latest_seat_rows) AS latest_seat_rows
+            FROM latest_choices c
             LEFT JOIN seat_matrix_courses m
-              ON m.program_family=s.program_family
-             AND m.institution_code=s.institution_code
-             AND m.capture_year=s.capture_year
-             AND m.choice_code=s.choice_code
-            GROUP BY s.program_family ORDER BY s.program_family
+              ON m.program_family=c.program_family
+             AND m.institution_code=c.institution_code
+             AND m.capture_year=c.capture_year
+             AND m.choice_code=c.choice_code
+            GROUP BY c.program_family ORDER BY c.program_family
         """).fetchall()
     return {"source_checks": [dict(row) for row in source_checks]}
 

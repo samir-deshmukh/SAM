@@ -1083,7 +1083,7 @@ async function loadSourceCoverage(){
       return '<tr><td>'+esc(displayCourseFamily(x.program_family))+'</td><td>'+Number(x.latest_seat_rows||0).toLocaleString()+'</td><td>'+covered.toLocaleString()+' / '+total.toLocaleString()+'</td><td><span class="status '+(complete?'green':'red')+'">'+(complete?'PDF metadata complete':missing.toLocaleString()+' missing')+'</span></td></tr>';
     }).join('');
     sourceBody.innerHTML='<div style="overflow-x:auto"><table class="table"><thead><tr><th>Course</th><th>Latest seat rows</th><th>Choice codes with PDF metadata</th><th>Coverage</th></tr></thead><tbody>'+(coverageRows||'<tr><td colspan="4">No seat data found.</td></tr>')+'</tbody></table></div>';
-  }catch(e){sourceBody.innerHTML='<div class="small muted">Source coverage failed to load. <button class="btn secondary" onclick="window.__sourceCoverageLoaded=false;loadSourceCoverage()">Retry</button></div>';}
+  }catch(e){sourceBody.innerHTML='<div class="small muted">Source coverage failed to load: '+esc(e.message||'Unknown server error')+'. <button class="btn secondary" onclick="window.__sourceCoverageLoaded=false;loadSourceCoverage()">Retry</button></div>';}
 }
 function actionButtons(j){
   const s=String(j.status||'').toUpperCase();
