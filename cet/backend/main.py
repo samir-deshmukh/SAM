@@ -17,7 +17,7 @@ from .admin.state import JobStatus
 from .admin_ui import dashboard, import_center, review_center, releases_page, health_page, audit_page, feedback_page, resolver_page, derived_data
 from .admin.resolver import (seed_from_contacts, sync_github_india, verify_url, gemini_find,
                               gemini_verify_candidate, _same_site, sync_institutes_to_resolver,
-                              resolve_import_job, valid_url, _update_institute_resolution)
+                              valid_url, _update_institute_resolution)
 from .api import router as public_api_router, invalidate_public_caches
 BASE = Path(__file__).resolve().parent.parent
 SITE = BASE / 'site'
@@ -1701,6 +1701,37 @@ def _resolve_one_import_background(job_id: int):
         log.exception('Automatic website resolver step failed: job_id=%s', job_id)
 
 
+def _resolve_one_manual_resolver_step(status_filter, exclude_codes, institution_code):
+    """Run one admin resolver step in a short-lived process to bound web RAM."""
+    env = os.environ.copy()
+    env.setdefault('PYTHONIOENCODING', 'utf-8')
+    env.setdefault('PYTHONUTF8', '1')
+    env.setdefault('OMP_THREAD_LIMIT', '1')
+    env.setdefault('OPENBLAS_NUM_THREADS', '1')
+    env.setdefault('MKL_NUM_THREADS', '1')
+    cmd = [
+        sys.executable, str(BASE / 'scripts' / 'resolver_worker.py'),
+        '--resolver-scan', '--institution-code', institution_code,
+    ]
+    if status_filter:
+        cmd.extend(['--status', status_filter])
+    for code in exclude_codes:
+        cmd.extend(['--exclude-code', code])
+    completed = subprocess.run(
+        cmd, cwd=str(BASE), env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, timeout=150, check=False,
+    )
+    output = (completed.stdout or '').strip()
+    marker = 'CAPFIND_RESOLVER_RESULT='
+    payload = next((line[len(marker):] for line in reversed(output.splitlines())
+                    if line.startswith(marker)), None)
+    if completed.returncode != 0 or payload is None:
+        log.error('Manual resolver worker failed: exit=%s output=%s',
+                  completed.returncode, output[-4000:])
+        raise RuntimeError('The isolated resolver worker failed. Check server logs for details.')
+    return json.loads(payload)
+
+
 def _process_import_background(job_id: int):
     """Run one memory-heavy import at a time on the web instance."""
     with _IMPORT_PROCESS_LOCK:
@@ -2512,7 +2543,20 @@ async def resolver_next(request: Request):
         if not current:
             return {'ok': True, 'busy': False, 'current': None, 'processed': 0, 'remaining': 0}
         current_code = str(current['institution_code'])
-        result = resolve_import_job(None, limit=1, status_filter=status_filter or None, exclude_codes=exclude_codes)
+        result = await run_in_threadpool(
+            _resolve_one_manual_resolver_step,
+            status_filter or None,
+            exclude_codes,
+            current_code,
+        )
+        if result.get('busy'):
+            return {
+                'ok': True,
+                'busy': True,
+                'reason': result.get('reason') or 'Another resolver step is running; waiting safely.',
+                'processed': 0,
+                'remaining': int(result.get('remaining') or 0),
+            }
         # Count only not-yet-attempted colleges, including for the All-status scan.
         scanned = list(dict.fromkeys([*exclude_codes, current_code]))
         with connect() as c:
