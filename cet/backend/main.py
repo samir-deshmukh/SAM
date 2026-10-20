@@ -990,6 +990,23 @@ def _local_import_artifact_path(job_id: int, data_type: str) -> Path:
     return legacy[0] if len(legacy) == 1 else canonical
 
 
+def _clear_import_control_markers(job_id: int) -> None:
+    """Clear pause/cancel files after locating the job folder under the fixed root."""
+    control_root = BASE / 'data' / 'import_staging'
+    expected_name = f'job_{int(job_id)}'
+    try:
+        for job_dir in control_root.iterdir():
+            if job_dir.name != expected_name or job_dir.is_symlink() or not job_dir.is_dir():
+                continue
+            for marker_name in ('CANCEL', 'PAUSE'):
+                marker = job_dir / marker_name
+                if marker.is_file() or marker.is_symlink():
+                    marker.unlink(missing_ok=True)
+            return
+    except FileNotFoundError:
+        return
+
+
 def _local_worker_token(request: Request, job_id: int):
     """Validate a one-job capability token without exposing it via admin APIs."""
     header = (request.headers.get('authorization') or '').strip()
@@ -2062,9 +2079,7 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
                 reusable_artifact = artifact.is_file()
             connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
-            marker = BASE / 'data' / 'import_staging' / f'job_{job_id}'
-            (marker / 'CANCEL').unlink(missing_ok=True)
-            (marker / 'PAUSE').unlink(missing_ok=True)
+            _clear_import_control_markers(int(job['id']))
             if reusable_artifact:
                 connection.execute(
                     "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",

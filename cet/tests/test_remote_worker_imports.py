@@ -54,3 +54,16 @@ def test_server_artifact_paths_use_job_ids_not_uploaded_filenames(tmp_path, monk
 
     canonical.write_text('source_pdf,page\n')
     assert main._local_import_artifact_path(42, 'CUTOFFS') == canonical
+
+
+def test_control_marker_cleanup_stays_under_fixed_job_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'BASE', tmp_path)
+    job_dir = tmp_path / 'data' / 'import_staging' / 'job_42'
+    job_dir.mkdir(parents=True)
+    (job_dir / 'CANCEL').touch()
+    (job_dir / 'PAUSE').touch()
+
+    main._clear_import_control_markers(42)
+
+    assert not (job_dir / 'CANCEL').exists()
+    assert not (job_dir / 'PAUSE').exists()
