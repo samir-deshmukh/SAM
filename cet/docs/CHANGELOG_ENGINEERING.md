@@ -12,6 +12,13 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Production impact:** None. No Render environment variables, storage bucket, deployment, database, or production data were changed.
 - **Rollout requirement:** Remote mode stays unavailable until a private durable S3-compatible bucket and matching `CAPFIND_REMOTE_WORKER_TOKEN` are configured on Render and on the worker PC. This is fail-closed because Render's default filesystem is ephemeral.
 
+### Use job-scoped paths for extracted artifacts
+- **Commit:** `320e23554494f2a4fac443f0418089db74dd5213`
+- **Scope:** Store server-side extracted CSVs using numeric import job IDs and use a bounded legacy lookup for artifacts created by older worker versions.
+- **Purpose:** Remove user-provided PDF filenames from server filesystem path construction identified by CodeQL on PR #21.
+- **Validation:** Full CET suite: 193 passed, 5 skipped because `TEST_DATABASE_URL` was not set. Python compileall and `git diff --check` passed.
+- **Production impact:** None. No database, storage, or deployment changes.
+
 ### Establish rebuild baseline
 - **Commit:** `ebb03f28163d147058eaa78e02cf588dec688847`
 - **Scope:** Added `docs/REBUILD_PLAN.md` and created isolated branch `rebuild/cetfind-engineering-baseline` from the known `main` baseline.
