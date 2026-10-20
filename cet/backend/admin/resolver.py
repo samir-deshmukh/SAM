@@ -382,7 +382,7 @@ def _known_city_names(conn):
     return {city for city in cities if city}
 
 
-def seed_from_import(conn, job_id):
+def seed_from_import(conn, job_id, codes_out=None):
     """Create resolver rows from the colleges actually present in an import.
 
     The PDF/import is the scope of work. Existing institute/reference data is
@@ -391,24 +391,31 @@ def seed_from_import(conn, job_id):
     """
     refs = _reference_contacts()
     known_cities = _known_city_names(conn)
-    source_rows = conn.execute(
-        "SELECT normalized_json FROM import_staging_records "
-        "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') "
-        "ORDER BY id",
-        (job_id,),
-    ).fetchall()
     colleges = {}
-    for row in source_rows:
-        try:
-            data = json.loads(row['normalized_json'] or '{}')
-        except Exception:
-            continue
-        code = str(data.get('institution_code', '')).strip()
-        if not code:
-            continue
-        colleges.setdefault(code, {
-            'institution_name': str(data.get('institution_name', '')).strip() or code
-        })
+    last_id = 0
+    while True:
+        source_rows = conn.execute(
+            "SELECT id,normalized_json FROM import_staging_records "
+            "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') AND id>? "
+            "ORDER BY id LIMIT 500",
+            (job_id, last_id),
+        ).fetchall()
+        if not source_rows:
+            break
+        last_id = int(source_rows[-1]['id'])
+        for row in source_rows:
+            try:
+                data = json.loads(row.get('normalized_json') or '{}')
+            except Exception:
+                continue
+            code = str(data.get('institution_code', '')).strip()
+            if not code:
+                continue
+            colleges.setdefault(code, {
+                'institution_name': str(data.get('institution_name', '')).strip() or code
+            })
+    if codes_out is not None:
+        codes_out.update(colleges)
 
     seeded = 0
     for code, incoming in colleges.items():
@@ -508,7 +515,8 @@ def _update_institute_resolution(conn, code, city=None, address=None, website=No
     )
 
 
-def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_codes=None):
+def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_codes=None,
+                       institution_code=None):
     """Resolve a bounded number of colleges without running a long background loop.
 
     When job_id is supplied, only colleges from that import are considered.
@@ -527,9 +535,10 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
     from .db import connect
 
     seeded = 0
+    import_codes = set()
     with connect() as c:
         if job_id is not None:
-            seeded = seed_from_import(c, job_id)
+            seeded = seed_from_import(c, job_id, import_codes)
             c.commit()
 
         if job_id is None:
@@ -546,40 +555,35 @@ def resolve_import_job(job_id=None, limit=None, status_filter=None, exclude_code
             else:
                 # The empty/All filter deliberately includes every resolver status.
                 pass
+            if institution_code:
+                clauses.append("institution_code = ?")
+                params.append(str(institution_code))
             if excluded:
                 clauses.append("institution_code NOT IN (" + ",".join("?" for _ in excluded) + ")")
                 params.extend(excluded)
             if clauses:
                 query += " WHERE " + " AND ".join(clauses)
             query += " ORDER BY CASE status WHEN 'CANDIDATE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END, LOWER(institution_name)"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(max(1, int(limit)))
             rows = [dict(r) for r in c.execute(query, params)]
         else:
-            source_rows = c.execute(
-                "SELECT normalized_json FROM import_staging_records "
-                "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') ORDER BY id",
-                (job_id,),
-            ).fetchall()
-            codes = set()
-            for item in source_rows:
-                try:
-                    data = json.loads(item['normalized_json'] or '{}')
-                except Exception:
-                    continue
-                code = str(data.get('institution_code', '')).strip()
-                if code:
-                    codes.add(code)
-            rows = [
-                dict(r) for r in c.execute(
+            if import_codes:
+                codes = sorted(import_codes)
+                placeholders = ','.join('?' for _ in codes)
+                query = (
                     "SELECT institution_code,institution_name,city,website,status,source "
-                    "FROM college_website_resolver ORDER BY institution_name"
-                ) if r['institution_code'] in codes and (
-                    r['status'] not in {'VERIFIED', 'NEEDS_REVIEW'}
-                    or (r['status'] == 'VERIFIED' and not str(r.get('city') or '').strip())
+                    "FROM college_website_resolver WHERE institution_code IN ("
+                    + placeholders + ") "
+                    "AND (status NOT IN ('VERIFIED','NEEDS_REVIEW') "
+                    "OR (status='VERIFIED' AND COALESCE(TRIM(city),'')='')) "
+                    "ORDER BY institution_name LIMIT ?"
                 )
-            ]
-
-    if limit is not None:
-        rows = rows[:max(1, int(limit))]
+                rows = [dict(r) for r in c.execute(
+                    query,
+                    (*codes, max(1, int(limit)) if limit is not None else 2147483647),
+                )]
     if not rows:
         return {'ok': True, 'seeded': seeded, 'resolved': 0, 'searched': 0, 'failed': 0, 'remaining': 0}
 
