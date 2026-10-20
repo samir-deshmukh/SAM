@@ -51,10 +51,24 @@ def test_server_artifact_paths_use_job_ids_not_uploaded_filenames(tmp_path, monk
     canonical = artifact_dir / 'job_42_cutoffs.csv'
 
     assert main._local_import_artifact_path(42, 'CUTOFFS') == canonical
-
     canonical.write_text('source_pdf,page\n')
     assert main._local_import_artifact_path(42, 'CUTOFFS') == canonical
 
+
+def test_startup_cleanup_removes_only_root_upload_scratch_files(tmp_path, monkeypatch):
+    imports = tmp_path / 'imports'
+    imports.mkdir()
+    (imports / 'failed.upload').write_bytes(b'leftover')
+    (imports / 'retained.pdf').write_bytes(b'%PDF-source')
+    nested = imports / 'job_42'
+    nested.mkdir()
+    (nested / 'artifact.upload').write_bytes(b'not an upload request temp')
+    monkeypatch.setattr(main, 'IMPORTS', imports)
+
+    assert main._cleanup_abandoned_upload_temps() == 1
+    assert not (imports / 'failed.upload').exists()
+    assert (imports / 'retained.pdf').exists()
+    assert (nested / 'artifact.upload').exists()
 
 def test_control_marker_cleanup_stays_under_fixed_job_root(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'BASE', tmp_path)

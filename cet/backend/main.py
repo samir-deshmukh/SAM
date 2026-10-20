@@ -179,6 +179,7 @@ async def lifespan(_app):
     # DDL can otherwise block Uvicorn startup long enough for Render's port
     # scanner to declare the new instance unhealthy.
     def _startup_database_maintenance():
+        _cleanup_abandoned_upload_temps()
         try:
             init_admin_schema()
             ensure_part4_schema()
@@ -283,6 +284,28 @@ _CSRF_COOKIE='cet_admin_csrf'
 _SESSION_COOKIE='cet_admin_session'
 # Equal-cost password verification for unknown usernames reduces account enumeration by timing.
 _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
+
+def _cleanup_abandoned_upload_temps() -> int:
+    """Remove root-level upload scratch files left by a killed request/server.
+
+    Successful S3 uploads also need their local scratch copy removed by the
+    request handler. This startup sweep recovers leftovers from older builds
+    and interrupted uploads; it runs before serving requests.
+    """
+    removed = 0
+    try:
+        for path in IMPORTS.glob("*.upload"):
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                log.warning("Could not remove abandoned import upload temp %s", path.name)
+    except OSError:
+        log.exception("Could not scan import directory for abandoned upload temps")
+    if removed:
+        log.info("Removed %s abandoned import upload temp file(s)", removed)
+    return removed
 
 
 # ── Simple in-process rate limiter for the public data API ──
@@ -1742,6 +1765,10 @@ def upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile
             except Exception:
                 log.exception('Could not clean unreferenced source upload %s', job_key)
         raise
+    finally:
+        # S3 storage copies the scratch file to the bucket instead of moving
+        # it. Always remove the request-local copy after success or failure.
+        tmp.unlink(missing_ok=True)
 
 
 
