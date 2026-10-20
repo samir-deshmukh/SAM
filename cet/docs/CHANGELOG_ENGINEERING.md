@@ -5,7 +5,7 @@ This log records verified changes made during the CETFind engineering rebuild. K
 ## 2026-10-20
 
 ### Clean temporary PDF upload copies
-- **Commit:** `4d64124a283c5bbed6a3cb57f92644ea98078934`
+- **Commit:** `7e1c965`
 - **Scope:** Always remove request-local PDF `.upload` scratch files after upload and clear abandoned root-level upload temps at startup. This applies to the legacy direct PDF endpoint when S3 stores a separate durable copy.
 - **Purpose:** Prevent temporary local upload copies from consuming Render disk after failed or deleted imports.
 - **Validation:** Full CET suite: 197 passed, 5 skipped because `TEST_DATABASE_URL` was not configured. Focused upload/storage tests: 12 passed. Python compileall and `git diff --check` passed.
