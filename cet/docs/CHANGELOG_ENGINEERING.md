@@ -4,6 +4,20 @@ This log records verified changes made during the CETFind engineering rebuild. K
 
 ## 2026-10-20
 
+### Reduce duplicate import and release payload storage
+- **Commit:** `4c1a68c`
+- **Scope:** Store normalized staging JSON only when it differs from the original source JSON; preserve fallback reads for current and historical rows. Store only institution/program identifiers in new release rollback metadata. Page release ledger reads during rollback and permanent deletion. Add an authenticated read-only endpoint reporting database and largest relation sizes.
+- **Purpose:** Reduce avoidable future PostgreSQL growth while preserving source rows, production facts, review, and rollback until the user permanently deletes the release; provide the measurements needed to identify existing storage consumers safely.
+- **Validation:** Focused staging, rollback-ledger paging, resolver fallback, and database-storage endpoint tests: 22 passed. Full CET suite: 203 passed, 5 skipped because `TEST_DATABASE_URL` is not configured. Python compileall and `git diff --check` passed. Tests used Python 3.12; CI targets 3.13.
+- **Production impact:** None. Existing data is not rewritten or deleted; no production database or deployment was accessed.
+- **Limitation:** This prevents duplicate growth for new imports/releases but does not reclaim the already-used 1 GB. The new endpoint must be deployed before the production relation-size breakdown is available.
+
+### Verify the candidate college search path end to end
+- **Commit:** pending
+- **Scope:** Add a PostgreSQL-backed regression test for the public `/api/search` handler and verify the production frontend page against a disposable PostgreSQL instance using a synthetic college.
+- **Validation:** New PostgreSQL integration test: 1 passed. Headless Chrome loaded city/course options, searched Amravati/BBA at percentile 90, and rendered the expected fixture college, cutoff, and percentile from the API/database. Standard suite: 203 passed, 6 skipped because `TEST_DATABASE_URL` was not configured. Running the broader DB-marked suite against the disposable DB produced 3 unrelated fixture failures because `cet/data/raw` is absent; the new search integration test passed independently. No production DB was used.
+- **Production impact:** None. All data used was synthetic and stored in a temporary local PostgreSQL container.
+
 ### Clean temporary PDF upload copies
 - **Commit:** `7e1c965`
 - **Scope:** Always remove request-local PDF `.upload` scratch files after upload and clear abandoned root-level upload temps at startup. This applies to the legacy direct PDF endpoint when S3 stores a separate durable copy.

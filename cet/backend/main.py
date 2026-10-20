@@ -2354,6 +2354,38 @@ def runtime_metrics(request: Request):
     }
 
 
+@app.get('/admin/api/database-storage')
+def database_storage(request: Request):
+    """Read-only PostgreSQL footprint diagnostics for the admin console."""
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN', 'REVIEWER', 'READ_ONLY'})
+    with connect() as connection:
+        database = connection.execute(
+            'SELECT pg_database_size(current_database()) AS bytes'
+        ).fetchone()
+        relations = connection.execute(
+            """SELECT schemaname,relname,
+                      pg_relation_size(format('%I.%I',schemaname,relname)::regclass) AS table_bytes,
+                      pg_indexes_size(format('%I.%I',schemaname,relname)::regclass) AS index_bytes,
+                      pg_total_relation_size(format('%I.%I',schemaname,relname)::regclass) AS total_bytes
+               FROM pg_stat_user_tables
+               ORDER BY pg_total_relation_size(format('%I.%I',schemaname,relname)::regclass) DESC
+               LIMIT 30"""
+        ).fetchall()
+    return {
+        'ok': True,
+        'database_bytes': int(database['bytes']) if database else None,
+        'relations': [
+            {
+                'schema': row['schemaname'], 'table': row['relname'],
+                'table_bytes': int(row['table_bytes']),
+                'index_bytes': int(row['index_bytes']),
+                'total_bytes': int(row['total_bytes']),
+            }
+            for row in relations
+        ],
+    }
+
+
 @app.post('/admin/api/imports/{job_id}/cancel')
 def cancel_import(request: Request, job_id: int):
     require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
@@ -2569,7 +2601,7 @@ def review_detail(request: Request, job_id: int):
         job=c.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone()
         if not job: raise HTTPException(404,'Import not found')
         results=[dict(r) for r in c.execute("SELECT * FROM import_results WHERE job_id=? ORDER BY id",(job_id,))]
-        rows=c.execute("SELECT id,result_type,source_file,source_page,normalized_json,validation_status,validation_message "
+        rows=c.execute("SELECT id,result_type,source_file,source_page,COALESCE(normalized_json,raw_json) AS normalized_json,validation_status,validation_message "
                        "FROM import_staging_records WHERE job_id=? ORDER BY id LIMIT 500",(job_id,)).fetchall()
         return {'job':dict(job),'results':results,'rows':[dict(r) for r in rows]}
 
