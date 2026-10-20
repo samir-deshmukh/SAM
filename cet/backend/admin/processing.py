@@ -604,6 +604,24 @@ def _load_staged_rows(conn, job_id: int, result_type: str):
     return rows
 
 
+def _iter_staged_rows(conn, job_id: int, result_type: str, batch_size: int = 200):
+    """Yield staged rows in keyset batches instead of retaining an import in RAM."""
+    batch_size = max(1, int(batch_size))
+    last_id = 0
+    while True:
+        rows = conn.execute(
+            """SELECT id, normalized_json, validation_status
+               FROM import_staging_records
+               WHERE job_id=? AND result_type=? AND id>?
+               ORDER BY id LIMIT ?""",
+            (job_id, result_type, last_id, batch_size),
+        ).fetchall()
+        if not rows:
+            return
+        last_id = int(rows[-1]["id"])
+        yield from rows
+
+
 def _require_clean_stage(conn, job_id: int, result_type: str):
     result = conn.execute(
         "SELECT * FROM import_results WHERE job_id=? AND result_type=? ORDER BY id DESC LIMIT 1",
@@ -984,9 +1002,23 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
         update_status(conn,job_id,JobStatus.APPROVED.value,"Approved by admin; beginning transactional production commit")
         event(conn,job_id,"APPROVAL","Production promotion approved",None)
         update_status(conn,job_id,JobStatus.COMMITTING.value,"Promoting staged rows into production")
-        inserted=[]
         source_pdf=job["original_filename"]
-        staged_rows = _load_staged_rows(conn,job_id,dtype)
+        release_key=f"REL-{job['job_key']}"
+        release_result = conn.execute("""INSERT INTO data_releases
+            (release_key,source_job_id,source_sha256,status,approved_by,notes)
+            VALUES (?,?,?,?,?,?) RETURNING id""",
+            (release_key,job_id,job["sha256"],"COMMITTED",actor_user_id,notes))
+        release_row = release_result.fetchone()
+        if not release_row:
+            raise RuntimeError("Unable to resolve newly created release id")
+        release_id=release_row["id"]
+
+        # The complete staged import and release history used to be held in two
+        # Python lists until the transaction finished. Large PDFs could therefore
+        # exhaust the web process's memory during commit. Keyset-page the staging
+        # rows and flush each bounded release batch inside the same transaction.
+        inserted_batch=[]
+        inserted_count=0
         # Progress is persisted on a separate connection so the UI can poll
         # during the atomic transaction. Keep it useful without making every
         # percentage point an extra database transaction.
@@ -998,7 +1030,7 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
                            {"institutes": set(), "base_categories": set(), "allocation_lanes": set()})
         _write_commit_progress(job_id, "RUNNING", "Writing production records", 0, total_rows,
                                f"Writing 0 of {total_rows:,} staged records")
-        for r in staged_rows:
+        for r in _iter_staged_rows(conn,job_id,dtype):
             raw=json.loads(r["normalized_json"])
             if dtype=="CUTOFFS":
                 rid, after=_insert_cutoff_from_json(conn,raw,job,source_pdf,reference_cache)
@@ -1014,7 +1046,11 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
                         _insert_seat_course_metadata(conn, raw, job, source_pdf)
                         seat_metadata_written.add(metadata_key)
             if rid is not None:
-                inserted.append((table,rid,after))
+                inserted_batch.append((table,rid,after))
+                inserted_count += 1
+                if len(inserted_batch) >= 200:
+                    _insert_release_items_batched(conn, release_id, inserted_batch)
+                    inserted_batch.clear()
             processed_rows += 1
             if processed_rows % progress_interval == 0 or processed_rows == total_rows:
                 _write_commit_progress(
@@ -1023,17 +1059,10 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
                 )
         _write_commit_progress(job_id, "RUNNING", "Creating release", total_rows, total_rows,
                                f"All {total_rows:,} staged records processed; creating release and audit entries")
-        release_key=f"REL-{job['job_key']}"
-        release_result = conn.execute("""INSERT INTO data_releases
-            (release_key,source_job_id,source_sha256,status,approved_by,notes)
-            VALUES (?,?,?,?,?,?) RETURNING id""",
-            (release_key,job_id,job["sha256"],"COMMITTED",actor_user_id,notes))
-        release_row = release_result.fetchone()
-        if not release_row:
-            raise RuntimeError("Unable to resolve newly created release id")
-        release_id=release_row["id"]
-        _insert_release_items_batched(conn, release_id, inserted)
-        event(conn,job_id,"COMMIT",f"Committed {len(inserted)} new production rows",90)
+        if inserted_batch:
+            _insert_release_items_batched(conn, release_id, inserted_batch)
+            inserted_batch.clear()
+        event(conn,job_id,"COMMIT",f"Committed {inserted_count} new production rows",90)
         update_status(conn,job_id,JobStatus.COMMITTING.value,"Production commit completed; release created; publishing is the next phase")
         event(conn,job_id,"RELEASE",f"Release {release_key} committed",100)
         conn.execute("""INSERT INTO audit_log
@@ -1041,12 +1070,12 @@ def approve_import(conn, job_id: int, actor_user_id: int, notes: str = ""):
             VALUES (?,?,?,?,?,?,?)""",
             (actor_user_id,"APPROVE_IMPORT","IMPORT",str(job_id),None,
              json.dumps({"release_id":release_id,"release_key":release_key,
-                         "rows_inserted":len(inserted)},ensure_ascii=False),notes or "Approved import"))
+                         "rows_inserted":inserted_count},ensure_ascii=False),notes or "Approved import"))
         conn.commit()
         _write_commit_progress(job_id, "COMPLETED", "Database commit complete", total_rows, total_rows,
-                               f"Database commit complete: {len(inserted):,} new rows saved. Release {release_key} is awaiting publish.")
+                f"Database commit complete: {inserted_count:,} new rows saved. Release {release_key} is awaiting publish.")
         return {"ok":True,"job_id":job_id,"status":"COMMITTING","release_key":release_key,
-                "release_id":release_id,"rows_inserted":len(inserted)}
+                "release_id":release_id,"rows_inserted":inserted_count}
     except Exception as exc:
         conn.rollback()
         try:

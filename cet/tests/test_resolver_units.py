@@ -131,7 +131,9 @@ def test_gemini_results_expose_only_provider_grounding_as_evidence(monkeypatch):
     result, _ = resolver.gemini_find("Example College", institution_code="1234")
     assert result["evidence_urls"] == ["https://cetcell.example.gov.in/institute/1234"]
     assert result["model_evidence_urls"] == ["https://invented.example/source"]
-    assert "college.example.edu" in result["grounding_evidence"][0]["supporting_text"][0]
+    assert resolver._grounding_supports_site(
+        "https://college.example.edu", result["grounding_evidence"]
+    )
     assert result["city"] == "Pune"
 
 

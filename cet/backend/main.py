@@ -2552,16 +2552,18 @@ async def resolver_find(request: Request):
                     )
                 results.append({'institution_code':code,'institution_name':r['institution_name'],'city':city,'address':address,'website':v.get('url') or url,'status':status,'note':note})
             except Exception as e:
+                log.exception('College website resolver failed: institution_code=%s', code)
+                safe_note = 'Website research failed. Check server logs and retry.'
                 c.execute(
                     'UPDATE college_website_resolver SET status=?,verification_note=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE institution_code=?',
-                    ('FAILED', str(e)[:500], code),
+                    ('FAILED', safe_note, code),
                 )
                 results.append({
                     'institution_code': code,
                     'institution_name': r['institution_name'],
                     'website': candidate,
                     'status': 'FAILED',
-                    'note': str(e)[:500],
+                    'note': safe_note,
                 })
         c.commit()
     return {'ok':True,'results':results}

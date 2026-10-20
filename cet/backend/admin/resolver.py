@@ -205,7 +205,7 @@ def _grounding_supports_site(url, evidence):
     for item in evidence or []:
         source_url = valid_url(item.get("url"))
         source_host = (urllib.parse.urlparse(source_url).hostname or "").lower().removeprefix("www.") if source_url else ""
-        if source_host and not source_host.endswith("vertexaisearch.cloud.google.com") and (
+        if source_host and source_host != "vertexaisearch.cloud.google.com" and (
             source_host == candidate_host or source_host.endswith("." + candidate_host)
         ):
             return True
