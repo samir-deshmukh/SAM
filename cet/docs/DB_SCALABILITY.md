@@ -45,6 +45,18 @@ Raw tables remain the source of truth. Public requests should increasingly use p
 4. Run `ANALYZE` after successful derived-data rebuilds so planner statistics reflect the new dataset.
 5. Measure representative production queries with `EXPLAIN (ANALYZE, BUFFERS)` from inside the private backend network.
 
+### Storage diagnosis
+
+Use the authenticated, read-only `GET /admin/api/database-storage` endpoint to inspect the current database size and the 30 largest application relations. It reports heap, index, and total relation bytes; PostgreSQL TOAST data is included in the total. Capture this before removing data or changing indexes so the actual storage consumer is known. The endpoint does not scan table contents or mutate database state.
+
+Deleting rows does not necessarily return disk space to the hosting provider. PostgreSQL can reuse freed pages inside a relation; a table rewrite such as `VACUUM FULL` requires extra free disk and can fail on a full database. Do not run a rewrite or remove indexes based on estimates alone.
+
+### Import/release storage
+
+- Staging keeps the original row in `raw_json`. When normalization makes no change, `normalized_json` is NULL and readers use `COALESCE(normalized_json, raw_json)`. Rows changed by continuation-cell normalization retain both versions.
+- New release ledger entries retain only `institution_code` and `program_id` in their rollback metadata. The authoritative fact row and staged source evidence remain intact. Rollback continues to use the ledger row IDs, while permanent release deletion removes the release ledger and its linked staging evidence as before.
+- Existing ledger rows are not rewritten automatically. A mass rewrite on a full database risks exhausting disk and PostgreSQL table rewrites need additional space. Measure current relation sizes first.
+
 ## Phase 2 — when raw search becomes the bottleneck
 
 Do not add indexes blindly. Compare the execution plan first.

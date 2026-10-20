@@ -52,6 +52,32 @@ def test_unknown_but_well_formed_category_is_accepted_and_file_issue_stays_file_
     assert "Total issues" not in conn.rows[0][7]
 
 
+def test_unchanged_source_rows_store_only_one_json_copy(tmp_path):
+    csv_path = tmp_path / "BCA_26_C2_cutoffs.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["institution_code", "program_name", "category", "percentage", "page"])
+        writer.writeheader()
+        writer.writerow({"institution_code": "01001", "program_name": "BCA", "category": "GOPENH", "percentage": "90.1", "page": "1"})
+        writer.writerow({"institution_code": "", "program_name": "BCA", "category": "GOPENH", "percentage": "89.1", "page": "2"})
+
+    conn = FakeConnection()
+    _stage_csv(conn, 57, "CUTOFFS", csv_path, True, "", ())
+
+    first_raw, first_normalized = conn.rows[0][4:6]
+    second_raw, second_normalized = conn.rows[1][4:6]
+    assert first_normalized is None
+    assert second_raw != second_normalized
+
+
+def test_rollback_history_keeps_only_reference_cleanup_metadata():
+    from backend.admin.processing import _rollback_metadata
+
+    assert _rollback_metadata({
+        "institution_code": "01001", "program_id": 23, "rank_number": 100,
+        "percentile": 99.25, "category": "GOPENH",
+    }) == {"institution_code": "01001", "program_id": 23}
+
+
 def test_new_cutoff_category_resolves_without_reference_whitelist_entry():
     assert _resolve_cutoff_dimensions({
         "category": "GNEWCODEH", "section": "", "stage": "Stage-I",

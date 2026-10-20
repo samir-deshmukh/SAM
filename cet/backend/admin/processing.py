@@ -222,9 +222,14 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
             else:
                 row_status = "VALID"
                 message = None
+            raw_json = json.dumps(raw, ensure_ascii=False)
+            normalized_json = json.dumps(normalized, ensure_ascii=False)
+            # NULL means normalization left the source row unchanged. PostgreSQL
+            # compresses each TEXT value independently, so retaining both copies
+            # needlessly duplicates the row payload.
             batch.append((job_id, result_type, path.name, _page_from(normalized),
-                          json.dumps(raw, ensure_ascii=False),
-                          json.dumps(normalized, ensure_ascii=False),
+                          raw_json,
+                          normalized_json if normalized_json != raw_json else None,
                           row_status, message))
             rows += 1
             if len(batch) >= 1000:
@@ -637,7 +642,7 @@ def process_import(conn, job_id: int, pdf_path: Path, *,
 
 def _load_staged_rows(conn, job_id: int, result_type: str):
     rows = conn.execute(
-        "SELECT id, normalized_json, validation_status FROM import_staging_records "
+        "SELECT id, COALESCE(normalized_json,raw_json) AS normalized_json, validation_status FROM import_staging_records "
         "WHERE job_id=? AND result_type=? ORDER BY id", (job_id, result_type)
     ).fetchall()
     return rows
@@ -649,12 +654,34 @@ def _iter_staged_rows(conn, job_id: int, result_type: str, batch_size: int = 200
     last_id = 0
     while True:
         rows = conn.execute(
-            """SELECT id, normalized_json, validation_status
+            """SELECT id, COALESCE(normalized_json,raw_json) AS normalized_json, validation_status
                FROM import_staging_records
                WHERE job_id=? AND result_type=? AND id>?
                ORDER BY id LIMIT ?""",
             (job_id, result_type, last_id, batch_size),
         ).fetchall()
+        if not rows:
+            return
+        last_id = int(rows[-1]["id"])
+        yield from rows
+
+
+def _iter_release_items(conn, release_id: int, *, newest_first: bool = False,
+                        batch_size: int = 500):
+    """Page rollback ledger rows so a large release does not load its ledger into RAM."""
+    batch_size = max(1, int(batch_size))
+    last_id = 9223372036854775807 if newest_first else 0
+    while True:
+        if newest_first:
+            rows = conn.execute(
+                "SELECT * FROM data_release_items WHERE release_id=? AND id<? ORDER BY id DESC LIMIT ?",
+                (release_id, last_id, batch_size),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM data_release_items WHERE release_id=? AND id>? ORDER BY id LIMIT ?",
+                (release_id, last_id, batch_size),
+            ).fetchall()
         if not rows:
             return
         last_id = int(rows[-1]["id"])
@@ -735,7 +762,7 @@ def revalidate_legacy_mh_staging(conn, job_id: int, actor_user_id: int):
     with alias_path.open("r", encoding="utf-8-sig", newline="") as handle:
         valid_programs = {str(row.get("raw_name", "")).strip() for row in csv.DictReader(handle)}
     rows = conn.execute(
-        "SELECT id,result_type,normalized_json,validation_status FROM import_staging_records WHERE job_id=? ORDER BY id",
+        "SELECT id,result_type,COALESCE(normalized_json,raw_json) AS normalized_json,validation_status FROM import_staging_records WHERE job_id=? ORDER BY id",
         (job_id,),
     ).fetchall()
     if len(rows) != 327 or any(row.get("result_type") != "CUTOFFS" for row in rows):
@@ -994,6 +1021,11 @@ def _write_commit_progress(job_id: int, status: str, stage: str,
         progress_conn.commit()
 
 
+def _rollback_metadata(after: dict) -> dict:
+    """Project a fact row to the only fields rollback needs for reference cleanup."""
+    return {key: after[key] for key in ("institution_code", "program_id") if key in after}
+
+
 def _insert_release_items_batched(conn, release_id: int, inserted: list[tuple], batch_size: int = 500) -> None:
     """Write release history in bounded batches without changing its contents."""
     for start in range(0, len(inserted), batch_size):
@@ -1004,7 +1036,10 @@ def _insert_release_items_batched(conn, release_id: int, inserted: list[tuple], 
                 "row_id": int(row_id),
                 "operation": "INSERT",
                 "before_json": None,
-                "after_json": json.dumps(after, ensure_ascii=False),
+                # Rollback needs only the owning institution and (for cutoffs)
+                # program to clean up orphaned reference rows. The full values
+                # remain in authoritative fact rows and source staging.
+                "after_json": json.dumps(_rollback_metadata(after), ensure_ascii=False),
             }
             for table, row_id, after in batch
         ], ensure_ascii=False)
@@ -1140,9 +1175,8 @@ def purge_rolled_back_release(conn, release_id: int, actor_user_id: int):
         raise ValueError("Only a rolled-back release can be permanently deleted")
     job_id=release["source_job_id"]
     job=conn.execute("SELECT * FROM import_jobs WHERE id=?",(job_id,)).fetchone() if job_id else None
-    items=conn.execute("SELECT after_json FROM data_release_items WHERE release_id=?",(release_id,)).fetchall()
     affected_institutes=set(); affected_program_ids=set()
-    for item in items:
+    for item in _iter_release_items(conn, release_id):
         try: after=json.loads(item["after_json"] or "{}")
         except Exception: after={}
         code=str(after.get("institution_code","")).strip()
@@ -1211,11 +1245,10 @@ def rollback_release(conn, release_id: int, actor_user_id: int, reason: str):
         os.replace(public_root,old); os.replace(temp,public_root); shutil.rmtree(old,ignore_errors=True); restored=True
     # The caller's connection already has an active SQLAlchemy transaction.
     try:
-        items=conn.execute("SELECT * FROM data_release_items WHERE release_id=? ORDER BY id DESC",(release_id,)).fetchall()
         deleted=0
         affected_institutes=set()
         affected_program_ids=set()
-        for item in items:
+        for item in _iter_release_items(conn, release_id, newest_first=True):
             table=item["table_name"]
             if table not in {"cutoffs","seats"}: raise ValueError("Unsupported release table")
             try:

@@ -4,6 +4,14 @@ This log records verified changes made during the CETFind engineering rebuild. K
 
 ## 2026-10-20
 
+### Reduce duplicate import and release payload storage
+- **Commit:** pending
+- **Scope:** Store normalized staging JSON only when it differs from the original source JSON; preserve fallback reads for current and historical rows. Store only institution/program identifiers in new release rollback metadata. Page release ledger reads during rollback and permanent deletion. Add an authenticated read-only endpoint reporting database and largest relation sizes.
+- **Purpose:** Reduce avoidable future PostgreSQL growth while preserving source rows, production facts, review, and rollback until the user permanently deletes the release; provide the measurements needed to identify existing storage consumers safely.
+- **Validation:** Focused staging, rollback-ledger paging, resolver fallback, and database-storage endpoint tests: 22 passed. Full CET suite: 203 passed, 5 skipped because `TEST_DATABASE_URL` is not configured. Python compileall and `git diff --check` passed. Tests used Python 3.12; CI targets 3.13.
+- **Production impact:** None. Existing data is not rewritten or deleted; no production database or deployment was accessed.
+- **Limitation:** This prevents duplicate growth for new imports/releases but does not reclaim the already-used 1 GB. The new endpoint must be deployed before the production relation-size breakdown is available.
+
 ### Clean temporary PDF upload copies
 - **Commit:** `7e1c965`
 - **Scope:** Always remove request-local PDF `.upload` scratch files after upload and clear abandoned root-level upload temps at startup. This applies to the legacy direct PDF endpoint when S3 stores a separate durable copy.

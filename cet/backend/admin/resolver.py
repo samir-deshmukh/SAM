@@ -395,7 +395,7 @@ def seed_from_import(conn, job_id, codes_out=None):
     last_id = 0
     while True:
         source_rows = conn.execute(
-            "SELECT id,normalized_json FROM import_staging_records "
+            "SELECT id,COALESCE(normalized_json,raw_json) AS normalized_json FROM import_staging_records "
             "WHERE job_id=? AND result_type IN ('CUTOFFS','SEATS') AND id>? "
             "ORDER BY id LIMIT 500",
             (job_id, last_id),
@@ -854,10 +854,9 @@ def _import_names_for_codes(conn, codes):
     placeholders = ','.join('?' for _ in codes)
     try:
         rows = conn.execute(
-            "SELECT normalized_json FROM import_staging_records "
+            "SELECT COALESCE(normalized_json,raw_json) AS normalized_json FROM import_staging_records "
             "WHERE result_type IN ('CUTOFFS','SEATS') "
-            "AND normalized_json IS NOT NULL "
-            f"AND (normalized_json::jsonb ->> 'institution_code') IN ({placeholders}) "
+            f"AND (COALESCE(normalized_json,raw_json)::jsonb ->> 'institution_code') IN ({placeholders}) "
             "ORDER BY id DESC",
             tuple(codes),
         ).fetchall()
