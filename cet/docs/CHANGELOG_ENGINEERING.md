@@ -4,6 +4,20 @@ This log records verified changes made during the CETFind engineering rebuild. K
 
 ## 2026-10-20
 
+### Clean temporary PDF upload copies
+- **Commit:** `7e1c965`
+- **Scope:** Always remove request-local PDF `.upload` scratch files after upload and clear abandoned root-level upload temps at startup. This applies to the legacy direct PDF endpoint when S3 stores a separate durable copy.
+- **Purpose:** Prevent temporary local upload copies from consuming Render disk after failed or deleted imports.
+- **Validation:** Full CET suite: 197 passed, 5 skipped because `TEST_DATABASE_URL` was not configured. Focused upload/storage tests: 12 passed. Python compileall and `git diff --check` passed.
+- **Production impact:** None. No production files or storage settings were changed.
+
+### Serialize PDF imports through staging and release worker copies
+- **Commit:** `6bd24e48c3a4bf74fc6d8cc9b66a081d2ebdf321`
+- **Scope:** Keep the single worker queue occupied until CAPFind finishes validating and staging each uploaded extraction. Remove extractor intermediates after upload and, in remote-worker mode, remove the worker's duplicate source PDF and CSV after successful staging.
+- **Purpose:** Prevent multiple large extraction/staging jobs from overlapping on the worker PC and bound temporary disk usage while preserving retry data and durable source PDFs.
+- **Validation:** Full CET suite: 196 passed, 5 skipped because `TEST_DATABASE_URL` was not configured. Python compileall and `git diff --check` passed.
+- **Production impact:** None. This change does not configure storage, deploy code, or delete production data.
+
 ### Queue PDF extraction for remote admin-panel access
 - **Commit:** `28e5c446556ff66b76710b3b0b58de55f00cbf9c`
 - **Scope:** Changed PDF uploads to use private durable S3-compatible storage and an authenticated outbound worker-polling queue. Added server-side worker status/control, lease renewal and recovery, bounded S3 streaming, and a managed Linux user-service installer. Same-PC browser-local uploads remain available until remote mode is configured.

@@ -6,6 +6,7 @@
 - The API streams each PDF to private S3-compatible storage. It does not keep the entire PDF in Render RAM.
 - The worker PC makes outbound HTTPS requests to claim jobs and download the source PDF. No browser-to-PC connection, local-network permission, public worker port, or tunnel is needed.
 - The worker verifies the source size and SHA-256, runs the existing cutoff and seat-matrix extractors on the PC, and uploads the extracted CSV and audit summary to CAPFind.
+- The worker processes one PDF through server validation and staging before starting the next queued PDF. It removes extractor intermediates after artifact upload; in remote queue mode, it also removes its local source and CSV copies after successful staging because the source remains in private storage.
 - CAPFind continues normalization, validation, duplicate comparison, staging, review, and approval on the server. Extraction never approves or publishes data.
 - Source PDFs must be in private, durable storage. Remote PDF upload fails closed unless S3-compatible storage and the worker secret are configured. Render's local filesystem is not a safe queue because a deploy or restart can remove queued source files.
 
@@ -45,6 +46,7 @@ Check it with `systemctl --user status capfind-local-worker.service`. Logs are a
 - Pause and cancel commands are read from the server at safe extraction checkpoints, so the admin can control jobs from another device.
 - A worker restart may restart extraction from page one because parser state is not serializable. It retains the original PDF and checks the hash before processing. Existing staged data is not silently discarded by recovery.
 - Retry after a server validation failure reuses the retained CSV when it is still available; a retry after worker failure downloads the retained source PDF again.
+- Legacy same-PC mode retains the original PDF and final CSV for retries. If those retained files themselves fill the PC disk, queueing cannot reclaim that durable data; configure private S3-compatible storage and remote worker mode, or remove completed imports through the admin workflow.
 
 ## OCR dependency
 
