@@ -62,7 +62,7 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Production impact:** None.
 
 # Accept new source-defined CAP categories
-- **Commit:** pending
+- **Commit:** `9216285`
 - **Scope:** Treat category whitelist CSVs as descriptive metadata. Accept structurally valid source category codes in cutoff and seat-matrix validation/staging, and register new base codes before fact insertion. Continue rejecting malformed category text and the known extraction anomalies.
 - **Purpose:** Avoid rejecting future official category codes simply because they were not anticipated in a static list.
 - **Validation:** Python syntax compilation and `git diff --check` passed. The test suite was not run because test execution was not requested. No production database or deployment was touched.
