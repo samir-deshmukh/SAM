@@ -4,6 +4,28 @@ This log records verified changes made during the CETFind engineering rebuild. K
 
 ## 2026-10-20
 
+### Queue PDF extraction for remote admin-panel access
+- **Commit:** `28e5c446556ff66b76710b3b0b58de55f00cbf9c`
+- **Scope:** Changed PDF uploads to use private durable S3-compatible storage and an authenticated outbound worker-polling queue. Added server-side worker status/control, lease renewal and recovery, bounded S3 streaming, and a managed Linux user-service installer. Same-PC browser-local uploads remain available until remote mode is configured.
+- **Purpose:** Allow an admin to upload, monitor, pause, resume, retry, and cancel PDF imports from another device without exposing the home PC worker to inbound network traffic or doing PDF extraction on Render's 100 MiB web instance.
+- **Validation:** Full CET suite: 192 passed, 5 skipped because `TEST_DATABASE_URL` was not configured. Python compileall, shell syntax checks, generated Import Center JavaScript `node --check`, and `git diff --check` passed. Tests ran under Python 3.12 because no Python 3.13 runtime was available locally.
+- **Production impact:** None. No Render environment variables, storage bucket, deployment, database, or production data were changed.
+- **Rollout requirement:** Remote mode stays unavailable until a private durable S3-compatible bucket and matching `CAPFIND_REMOTE_WORKER_TOKEN` are configured on Render and on the worker PC. This is fail-closed because Render's default filesystem is ephemeral.
+
+### Use job-scoped paths for extracted artifacts
+- **Commit:** `320e23554494f2a4fac443f0418089db74dd5213`
+- **Scope:** Store server-side extracted CSVs using numeric import job IDs and use a bounded legacy lookup for artifacts created by older worker versions.
+- **Purpose:** Remove user-provided PDF filenames from server filesystem path construction identified by CodeQL on PR #21.
+- **Validation:** Full CET suite: 193 passed, 5 skipped because `TEST_DATABASE_URL` was not set. Python compileall and `git diff --check` passed.
+- **Production impact:** None. No database, storage, or deployment changes.
+
+### Clear retry markers with scoped directory lookup
+- **Commit:** `9e74e67256f101d9d04ae81ab45e8fe5b57d3923`
+- **Scope:** Remove retry-time pause/cancel markers only after locating the numeric job directory beneath the fixed import-staging root.
+- **Purpose:** Address the remaining CodeQL path-flow alert without constructing a filesystem path from request-controlled data.
+- **Validation:** Full CET suite: 194 passed, 5 skipped because `TEST_DATABASE_URL` was not set. Python compileall and `git diff --check` passed.
+- **Production impact:** None.
+
 ### Establish rebuild baseline
 - **Commit:** `ebb03f28163d147058eaa78e02cf588dec688847`
 - **Scope:** Added `docs/REBUILD_PLAN.md` and created isolated branch `rebuild/cetfind-engineering-baseline` from the known `main` baseline.

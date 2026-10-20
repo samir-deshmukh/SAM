@@ -106,11 +106,16 @@ def store_source_pdf(local_path: Path, object_key: str, sha256: str) -> str:
             f"the configured {max_bytes:,}-byte cap). Delete old source PDFs or "
             "raise CET_S3_MAX_STORED_BYTES only after reviewing free-tier limits."
         )
-    # No ACL/public-read option is ever set: the bucket/object must remain private.
-    client.upload_file(
-        str(local_path), bucket, key,
-        ExtraArgs={"ContentType": ("text/csv; charset=utf-8" if Path(object_key).suffix.lower() == ".csv" else "application/pdf"), "Metadata": {"sha256": sha256}},
-    )
+    # Source PDFs are uploaded on the 100 MiB web instance. boto3's managed
+    # upload_file uses multipart concurrency by default and can buffer several
+    # parts at once. A single streaming PutObject is bounded and is well below
+    # S3's 5 GiB single-PUT limit for CAPFind's 100 MiB CSV / 50 MiB PDF limits.
+    with local_path.open("rb") as body:
+        client.put_object(
+            Bucket=bucket, Key=key, Body=body, ContentLength=local_path.stat().st_size,
+            ContentType=("text/csv; charset=utf-8" if Path(object_key).suffix.lower() == ".csv" else "application/pdf"),
+            Metadata={"sha256": sha256},
+        )
     return f"s3://{bucket}/{quote(key, safe='/')}"
 
 
@@ -140,7 +145,17 @@ def materialize_source(stored_path: str):
     os.close(fd)
     temp_path = Path(temp_name)
     try:
-        client.download_file(bucket, key, str(temp_path))
+        response = client.get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        try:
+            with temp_path.open("wb") as output:
+                while True:
+                    chunk = body.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        finally:
+            body.close()
         yield temp_path
     finally:
         temp_path.unlink(missing_ok=True)

@@ -833,7 +833,7 @@ async function load(){loadSiteUsage();try{const [o,j]=await Promise.all([api('/a
 
 
 def import_center() -> str:
-    body="""<div class="title"><div><h1>Import Center</h1></div><div class="live"><span class="dot"></span><span id="localWorkerStatus">Checking local PDF worker…</span></div></div>
+    body="""<div class="title"><div><h1>Import Center</h1></div><div class="live"><span class="dot"></span><span id="localWorkerStatus">Checking extraction worker…</span></div></div>
 <div class="import-workspace">
   <div class="card metric upload-quick"><div class="label">Upload files</div><form id="uploadForm" style="margin-top:8px"><input id="file" type="file" accept="application/pdf,.pdf,.csv,text/csv" multiple required style="display:block;margin:0 0 8px"><div id="selectedFiles" class="small muted" style="margin-bottom:8px"></div><div id="uploadMetadata" class="small muted" style="margin-bottom:8px"></div><div id="uploadState" class="small muted" style="margin-top:6px"></div><button class="btn primary" id="uploadBtn">Upload</button></form></div>
   <div class="import-runtime-column">
@@ -847,7 +847,7 @@ def import_center() -> str:
 const form=document.querySelector('#uploadForm'),fileInput=document.querySelector('#file'),uploadBtn=document.querySelector('#uploadBtn'),uploadState=document.querySelector('#uploadState'),uploadMetadata=document.querySelector('#uploadMetadata');
 const LOCAL_WORKER_URL='http://127.0.0.1:8765';let importJobs=[];
 async function localWorkerRequest(path,opts={}){let response;try{response=await fetch(LOCAL_WORKER_URL+path,Object.assign({cache:'no-store'},opts))}catch(_){throw new Error('Cannot reach the CAPFind worker on this PC. Start it with ./scripts/start_local_worker.sh, then retry. Allow local-network access if the browser asks.')}const raw=await response.text();let data=null;try{data=raw?JSON.parse(raw):null}catch{}if(!response.ok)throw new Error(data?.detail||'Local worker request failed ('+response.status+')');return data}
-async function checkLocalWorker(){const status=document.querySelector('#localWorkerStatus');try{const health=await localWorkerRequest('/health');status.textContent=health.ok?'PDF extraction runs on this PC':'Local PDF worker unavailable';status.title=(health.active_job?'Processing job '+health.active_job+' · ':'')+(health.queued_jobs||0)+' queued locally'}catch(e){status.textContent='Local PDF worker offline';status.title=e.message}}
+async function checkLocalWorker(){const status=document.querySelector('#localWorkerStatus');try{const health=await api('/admin/api/remote-worker/status'),active=(health.workers||[]).find(w=>w.online&&w.active_job_id);if(health.online){status.textContent='PDF extraction worker online';status.title=active?'Processing import #'+active.active_job_id:'Ready for queued PDFs'}else if(!health.configured){status.textContent='Remote PDF extraction needs setup';status.title=health.storage_ready?'Configure the shared worker token on Render and the worker PC. Same-PC local uploads remain available.':'Configure private durable PDF storage and the shared worker token. Same-PC local uploads remain available.'}else{status.textContent='PDF extraction worker offline';status.title='PDF jobs remain queued until the worker PC reconnects'}}catch(e){status.textContent='Could not check extraction worker';status.title=e.message}}
 async function sha256File(file){const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')}
 function parseCsvLine(line){const out=[];let value='',quoted=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'&&quoted&&line[i+1]==='"'){value+='"';i++}else if(ch==='"'){quoted=!quoted}else if(ch===','&&!quoted){out.push(value);value=''}else value+=ch}out.push(value);return out}
 function uploadWithProgress(url,data,file,onProgress){
@@ -905,19 +905,23 @@ form.addEventListener('submit',async e=>{
         data.append('data_type',meta.type);data.append('course_family',meta.family);data.append('year',meta.year);data.append('round_name',meta.round);endpoint='/admin/api/imports/csv';
       }
       if(kind==='PDF'){
-        uploadState.textContent='Preparing local extraction: '+f.name+' · calculating fingerprint';
-        await localWorkerRequest('/health');
-        const sha256=await sha256File(f);
-        const job=await api('/admin/api/local-imports',{method:'POST',headers:csrfHeaders({'Content-Type':'application/json'}),body:JSON.stringify({filename:f.name,size_bytes:f.size,sha256})});
-        const localData=new FormData();localData.append('file',f,f.name);localData.append('job_id',String(job.job_id));localData.append('backend_url',location.origin);localData.append('upload_token',job.upload_token);localData.append('expected_sha256',sha256);localData.append('expected_size',String(f.size));
-        uploadState.textContent='Transferring '+f.name+' to this PC’s local worker';
-        try{await localWorkerRequest('/jobs',{method:'POST',body:localData})}catch(err){try{await api('/admin/api/local-imports/'+job.job_id+'/fail',{method:'POST',headers:{Authorization:'Bearer '+job.upload_token,'Content-Type':'application/json'},body:JSON.stringify({error:'Local worker could not accept the PDF: '+err.message})})}catch(_){}throw new Error('Import #'+job.job_id+' was created but local transfer failed. '+err.message)}
-        accepted++;uploadState.textContent='PDF queued for extraction on this PC.';toast('Local extraction queued · job #'+job.job_id,'ok');await load();continue;
+        let remoteReady=false;try{remoteReady=(await api('/admin/api/remote-worker/status')).configured===true}catch(_){}
+        if(remoteReady){endpoint='/admin/api/remote-worker/imports';uploadState.textContent='Uploading PDF to private storage for remote extraction: '+f.name}
+        else{
+          try{await localWorkerRequest('/health')}catch(_){throw new Error('Remote PDF extraction is not configured yet. Configure private durable PDF storage and the shared worker token on Render and the worker PC; the local fallback only works on this PC.')}
+          uploadState.textContent='Preparing local extraction: '+f.name+' · calculating fingerprint';
+          const sha256=await sha256File(f);
+          const job=await api('/admin/api/local-imports',{method:'POST',headers:csrfHeaders({'Content-Type':'application/json'}),body:JSON.stringify({filename:f.name,size_bytes:f.size,sha256})});
+          const localData=new FormData();localData.append('file',f,f.name);localData.append('job_id',String(job.job_id));localData.append('backend_url',location.origin);localData.append('upload_token',job.upload_token);localData.append('expected_sha256',sha256);localData.append('expected_size',String(f.size));
+          uploadState.textContent='Transferring '+f.name+' to this PC’s local worker';
+          try{await localWorkerRequest('/jobs',{method:'POST',body:localData})}catch(err){try{await api('/admin/api/local-imports/'+job.job_id+'/fail',{method:'POST',headers:{Authorization:'Bearer '+job.upload_token,'Content-Type':'application/json'},body:JSON.stringify({error:'Local worker could not accept the PDF: '+err.message})})}catch(_){}throw new Error('Import #'+job.job_id+' was created but local transfer failed. '+err.message)}
+          accepted++;uploadState.textContent='PDF queued for local extraction.';toast('Local extraction queued · job #'+job.job_id,'ok');await load();continue;
+        }
       }
       uploadState.textContent='Uploading '+kind+' 0%: '+f.name;
       const result=await uploadWithProgress(endpoint,data,f,(loaded,total)=>{const pct=total?Math.min(100,Math.round(loaded/total*100)):0;uploadState.textContent='Uploading '+kind+' '+pct+'% · '+bytes(loaded)+' / '+bytes(total)+': '+f.name});accepted++;
       uploadState.textContent=kind+' uploaded.';
-      toast(kind+' submitted: '+f.name+' · job #'+(result.id||result.job_id),'ok');await load();
+      toast(kind==='PDF'?'PDF queued for extraction · job #'+(result.job_id||result.id):kind+' submitted: '+f.name+' · job #'+(result.id||result.job_id),'ok');await load();
     }
     uploadState.textContent='Uploaded '+accepted+' file(s).';
     fileInput.value='';document.querySelector('#selectedFiles').textContent='';uploadMetadata.textContent='';

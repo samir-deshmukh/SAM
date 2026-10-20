@@ -98,3 +98,8 @@ def test_worker_binds_only_to_loopback_by_default():
         "localhost",
         "127.0.0.1",
     }
+
+
+def test_remote_claim_is_disabled_without_shared_worker_secret(monkeypatch):
+    monkeypatch.delenv("CAPFIND_REMOTE_WORKER_TOKEN", raising=False)
+    assert local_worker._claim_remote_job() is False

@@ -30,6 +30,11 @@ def ensure_part4_schema():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_import_worker_leases_expiry ON import_worker_leases(lease_until)")
+        c.execute("""CREATE TABLE IF NOT EXISTS remote_worker_heartbeats (
+            worker_id TEXT PRIMARY KEY,
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            active_job_id INTEGER REFERENCES import_jobs(id) ON DELETE SET NULL
+        )""")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER NOT NULL DEFAULT 0")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS total_pages INTEGER NOT NULL DEFAULT 0")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS current_chunk INTEGER NOT NULL DEFAULT 0")
@@ -37,6 +42,7 @@ def ensure_part4_schema():
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted BOOLEAN NOT NULL DEFAULT FALSE")
         c.execute("ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_deleted_at TIMESTAMPTZ")
         c.execute("CREATE INDEX IF NOT EXISTS idx_import_jobs_queue ON import_jobs(status,created_at)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_import_events_job_type ON import_events(job_id,event_type)")
         # Indexes used by Review Center counts and latest-seat source coverage.
         c.execute("CREATE INDEX IF NOT EXISTS idx_import_staging_job_validation ON import_staging_records(job_id, validation_status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seats_coverage_latest ON seats(program_family, institution_code, capture_year, choice_code)")

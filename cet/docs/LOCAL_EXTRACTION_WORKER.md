@@ -1,58 +1,62 @@
-# CAPFind Local Extraction Worker
+# CAPFind Remote Extraction Worker
 
-## What it does
+## How remote panel use works
 
-- Keeps the source PDF on the computer where the admin selects it.
-- Uses CAPFind's existing Python cutoff and seat-matrix extractors locally.
-- Persists the queue and source PDF under **data/local_worker/**.
-- Sends the extracted CSV artifact and metadata to the authenticated CAPFind API.
-- Leaves normalization, validation, duplicate comparison, PostgreSQL staging, review, and approval on the server.
-- Runs independently of the browser tab after the PDF has been transferred to the local worker.
+- Admins can open Import Center from any device and upload PDFs to the authenticated CAPFind API.
+- The API streams each PDF to private S3-compatible storage. It does not keep the entire PDF in Render RAM.
+- The worker PC makes outbound HTTPS requests to claim jobs and download the source PDF. No browser-to-PC connection, local-network permission, public worker port, or tunnel is needed.
+- The worker verifies the source size and SHA-256, runs the existing cutoff and seat-matrix extractors on the PC, and uploads the extracted CSV and audit summary to CAPFind.
+- CAPFind continues normalization, validation, duplicate comparison, staging, review, and approval on the server. Extraction never approves or publishes data.
+- Source PDFs must be in private, durable storage. Remote PDF upload fails closed unless S3-compatible storage and the worker secret are configured. Render's local filesystem is not a safe queue because a deploy or restart can remove queued source files.
 
-The worker binds only to **127.0.0.1:8765**. Do not change it to **0.0.0.0** or expose this port to a LAN or the internet.
+The local worker HTTP service still binds only to **127.0.0.1:8765** for compatibility with already queued legacy jobs. The remote queue uses outbound HTTPS and does not expose this service to the LAN or internet.
 
-## Start and stop
+## One-time setup
 
-The environment used on the development PC is **~/.venvs/capfind-local-worker**. The start script runs the worker detached, so closing the terminal or browser does not stop extraction.
+On Render, configure:
 
-From the cet directory, run:
+- `CET_PDF_STORAGE_BACKEND=s3`
+- `CET_S3_ENDPOINT_URL`, `CET_S3_BUCKET`, `CET_S3_ACCESS_KEY_ID`, and `CET_S3_SECRET_ACCESS_KEY` for a private bucket
+- `CAPFIND_REMOTE_WORKER_TOKEN` as a random secret with at least 32 characters
 
-- **scripts/start_local_worker.sh**
-- **scripts/stop_local_worker.sh**
+Generate a shared token locally with `openssl rand -hex 32`, then enter the same value in Render and the worker PC. Use a bucket dedicated to CAPFind source PDFs, keep it private, and review the provider's storage and request limits. Never put these values in Git or a support message. The existing storage quota guard remains active.
 
-A desktop autostart entry is installed for the current Linux user. On login, it starts the worker and recovers queued/running jobs. Logs are written to **~/.local/state/capfind-local-worker/worker.log**.
+On the worker PC, create a virtual environment and install the worker dependencies if not already present:
 
-If creating the environment from scratch:
+```bash
+python3 -m venv ~/.venvs/capfind-local-worker
+~/.venvs/capfind-local-worker/bin/python -m pip install -r requirements-dev.txt
+```
 
-- **python3 -m venv ~/.venvs/capfind-local-worker**
-- **~/.venvs/capfind-local-worker/bin/python -m pip install -r requirements-dev.txt**
+Edit `~/.config/capfind/local-worker.env` and set `CAPFIND_REMOTE_WORKER_TOKEN` to the same random value configured on Render. Keep the file owner-readable only. `CAPFIND_BACKEND_URL` defaults to `https://cetfind.onrender.com` and can be changed if the backend host changes.
 
-## Controls and recovery
+Install or update the automatically restarting user service from the `cet/` directory:
 
-- **Pause** is cooperative and takes effect at the next page checkpoint.
-- **Resume** continues the current in-memory extraction if the process is still alive.
-- **Cancel** marks the job cancelled and stops it at the next page checkpoint.
-- **Retry after extraction failure** restarts extraction from page one.
-- **Retry after server validation failure** reuses the saved CSV artifact when available.
-- If the worker process or computer restarts, queued/running jobs are re-queued from page one. The current extractors do not serialize all parser state, so this is a safe restart, not exact-page recovery.
+```bash
+scripts/install_local_worker_service.sh
+```
 
-The computer must remain powered on and logged in for desktop autostart to run. The worker does not depend on the browser remaining open after queueing finishes.
+Check it with `systemctl --user status capfind-local-worker.service`. Logs are available with `journalctl --user -u capfind-local-worker.service`. After changing the env file, restart with `systemctl --user restart capfind-local-worker.service`.
+
+## Availability and controls
+
+- The PC must be powered on, connected to the internet, and logged into the worker user's desktop session. The worker reconnects to the queue after a network interruption or service restart.
+- If the PC is offline, uploaded PDFs remain in private durable storage and wait in the queue. The Import Center shows the worker as offline.
+- Pause and cancel commands are read from the server at safe extraction checkpoints, so the admin can control jobs from another device.
+- A worker restart may restart extraction from page one because parser state is not serializable. It retains the original PDF and checks the hash before processing. Existing staged data is not silently discarded by recovery.
+- Retry after a server validation failure reuses the retained CSV when it is still available; a retry after worker failure downloads the retained source PDF again.
 
 ## OCR dependency
 
-pytesseract is a Python wrapper, not the Tesseract OCR executable. If a PDF contains scanned pages, install the operating-system package **tesseract-ocr** and ensure **tesseract** is on PATH. Without it, the extractor continues using native PDF text, but OCR-only pages may not produce records.
+`pytesseract` is a Python wrapper, not the Tesseract OCR executable. If PDFs contain scanned pages, install the operating-system package `tesseract-ocr` on the worker PC and ensure `tesseract` is on PATH. Without it, extraction continues using native PDF text, but OCR-only pages may not produce records.
 
 ## Security and data handling
 
-- The browser must be signed in as an authorized CAPFind admin to create a job.
-- Each job receives a random, job-scoped bearer token. The server stores only its SHA-256 hash; the local worker keeps the token in the user's local job state so it can upload/retry.
-- The worker validates the source PDF's SHA-256 before extraction. The server verifies that fingerprint again when it receives the artifact.
-- Local HTTP requests are origin-allow-listed and the worker binds to loopback only.
-- The original PDF is not uploaded to Render. The extracted CSV and audit summary are uploaded for server-side validation and staging.
-- The local queue and source PDFs are machine-local runtime data and are git-ignored.
+- Only authorized CAPFind admins can create jobs. PDF bytes are streamed to private storage and are never exposed through a public URL.
+- The Render server and worker share a long random secret used only for worker queue claims. Each claimed job also gets a separate random bearer token; the server stores only its SHA-256 hash.
+- The worker downloads only jobs returned by the authenticated claim endpoint. It verifies the source PDF SHA-256 and size before extraction. The server checks the same source fingerprint when it receives the artifact.
+- The S3-compatible bucket stores source PDFs; the worker PC keeps its processing files under the git-ignored `data/local_worker/` directory. Admin source deletion removes the stored source through the existing private storage adapter.
 
 ## Course identification
 
-Course family, academic year, and CAP round are read from the PDF's native text before the filename is used. The identifier samples up to 24 pages so a cover or notice page does not hide the CAP heading. If native text cannot identify the family or year, the local worker uses Tesseract OCR on the first four pages. This supports generic or randomized PDF filenames when the document itself contains a readable course heading. Scanned PDFs require the Tesseract executable (`tesseract-ocr`) on this PC; if it is missing, the worker reports that exact dependency instead of silently failing identification or guessing a course.
-
-The supported course-family list is shared with the import preflight in `backend/admin/pipeline.py`.
+Course family, academic year, and CAP round are read from the PDF's native text before the filename is used. The identifier samples up to 24 pages so a cover or notice page does not hide the CAP heading. If native text cannot identify the family or year, the worker uses Tesseract OCR on the first four pages. This supports generic or randomized PDF filenames when the document itself contains a readable CAP heading. If identification still fails, the import reports the missing field for review instead of guessing.
