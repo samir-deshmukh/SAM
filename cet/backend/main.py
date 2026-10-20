@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response
+from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response,StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from .admin.db import connect,init_admin_schema,event
 from .admin.security import verify_password,make_session,read_session,hash_password
@@ -106,7 +106,10 @@ def _import_queue_loop():
                 _LAST_QUEUE_RECOVERY = time.monotonic()
             with connect() as connection:
                 row = connection.execute(
-                    "SELECT id,original_filename FROM import_jobs WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    """SELECT j.id,j.original_filename FROM import_jobs j
+                       WHERE j.status='QUEUED'
+                         AND NOT EXISTS (SELECT 1 FROM import_events e WHERE e.job_id=j.id AND e.event_type='REMOTE_LOCAL_QUEUED')
+                       ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED"""
                 ).fetchone()
                 is_csv_job = False
                 if row:
@@ -988,6 +991,185 @@ def _local_worker_token(request: Request, job_id: int):
     return token
 
 
+def _remote_worker_auth(request: Request):
+    configured = os.getenv('CAPFIND_REMOTE_WORKER_TOKEN', '').strip()
+    header = (request.headers.get('authorization') or '').strip()
+    scheme, _, token = header.partition(' ')
+    if len(configured) < 32:
+        raise HTTPException(503, 'Remote extraction worker is not configured')
+    if scheme.lower() != 'bearer' or not token or len(token) > 256 or not secrets.compare_digest(token, configured):
+        raise HTTPException(401, 'Remote extraction worker authorization required')
+
+
+def _remote_worker_heartbeat(connection, worker_id: str, active_job_id: int | None = None):
+    connection.execute(
+        """INSERT INTO remote_worker_heartbeats(worker_id,last_seen,active_job_id)
+           VALUES (?,CURRENT_TIMESTAMP,?) ON CONFLICT(worker_id) DO UPDATE
+           SET last_seen=CURRENT_TIMESTAMP,active_job_id=EXCLUDED.active_job_id
+           WHERE remote_worker_heartbeats.last_seen<CURRENT_TIMESTAMP-INTERVAL '10 seconds'
+              OR remote_worker_heartbeats.active_job_id IS DISTINCT FROM EXCLUDED.active_job_id""",
+        (worker_id, active_job_id),
+    )
+
+
+def _is_remote_worker_job(connection, job_id: int) -> bool:
+    return bool(connection.execute(
+        "SELECT 1 AS found FROM import_events WHERE job_id=? AND event_type='REMOTE_LOCAL_QUEUED' LIMIT 1",
+        (job_id,),
+    ).fetchone())
+
+
+@app.post('/admin/api/remote-worker/imports', status_code=202)
+def create_remote_worker_import(request: Request, file: UploadFile = File(...)):
+    """Accept a PDF from any browser; a separately running worker pulls it for extraction."""
+    current_user = require(request, {'SUPER_ADMIN', 'DATA_ADMIN'}, csrf=True)
+    if len(os.getenv('CAPFIND_REMOTE_WORKER_TOKEN', '').strip()) < 32:
+        raise HTTPException(503, 'Remote extraction is not configured on the server')
+    if storage_backend() != 's3':
+        raise HTTPException(503, 'Remote extraction requires private durable S3-compatible PDF storage. Configure CET_PDF_STORAGE_BACKEND=s3 first.')
+    name = Path(file.filename or '').name
+    if not name.lower().endswith('.pdf'):
+        raise HTTPException(400, 'Only PDF files are accepted')
+    IMPORTS.mkdir(parents=True, exist_ok=True)
+    job_key = 'REMOTE-' + uuid.uuid4().hex[:12].upper()
+    tmp = IMPORTS / (job_key + '.upload')
+    total = 0
+    digest = hashlib.sha256()
+    stored_value = None
+    try:
+        with tmp.open('wb') as output:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_PDF_BYTES:
+                    raise HTTPException(413, 'PDF exceeds 50 MiB limit')
+                digest.update(chunk)
+                output.write(chunk)
+        if total < 5:
+            raise HTTPException(400, 'PDF upload is empty or too small')
+        with tmp.open('rb') as source:
+            if source.read(5) != b'%PDF-':
+                raise HTTPException(400, 'File is not a valid PDF')
+        fingerprint = digest.hexdigest()
+        try:
+            stored_value = store_source_pdf(tmp, f'imports/{job_key}.pdf', fingerprint)
+        except StorageNotConfigured as exc:
+            raise HTTPException(503, str(exc)) from exc
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO import_jobs(job_key,original_filename,stored_path,sha256,size_bytes,status,created_by) VALUES (?,?,?,?,?,?,?)",
+                (job_key, name, stored_value, fingerprint, total, 'QUEUED', current_user['uid']),
+            )
+            job = connection.execute('SELECT id FROM import_jobs WHERE job_key=?', (job_key,)).fetchone()
+            if not job:
+                raise RuntimeError('Remote import job could not be created')
+            job_id = int(job['id'])
+            event(connection, job_id, 'REMOTE_LOCAL_QUEUED', 'Waiting for the CAPFind extraction worker to download this PDF', 0)
+            connection.commit()
+        return JSONResponse(status_code=202, content={'ok': True, 'job_id': job_id, 'job_key': job_key, 'status': 'QUEUED'})
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        if stored_value:
+            try:
+                with connect() as connection:
+                    referenced = connection.execute('SELECT 1 AS found FROM import_jobs WHERE job_key=?', (job_key,)).fetchone()
+                if not referenced:
+                    delete_source(stored_value)
+            except Exception:
+                log.exception('Could not clean unreferenced remote source PDF %s', job_key)
+        raise
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@app.post('/admin/api/remote-worker/claim')
+def claim_remote_worker_import(request: Request, payload: dict | None = None):
+    _remote_worker_auth(request)
+    worker_id = str((payload or {}).get('worker_id') or '').strip()[:100]
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', worker_id):
+        raise HTTPException(400, 'Worker ID must use only letters, numbers, dots, underscores, or hyphens')
+    with connect() as connection:
+        _remote_worker_heartbeat(connection, worker_id)
+        job = connection.execute(
+            """SELECT j.id,j.original_filename,j.stored_path,j.sha256,j.size_bytes
+               FROM import_jobs j
+               WHERE j.status='QUEUED'
+                 AND EXISTS (SELECT 1 FROM import_events e WHERE e.job_id=j.id AND e.event_type='REMOTE_LOCAL_QUEUED')
+                 AND NOT EXISTS (SELECT 1 FROM import_worker_leases l WHERE l.job_id=j.id AND l.lease_until>CURRENT_TIMESTAMP)
+               ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED"""
+        ).fetchone()
+        if not job:
+            return {'ok': True, 'job': None}
+        token = secrets.token_urlsafe(32)
+        connection.execute(
+            "UPDATE import_jobs SET status='EXTRACTING',worker_id=?,worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',current_page=0,total_pages=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED'",
+            (worker_id, job['id']),
+        )
+        connection.execute(
+            "INSERT INTO import_worker_leases(job_id,worker_id,lease_until) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '2 minutes') ON CONFLICT(job_id) DO UPDATE SET worker_id=EXCLUDED.worker_id,lease_until=EXCLUDED.lease_until,updated_at=CURRENT_TIMESTAMP",
+            (job['id'], worker_id),
+        )
+        connection.execute(
+            "INSERT INTO local_worker_tokens(job_id,token_hash,expires_at) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '30 days') ON CONFLICT(job_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at",
+            (job['id'], hashlib.sha256(token.encode('utf-8')).hexdigest()),
+        )
+        _remote_worker_heartbeat(connection, worker_id, int(job['id']))
+        event(connection, int(job['id']), 'REMOTE_WORKER_CLAIMED', f'Extraction worker {worker_id} claimed this PDF', 5)
+        connection.commit()
+    return {'ok': True, 'job': {
+        'job_id': int(job['id']), 'filename': job['original_filename'], 'stored_path': job['stored_path'],
+        'sha256': job['sha256'], 'size_bytes': int(job['size_bytes']), 'upload_token': token,
+    }}
+
+
+@app.get('/admin/api/remote-worker/status')
+def remote_worker_status(request: Request):
+    require(request, {'SUPER_ADMIN', 'DATA_ADMIN', 'REVIEWER', 'READ_ONLY'})
+    configured = len(os.getenv('CAPFIND_REMOTE_WORKER_TOKEN', '').strip()) >= 32
+    with connect() as connection:
+        workers = connection.execute(
+            "SELECT worker_id,last_seen,active_job_id,(last_seen>CURRENT_TIMESTAMP-INTERVAL '30 seconds') AS online FROM remote_worker_heartbeats ORDER BY last_seen DESC"
+        ).fetchall()
+    durable = storage_backend() == 's3' and all(
+        os.getenv(key, '').strip() for key in (
+            'CET_S3_ENDPOINT_URL', 'CET_S3_BUCKET', 'CET_S3_ACCESS_KEY_ID', 'CET_S3_SECRET_ACCESS_KEY'
+        )
+    )
+    return {'configured': configured and durable, 'storage_ready': durable,
+            'workers': workers[:5], 'online': any(bool(w['online']) for w in workers)}
+
+
+@app.get('/admin/api/remote-worker/jobs/{job_id}/source')
+def download_remote_worker_source(request: Request, job_id: int):
+    _local_worker_token(request, job_id)
+    with connect() as connection:
+        job = connection.execute('SELECT stored_path,original_filename,size_bytes,status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        if not job or not _is_remote_worker_job(connection, job_id):
+            raise HTTPException(404, 'Remote worker source not found')
+        if job['status'] not in {'QUEUED', 'EXTRACTING'}:
+            raise HTTPException(409, 'Remote worker job is no longer active')
+        stored_path = str(job['stored_path'] or '')
+        if stored_path.startswith('local://') or stored_path.startswith('gdrive://'):
+            raise HTTPException(409, 'Remote worker source is not in durable server storage')
+
+    def chunks():
+        with materialize_source(stored_path) as source_path:
+            with Path(source_path).open('rb') as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+    return StreamingResponse(chunks(), media_type='application/pdf', headers={
+        'Content-Length': str(job['size_bytes']),
+        'Content-Disposition': 'attachment',
+        'Cache-Control': 'no-store',
+    })
+
+
 def _local_worker_fail(job_id: int, message: str):
     message = str(message or 'Local extraction failed')[:4000]
     with connect() as connection:
@@ -995,11 +1177,16 @@ def _local_worker_fail(job_id: int, message: str):
         if not job:
             return
         if job['status'] in {'STAGED', 'REVIEW_REQUIRED', 'COMPLETED', 'CANCELLED', 'QUARANTINED'}:
+            connection.execute('DELETE FROM import_worker_leases WHERE job_id=?', (job_id,))
+            connection.execute('UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=?', (job_id,))
+            connection.commit()
             return
         connection.execute(
             "UPDATE import_jobs SET status='FAILED',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (message, job_id),
         )
+        connection.execute('DELETE FROM import_worker_leases WHERE job_id=?', (job_id,))
+        connection.execute('UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=?', (job_id,))
         event(connection, job_id, 'ERROR', message[:1000], None)
         connection.commit()
 
@@ -1168,7 +1355,7 @@ def local_import_progress(request: Request, job_id: int, payload: dict):
     if state not in {'RUNNING', 'PAUSED'}:
         state = 'RUNNING'
     with connect() as connection:
-        job = connection.execute('SELECT status FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT status,worker_id FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
         if job['status'] in {'FAILED', 'CANCELLED', 'STAGED', 'REVIEW_REQUIRED', 'COMPLETED'}:
@@ -1176,13 +1363,38 @@ def local_import_progress(request: Request, job_id: int, payload: dict):
         progress = 40 if total <= 0 else min(58, 40 + int(18 * min(page, total) / total))
         message = f'Local extraction {state.lower()} at page {page}' + (f' of {total}' if total else '')
         next_status = 'PAUSED' if state == 'PAUSED' else 'EXTRACTING'
-        connection.execute(
-            "UPDATE import_jobs SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (next_status, job_id),
-        )
+        if job['status'] == 'CANCELLED':
+            return {'ok': True, 'status': 'CANCELLED', 'control': 'CANCEL'}
+        if job['status'] == 'PAUSED' and state != 'PAUSED':
+            next_status = 'PAUSED'
+        is_remote = _is_remote_worker_job(connection, job_id)
+        if is_remote:
+            owner = job.get('worker_id')
+            if not owner:
+                row = connection.execute(
+                    'SELECT worker_id FROM remote_worker_heartbeats WHERE active_job_id=? ORDER BY last_seen DESC LIMIT 1',
+                    (job_id,),
+                ).fetchone()
+                owner = row['worker_id'] if row else None
+            connection.execute(
+                "UPDATE import_jobs SET status=?,current_page=?,total_pages=?,worker_id=COALESCE(worker_id,?),worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (next_status, page, total, owner, job_id),
+            )
+            if owner:
+                connection.execute(
+                    "INSERT INTO import_worker_leases(job_id,worker_id,lease_until) VALUES (?,?,CURRENT_TIMESTAMP + INTERVAL '2 minutes') ON CONFLICT(job_id) DO UPDATE SET worker_id=EXCLUDED.worker_id,lease_until=EXCLUDED.lease_until,updated_at=CURRENT_TIMESTAMP",
+                    (job_id, owner),
+                )
+                _remote_worker_heartbeat(connection, str(owner), job_id)
+        else:
+            connection.execute(
+                "UPDATE import_jobs SET status=?,current_page=?,total_pages=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (next_status, page, total, job_id),
+            )
         event(connection, job_id, 'LOCAL_EXTRACT', message, progress)
         connection.commit()
-    return {'ok': True, 'status': next_status, 'progress': progress}
+    return {'ok': True, 'status': next_status, 'progress': progress,
+            'control': 'PAUSE' if next_status == 'PAUSED' else 'RUN'}
 
 
 @app.post('/admin/api/local-imports/{job_id}/fail')
@@ -1209,6 +1421,8 @@ def local_import_cancel(request: Request, job_id: int):
             "UPDATE import_jobs SET status='CANCELLED',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (job_id,),
         )
+        connection.execute('DELETE FROM import_worker_leases WHERE job_id=?', (job_id,))
+        connection.execute('UPDATE import_jobs SET worker_id=NULL,worker_lease_until=NULL WHERE id=?', (job_id,))
         event(connection, job_id, 'CANCELLED', 'Local worker cancellation requested', None)
         connection.commit()
     return {'ok': True, 'job_id': job_id, 'status': 'CANCELLED'}
@@ -1244,9 +1458,19 @@ def local_import_restart(request: Request, job_id: int):
 def local_import_status(request: Request, job_id: int):
     _local_worker_token(request, job_id)
     with connect() as connection:
-        job = connection.execute('SELECT id,status,error_message,updated_at FROM import_jobs WHERE id=?', (job_id,)).fetchone()
+        job = connection.execute('SELECT id,status,error_message,updated_at,worker_id FROM import_jobs WHERE id=?', (job_id,)).fetchone()
         if not job:
             raise HTTPException(404, 'Import not found')
+        if _is_remote_worker_job(connection, job_id) and job.get('worker_id'):
+            connection.execute(
+                "UPDATE import_jobs SET worker_lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE id=? AND worker_lease_until<CURRENT_TIMESTAMP + INTERVAL '30 seconds'",
+                (job_id,),
+            )
+            connection.execute(
+                "UPDATE import_worker_leases SET lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes',updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND worker_id=? AND lease_until<CURRENT_TIMESTAMP + INTERVAL '30 seconds'",
+                (job_id, job['worker_id']),
+            )
+            _remote_worker_heartbeat(connection, str(job['worker_id']), job_id)
         latest = connection.execute('SELECT progress,message FROM import_events WHERE job_id=? ORDER BY id DESC LIMIT 1', (job_id,)).fetchone()
         return {'job_id': job_id, 'status': job['status'], 'error': job['error_message'],
                 'progress': latest['progress'] if latest else 0,
@@ -1810,6 +2034,45 @@ def process_job(request: Request, job_id: int, background_tasks: BackgroundTasks
                 marker.unlink()
         if str(job['stored_path'] or '').startswith('local://'):
             raise HTTPException(409, 'This import runs on the local worker. Retry it from Import Center while that worker is running.')
+        if _is_remote_worker_job(connection, job_id):
+            receipt = connection.execute(
+                'SELECT artifact_sha256 FROM local_worker_receipts WHERE job_id=?', (job_id,)
+            ).fetchone()
+            reusable_artifact = bool(
+                receipt and job['status'] in {'FAILED', 'CANCELLED'}
+                and job.get('data_type') and job.get('course_family') and job.get('year')
+            )
+            artifact = None
+            if reusable_artifact:
+                suffix = '_cutoffs.csv' if job['data_type'] == 'CUTOFFS' else '_seats_long.csv'
+                artifact = BASE / 'data' / 'local_import_artifacts' / f'job_{job_id}' / f"{Path(job['original_filename']).stem}{suffix}"
+                reusable_artifact = artifact.is_file()
+            connection.execute('DELETE FROM import_staging_records WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM import_results WHERE job_id=?', (job_id,))
+            marker = BASE / 'data' / 'import_staging' / f'job_{job_id}'
+            (marker / 'CANCEL').unlink(missing_ok=True)
+            (marker / 'PAUSE').unlink(missing_ok=True)
+            if reusable_artifact:
+                connection.execute(
+                    "UPDATE import_jobs SET status='EXTRACTING',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (job_id,),
+                )
+                _reserve_local_artifact_worker(connection, job_id)
+                event(connection, job_id, 'REMOTE_ARTIFACT_RETRY', 'Revalidating the retained worker-extracted CSV', 60)
+                connection.commit()
+                background_tasks.add_task(
+                    _process_local_import_background, job_id, str(artifact),
+                    job['data_type'], job['course_family'], int(job['year']), job.get('round') or '', {},
+                )
+                return JSONResponse(status_code=202, content={'ok': True, 'job_id': job_id, 'status': 'EXTRACTING', 'reused_artifact': True})
+            connection.execute(
+                "UPDATE import_jobs SET status='QUEUED',worker_id=NULL,worker_lease_until=NULL,error_message=NULL,current_page=0,total_pages=0,current_chunk=0,total_chunks=0,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            connection.execute('DELETE FROM import_worker_leases WHERE job_id=?', (job_id,))
+            event(connection, job_id, 'REMOTE_RETRY', 'Retry queued for the remote extraction worker', 0)
+            connection.commit()
+            return JSONResponse(status_code=202, content={'ok': True, 'job_id': job_id, 'status': 'QUEUED'})
         try:
             with materialize_source(job['stored_path']) as path:
                 # Re-run preflight on every retry. A previous run may have classified

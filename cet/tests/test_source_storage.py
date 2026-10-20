@@ -1,5 +1,6 @@
 
 import pytest
+from io import BytesIO
 
 from backend.admin import source_storage as storage
 
@@ -42,3 +43,47 @@ def test_production_storage_fails_closed_without_credentials(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(storage.StorageNotConfigured):
         storage._s3_config()
+
+
+def test_s3_upload_uses_single_streaming_put_object(tmp_path, monkeypatch):
+    class FakeClient:
+        def put_object(self, **kwargs):
+            assert kwargs['Bucket'] == 'private'
+            assert kwargs['Key'] == 'imports/file.pdf'
+            assert kwargs['ContentLength'] == 9
+            assert kwargs['Body'].read() == b'%PDF-test'
+            assert kwargs['Metadata'] == {'sha256': 'abc123'}
+
+    source = tmp_path / 'source.pdf'
+    source.write_bytes(b'%PDF-test')
+    monkeypatch.setenv('CET_PDF_STORAGE_BACKEND', 's3')
+    monkeypatch.setattr(storage, 'storage_backend', lambda: 's3')
+    # Avoid a remote quota listing while asserting the bounded upload call.
+    class QuotaClient(FakeClient):
+        def list_objects_v2(self, **kwargs):
+            return {'IsTruncated': False, 'Contents': []}
+
+    monkeypatch.setattr(storage, '_client', lambda: (QuotaClient(), 'private'))
+    assert storage.store_source_pdf(source, 'imports/file.pdf', 'abc123') == 's3://private/imports/file.pdf'
+
+
+def test_s3_download_streams_to_temporary_file(tmp_path, monkeypatch):
+    class FakeBody(BytesIO):
+        closed_by_client = False
+
+        def close(self):
+            self.closed_by_client = True
+            super().close()
+
+    body = FakeBody(b'%PDF-test')
+
+    class FakeClient:
+        def get_object(self, **kwargs):
+            assert kwargs == {'Bucket': 'private', 'Key': 'imports/file.pdf'}
+            return {'Body': body}
+
+    monkeypatch.setattr(storage, '_client', lambda: (FakeClient(), 'private'))
+    monkeypatch.setattr(storage, '_parse_object_uri', lambda value: ('private', 'imports/file.pdf'))
+    with storage.materialize_source('s3://private/imports/file.pdf') as materialized:
+        assert materialized.read_bytes() == b'%PDF-test'
+    assert body.closed_by_client

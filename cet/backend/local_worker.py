@@ -1,8 +1,8 @@
-"""Loopback-only CAPFind PDF extraction worker.
+"""CAPFind PDF extraction worker with legacy local upload and outbound queue modes.
 
-The worker owns the source PDF and temporary extraction files on this PC.
-Only validated CSV artifacts are sent to the Render API. Jobs are persisted
-under data/local_worker so closing the browser does not stop extraction.
+For remote panel access, the worker polls CAPFind over HTTPS, downloads a
+private queued source PDF, and returns only its extracted artifact. The local
+HTTP API remains loopback-only for jobs created by older admin pages.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 from pathlib import Path
@@ -116,6 +117,17 @@ def _remote(state: dict, suffix: str, *, payload=None, files=None, data=None):
         files=files,
         data=data,
         timeout=(15, 300),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"CAPFind server returned {response.status_code}: {response.text[:800]}")
+    return response.json() if response.content else {}
+
+
+def _remote_get(state: dict, suffix: str):
+    url = state["backend_url"] + f"/admin/api/local-imports/{state['job_id']}/{suffix}"
+    response = requests.get(
+        url, headers={"Authorization": "Bearer " + state["upload_token"]},
+        timeout=(10, 20),
     )
     if response.status_code >= 400:
         raise RuntimeError(f"CAPFind server returned {response.status_code}: {response.text[:800]}")
@@ -236,6 +248,16 @@ def _monitor_job_progress(state: dict, control: Path, stop: threading.Event) -> 
     while not stop.wait(1.0):
         progress_path = control / "progress.json"
         try:
+            if state.get("remote_worker"):
+                # The import panel can be open on any device. Poll the
+                # server-side state so remote pause/cancel reaches this worker.
+                remote_status = _remote_get(state, "status").get("status")
+                if remote_status == "CANCELLED":
+                    (control / "CANCEL").touch()
+                elif remote_status == "PAUSED":
+                    (control / "PAUSE").touch()
+                elif remote_status in {"EXTRACTING", "NORMALIZING", "VALIDATING", "COMPARING"}:
+                    (control / "PAUSE").unlink(missing_ok=True)
             worker_state = "PAUSED" if state.get("status") == "PAUSED" else "RUNNING"
             if progress_path.exists():
                 progress = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -260,7 +282,14 @@ def _recover_jobs():
             state = json.loads(path.read_text(encoding="utf-8"))
             job_id = int(state["job_id"])
             JOBS[job_id] = state
-            if state.get("status") in {"QUEUED", "EXTRACTING", "UPLOADING"}:
+            if state.get("remote_worker") and state.get("status") in {"QUEUED", "EXTRACTING", "UPLOADING"}:
+                # Let the server lease expire and issue a fresh one-job token on
+                # the next claim. Reusing a token from before a crash can race
+                # with another worker reclaiming the same source.
+                state["status"] = "WAITING_FOR_SERVER"
+                state["message"] = "Recovered after worker restart; waiting for the server to requeue this job"
+                _write_state(job_id, state)
+            elif state.get("status") in {"QUEUED", "EXTRACTING", "UPLOADING"}:
                 # The extractor does not serialize all in-memory parser state;
                 # after a worker crash, safely restart the PDF from page one.
                 control = DATA / f"job_{job_id}" / "control"
@@ -282,6 +311,7 @@ def startup():
 
 def _queue_loop():
     global ACTIVE_JOB
+    next_remote_poll = 0.0
     while True:
         with LOCK:
             if ACTIVE_JOB is None:
@@ -298,7 +328,105 @@ def _queue_loop():
         if job_id is not None:
             _process_job(job_id)
         else:
+            if time.time() >= next_remote_poll:
+                try:
+                    claimed = _claim_remote_job()
+                    next_remote_poll = time.time() + (5 if claimed else 10)
+                except Exception:
+                    # Remote mode is optional for backward compatibility with
+                    # browser-local installs that do not have the shared secret.
+                    next_remote_poll = time.time() + 30
+                    log.warning("Remote worker poll failed; retrying in 30 seconds", exc_info=True)
             time.sleep(0.5)
+
+
+def _claim_remote_job() -> bool:
+    backend_url = os.getenv("CAPFIND_BACKEND_URL", "https://cetfind.onrender.com").strip().rstrip("/")
+    worker_token = os.getenv("CAPFIND_REMOTE_WORKER_TOKEN", "").strip()
+    if not worker_token:
+        return False
+    parsed = urlparse(backend_url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+        raise RuntimeError("CAPFIND_BACKEND_URL must be an allow-listed HTTPS CAPFind host")
+    worker_id = os.getenv("CAPFIND_REMOTE_WORKER_ID", socket.gethostname()).strip()[:100]
+    worker_id = re.sub(r"[^A-Za-z0-9_.-]", "_", worker_id) or "local-worker"
+    response = requests.post(
+        backend_url + "/admin/api/remote-worker/claim",
+        headers={"Authorization": "Bearer " + worker_token},
+        json={"worker_id": worker_id}, timeout=(10, 20),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"CAPFind worker queue returned {response.status_code}: {response.text[:800]}")
+    payload = response.json()
+    job = payload.get("job")
+    if not job:
+        return False
+    job_id = int(job["job_id"])
+    filename = Path(str(job["filename"] or "source.pdf")).name
+    folder = DATA / f"job_{job_id}"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(folder, 0o700)
+    state = {
+        "job_id": job_id, "filename": filename, "backend_url": backend_url,
+        "upload_token": job["upload_token"], "sha256": str(job["sha256"]).lower(),
+        "size_bytes": int(job["size_bytes"]), "status": "QUEUED",
+        "message": "Claimed from the CAPFind server; downloading the source PDF",
+        "created_at": time.time(), "updated_at": time.time(), "remote_worker": True,
+    }
+    _write_state(job_id, state)
+    target = folder / filename
+    partial = folder / (filename + ".download")
+    lease_stop = threading.Event()
+
+    def keep_lease():
+        while not lease_stop.wait(20):
+            try:
+                _remote_get(state, "status")
+            except Exception:
+                log.warning("Could not refresh the remote worker lease for job %s", job_id)
+
+    lease_thread = threading.Thread(target=keep_lease, daemon=True, name=f"capfind-download-lease-{job_id}")
+    lease_thread.start()
+    try:
+        source_response = requests.get(
+            backend_url + f"/admin/api/remote-worker/jobs/{job_id}/source",
+            headers={"Authorization": "Bearer " + job["upload_token"]},
+            stream=True, timeout=(15, 300),
+        )
+        if source_response.status_code >= 400:
+            raise RuntimeError(f"Source download returned {source_response.status_code}: {source_response.text[:800]}")
+        digest = hashlib.sha256()
+        total = 0
+        with partial.open("wb") as output:
+            for chunk in source_response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_PDF_BYTES:
+                    raise RuntimeError("Remote source PDF exceeds the 50 MiB limit")
+                digest.update(chunk)
+                output.write(chunk)
+        if total != state["size_bytes"] or digest.hexdigest() != state["sha256"]:
+            raise RuntimeError("Downloaded source PDF failed the size or SHA-256 integrity check")
+        os.chmod(partial, 0o600)
+        partial.replace(target)
+    except Exception as exc:
+        partial.unlink(missing_ok=True)
+        _status(state, "FAILED", "Could not download the retained source PDF: " + str(exc)[:2500], error=str(exc)[:2500])
+        try:
+            _remote(state, "fail", payload={"error": "Remote worker could not download the retained source PDF: " + str(exc)[:2500]})
+        except Exception:
+            log.exception("Could not report remote source download failure for job %s", job_id)
+        return True
+    finally:
+        lease_stop.set()
+        lease_thread.join(timeout=2)
+    _status(state, "QUEUED", "Source PDF downloaded and verified; queued for extraction")
+    global ACTIVE_JOB
+    with LOCK:
+        ACTIVE_JOB = job_id
+    _process_job(job_id)
+    return True
 
 
 @app.get("/health")

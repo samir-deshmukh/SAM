@@ -62,13 +62,14 @@ Seat-matrix availability is derived from the runtime seat-matrix data. The curre
 
 ## 5. Import and publishing pipeline
 
-1. Administrator uploads a CAP source PDF.
-2. Preflight validates the file.
-3. Extraction/normalization converts source material into structured records.
-4. Import is staged for review.
-5. Administrator explicitly approves the import.
-6. Publishing promotes the approved release.
-7. Derived public runtime data can be rebuilt after approved data changes.
+1. Administrator uploads a CAP source PDF from any device.
+2. The authenticated API streams it to private durable S3-compatible storage; the PDF is not held in Render memory as one complete byte buffer.
+3. The worker PC claims queued jobs over outbound HTTPS, downloads and fingerprint-checks the PDF, then performs memory-heavy extraction locally.
+4. The extracted artifact returns to the API for normalization/validation and staging.
+5. Import is staged for review.
+6. Administrator explicitly approves the import.
+7. Publishing promotes the approved release.
+8. Derived public runtime data can be rebuilt after approved data changes.
 
 A restart does not implicitly approve staged imports.
 

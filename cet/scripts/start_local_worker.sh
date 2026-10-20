@@ -13,6 +13,18 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   echo "  \"$VENV/bin/python\" -m pip install -r \"$CET_DIR/requirements-dev.txt\""
   exit 1
 fi
+if systemctl --user is-enabled capfind-local-worker.service >/dev/null 2>&1; then
+  systemctl --user start capfind-local-worker.service
+  for _ in $(seq 1 30); do
+    if curl --silent --fail http://127.0.0.1:8765/health >/dev/null 2>&1; then
+      echo "CAPFind local worker is running as a managed user service."
+      exit 0
+    fi
+    sleep 0.25
+  done
+  systemctl --user status capfind-local-worker.service --no-pager || true
+  exit 1
+fi
 if curl --silent --fail http://127.0.0.1:8765/health >/dev/null 2>&1; then
   echo "CAPFind local worker is already running at 127.0.0.1:8765."
   exit 0
