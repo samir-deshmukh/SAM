@@ -43,6 +43,10 @@ def test_normalize_category_passthrough_for_plain_codes():
         assert normalize_category(code, ALIAS_MAP) == code
 
 
+def test_normalize_category_accepts_new_code_and_normalizes_case():
+    assert normalize_category('newcode', ALIAS_MAP) == 'NEWCODE'
+
+
 def test_normalize_category_passthrough_for_total_marker():
     # 'Total' is a subtotal row, not a category — normalize_category
     # must not be asked to resolve it against the category whitelist

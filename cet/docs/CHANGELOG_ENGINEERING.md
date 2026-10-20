@@ -60,3 +60,16 @@ This log records verified changes made during the CETFind engineering rebuild. K
 - **Findings:** `_compare_cutoffs` materializes the normalized CSV and several record-count-scaled key structures; `_load_staged_rows` fetches all staged rows into memory. These are investigation targets; no implementation change was made.
 - **Validation:** Source inspection only. No runtime profiling or test execution has yet been performed.
 - **Production impact:** None.
+
+# Accept new source-defined CAP categories
+- **Commit:** `9216285`
+- **Scope:** Treat category whitelist CSVs as descriptive metadata. Accept structurally valid source category codes in cutoff and seat-matrix validation/staging, and register new base codes before fact insertion. Continue rejecting malformed category text and the known extraction anomalies.
+- **Purpose:** Avoid rejecting future official category codes simply because they were not anticipated in a static list.
+- **Validation:** Python syntax compilation and `git diff --check` passed. The test suite was not run because test execution was not requested. No production database or deployment was touched.
+- **Production impact:** None until this change is reviewed, merged, and deployed. New codes initially display their raw code because no curated label/group metadata exists.
+
+### Align category regression tests with dynamic codes
+- **Commit:** `c34cfbd15f50adda9b31c42da4eb82b2aa1f8d21`
+- **Scope:** Keep `Total` and known extraction artifacts unchanged during seat-category normalization, and cover new valid cutoff and seat category codes in staging tests.
+- **Validation:** Focused tests: 16 passed. Full CET suite: 196 passed, 5 skipped. Python syntax compilation and `git diff --check` passed.
+- **Production impact:** None. No production database or deployment was touched.

@@ -7,6 +7,7 @@ from sqlalchemy import text
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from db_bootstrap import bootstrap_schema, engine_for
 from validate_seats import TOTAL_MARKER, load_whitelists, normalize_category, parse_filename, KNOWN_BAD_CATEGORY_VALUES
+from category_codes import is_category_code
 
 REQUIRED_COLUMNS=['source_pdf','page','institution_code','choice_code','allocation_type','category','gender','seats']
 
@@ -33,9 +34,11 @@ def ingest_file(conn,path,year,valid_cats,lane_map,alias_map):
         try:
             inst=canonical_institution_code(row['institution_code'],row['choice_code']); lane=lane_map.get(lane_raw)
             if lane is None: raise ValueError(f'unknown allocation_type {lane_raw!r}')
-            total=cat==TOTAL_MARKER; base=None if total else normalize_category(cat,alias_map)
-            if not total and base not in valid_cats: raise ValueError(f'unknown category {cat!r}')
+            total=cat.strip().casefold()==TOTAL_MARKER.casefold(); base=None if total else normalize_category(cat,alias_map)
+            if not total and not is_category_code(cat): raise ValueError(f'malformed category code {cat!r}')
             gender=row['gender'].strip(); ladies={'G':False,'L':True}.get(gender) if gender else None; seats=int(row['seats'])
+            if base is not None:
+                conn.execute(text('INSERT INTO base_categories(base_code) VALUES(:cat) ON CONFLICT(base_code) DO NOTHING'), {'cat':base})
             result=conn.execute(text('''INSERT INTO seats(capture_year,program_family,institution_code,choice_code,allocation_lane,base_category,is_total,is_ladies,seats,raw_category,raw_allocation_type,raw_gender,source_pdf,source_page)
                 VALUES(:y,:family,:inst,:choice,:lane,:cat,:total,:ladies,:seats,:rawcat,:rawlane,:gender,:pdf,:page)
                 ON CONFLICT(capture_year,program_family,institution_code,choice_code,allocation_lane,raw_category,raw_gender) DO NOTHING'''),

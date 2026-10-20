@@ -10,6 +10,10 @@ from pathlib import Path
 from collections import Counter, defaultdict
 
 import pandas as pd
+try:
+    from .category_codes import is_category_code
+except ImportError:  # Executed as `python scripts/validate_data.py`.
+    from category_codes import is_category_code
 
 FILL_COLUMNS = [
     'institution_code', 'institution_name', 'program_code',
@@ -217,7 +221,8 @@ def main(raw_dir: str):
 
     summary = []
     hashes = defaultdict(list)
-    unknown_cats = Counter()
+    new_cats = Counter()
+    malformed_cats = Counter()
     unknown_stages = Counter()
     unknown_sections = Counter()
     unknown_programs = Counter()
@@ -285,9 +290,13 @@ def main(raw_dir: str):
                 continue
 
             base, _, _ = parse_category(row['category'])
-            if base is None or base not in valid_cats:
+            if base is None or not is_category_code(row['category']):
                 bad_cat += 1
-                unknown_cats[row['category'] or '(empty)'] += 1
+                malformed_cats[row['category'] or '(empty)'] += 1
+            elif base not in valid_cats:
+                # New source-defined categories are valid. Track them for
+                # visibility, but do not fail the import for missing labels.
+                new_cats[base] += 1
 
             st = STAGE_MAP.get(row['stage'].strip())
             if st is None:
@@ -355,7 +364,8 @@ def main(raw_dir: str):
         for v, c in sorted(counter.items(), key=lambda x: -x[1])[:25]:
             print(f'  [{v}] : {c}')
 
-    report('CATEGORIES', unknown_cats)
+    report('MALFORMED CATEGORY CODES', malformed_cats)
+    report('NEW CATEGORY CODES (accepted; labels may be unavailable)', new_cats)
     report('STAGES', unknown_stages)
     report('SECTIONS', unknown_sections)
     report('PROGRAM NAMES', unknown_programs)
@@ -377,7 +387,7 @@ def main(raw_dir: str):
         print(f"  \u26a0 {a['file']}: category-field='{a['raw_category']}' "
               f"stage='{a['stage']}' rank='{a['rank']}'")
 
-    total = sum(len(x) for x in (unknown_cats, unknown_stages,
+    total = sum(len(x) for x in (unknown_stages,
                                   unknown_sections, unknown_programs)) \
             + len(file_errors)
     print(f'\n{"=" * 60}\nTotal issues: {total}  '

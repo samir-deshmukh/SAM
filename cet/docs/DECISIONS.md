@@ -1,5 +1,22 @@
 # Decision Log
 
+## Treat category reference data as labels, not an exhaustive import whitelist
+Date: 2026-10-20
+Status: Accepted
+Context: CAP PDFs can introduce new official category codes in later years.
+Options: Reject codes absent from `category_whitelist.csv`; accept every
+string; accept structurally valid category tokens and reject malformed text.
+Decision: Validate category token syntax, preserve every accepted raw code,
+and create a base-category reference row during ingestion when a valid new
+code is encountered. Existing reference entries continue to provide labels
+and group names for known codes.
+Reasoning: The source PDF is authoritative for newly introduced categories;
+an exhaustive static list is inherently stale. Syntax checks and existing
+extraction-anomaly checks still reject malformed PDF text.
+Trade-offs: New category labels remain the raw code until reference metadata
+is curated. Reviewers must retain the source and provenance for every row.
+
+
 ## Use PostgreSQL everywhere
 Date: 2026-09-11
 Status: Accepted

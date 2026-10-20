@@ -71,18 +71,6 @@ def _page_from(row: dict):
     v = str(row.get("page", "")).strip()
     return int(v) if v.isdigit() else None
 
-@lru_cache(maxsize=1)
-def _known_cutoff_categories() -> frozenset[str]:
-    """Load the canonical base-category whitelist once per process."""
-    path = BASE / "data" / "reference" / "category_whitelist.csv"
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return frozenset(
-            str(row.get("base_code", "")).strip().upper()
-            for row in csv.DictReader(handle)
-            if str(row.get("base_code", "")).strip()
-        )
-
-
 def _resolve_cutoff_dimensions(raw: dict):
     """Resolve cutoff category/section/stage without inventing source context.
 
@@ -92,12 +80,13 @@ def _resolve_cutoff_dimensions(raw: dict):
     otherwise a historically clean PDF can be quarantined merely because a
     table's merged/visually inherited cell is blank in the CSV.
     """
+    from scripts.category_codes import is_category_code
     from scripts.validate_data import SECTION_MAP, STAGE_MAP, parse_category
 
     category = str(raw.get("category", "")).strip()
     base, ladies, derived_section = parse_category(category)
-    if base is None or base.upper() not in _known_cutoff_categories():
-        raise ValueError(f"Unknown category: {category!r}")
+    if base is None or not is_category_code(category):
+        raise ValueError(f"Malformed category code: {category!r}")
 
     section_raw = str(raw.get("section", "")).strip()
     if section_raw:
@@ -165,10 +154,11 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
         "institution_code", "institution_name", "program_code",
         "program_name", "status", "section",
     )
-    seat_valid_categories = seat_lane_map = seat_alias_map = None
+    seat_lane_map = seat_alias_map = None
     if result_type == "SEATS":
+        from scripts.category_codes import is_category_code
         from scripts.validate_seats import load_whitelists, normalize_category, TOTAL_MARKER
-        seat_valid_categories, seat_lane_map, seat_alias_map = load_whitelists(BASE / "data" / "reference")
+        _, seat_lane_map, seat_alias_map = load_whitelists(BASE / "data" / "reference")
     last_values = {field: "" for field in fill_columns}
     batch = []
 
@@ -216,11 +206,10 @@ def _stage_csv(conn, job_id: int, result_type: str, path: Path,
                 category_raw = str(normalized.get("category", "")).strip()
                 if lane_raw not in seat_lane_map:
                     row_errors.append(f"Unknown allocation type: {lane_raw!r}")
-                if category_raw != TOTAL_MARKER:
-                    category = normalize_category(category_raw, seat_alias_map)
-                    if category not in seat_valid_categories:
+                if category_raw.casefold() != TOTAL_MARKER.casefold():
+                    if not is_category_code(category_raw):
                         row_errors.append(
-                            f"Unknown category {category_raw!r} at page {_page_from(normalized)}; "
+                            f"Malformed category code {category_raw!r} at page {_page_from(normalized)}; "
                             "check the source PDF before approval"
                         )
             if row_errors:
@@ -893,7 +882,7 @@ def _insert_seat_from_json(conn, raw, job, source_pdf, reference_cache=None):
     reference_cache = reference_cache if reference_cache is not None else {
         "institutes": set(), "base_categories": set(), "allocation_lanes": set()
     }
-    valid_cats, lane_map, alias_map = _seat_import_whitelists()
+    _valid_cats, lane_map, alias_map = _seat_import_whitelists()
     inst=canonical_institution_code(str(raw.get("institution_code","")),str(raw.get("choice_code","")))
     lane_raw=str(raw.get("allocation_type","")).strip()
     lane=lane_map.get(lane_raw)
@@ -909,9 +898,10 @@ def _insert_seat_from_json(conn, raw, job, source_pdf, reference_cache=None):
         )
         reference_cache["allocation_lanes"].add(lane)
     cat=str(raw.get("category","")).strip()
-    total=cat==TOTAL_MARKER
+    total=cat.casefold()==TOTAL_MARKER.casefold()
     base=None if total else normalize_category(cat,alias_map)
-    if not total and base not in valid_cats: raise ValueError(f"Unknown category: {cat!r}")
+    from scripts.category_codes import is_category_code
+    if not total and not is_category_code(cat): raise ValueError(f"Malformed category code: {cat!r}")
 
     # Seat imports use the same PostgreSQL FK graph as cutoff imports.
     # The standalone seat ingester seeds these reference rows, but the admin
