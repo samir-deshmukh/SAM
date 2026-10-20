@@ -15,6 +15,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import pandas as pd
+try:
+    from .category_codes import is_category_code
+except ImportError:  # Executed as `python scripts/validate_seats.py`.
+    from category_codes import is_category_code
 
 REQUIRED_COLUMNS = [
     'source_pdf', 'page', 'institution_code', 'choice_code',
@@ -56,11 +60,11 @@ def load_whitelists(ref: Path) -> tuple[set[str], dict[str, str], dict[str, str]
 
 def normalize_category(raw: str, alias_map: dict[str, str]) -> str:
     """Seat-matrix category strings need alias resolution before the
-    whitelist check: BBA/MBA/MCA seat files spell Vimukta Jati /
+    canonical mapping: BBA/MBA/MCA seat files spell Vimukta Jati /
     Denotified Tribe as 'VJDT' (no slash) while the cutoffs whitelist
     (and the BCA seat file) use 'VJ/DT'. Falls through unchanged for
     every other value, including 'Total'."""
-    return alias_map.get(raw, raw)
+    return alias_map.get(raw, alias_map.get(raw.upper(), raw.upper()))
 
 
 def hash_rows(df: pd.DataFrame) -> str:
@@ -87,7 +91,8 @@ def main(raw_dir: str) -> None:
 
     summary = []
     hashes: dict[str, list[str]] = defaultdict(list)
-    unknown_cats: Counter = Counter()
+    new_cats: Counter = Counter()
+    malformed_cats: Counter = Counter()
     unknown_lanes: Counter = Counter()
     dup_rows = 0
     file_errors: list[tuple[str, str]] = []
@@ -153,11 +158,13 @@ def main(raw_dir: str) -> None:
                 })
                 continue
 
-            if cat_raw != TOTAL_MARKER:
+            if cat_raw.casefold() != TOTAL_MARKER.casefold():
                 base = normalize_category(cat_raw, alias_map)
-                if base not in valid_cats:
+                if not is_category_code(cat_raw):
                     bad_cat += 1
-                    unknown_cats[cat_raw] += 1
+                    malformed_cats[cat_raw] += 1
+                elif base not in valid_cats:
+                    new_cats[base] += 1
 
             if lane_raw not in lane_map:
                 bad_lane += 1
@@ -177,8 +184,9 @@ def main(raw_dir: str) -> None:
         df_num = df.copy()
         df_num['seats_int'] = pd.to_numeric(df_num['seats'], errors='coerce')
         keys = ['institution_code', 'choice_code', 'allocation_type']
-        parts = df_num[df_num['category'] != TOTAL_MARKER].groupby(keys)['seats_int'].sum()
-        totals = df_num[df_num['category'] == TOTAL_MARKER].groupby(keys)['seats_int'].sum()
+        is_total = df_num['category'].str.strip().str.casefold() == TOTAL_MARKER.casefold()
+        parts = df_num[~is_total].groupby(keys)['seats_int'].sum()
+        totals = df_num[is_total].groupby(keys)['seats_int'].sum()
         joined = pd.concat({'parts': parts, 'total': totals}, axis=1)
         mismatched = joined[joined['parts'] != joined['total']].dropna()
         for key, r in mismatched.iterrows():
@@ -228,7 +236,8 @@ def main(raw_dir: str) -> None:
         for v, c in sorted(counter.items(), key=lambda x: -x[1])[:25]:
             print(f'  [{v}] : {c}')
 
-    report('CATEGORIES', unknown_cats)
+    report('MALFORMED CATEGORIES', malformed_cats)
+    report('NEW CATEGORY CODES (accepted; labels may be unavailable)', new_cats)
     report('ALLOCATION LANES', unknown_lanes)
 
     if file_errors:
@@ -258,7 +267,7 @@ def main(raw_dir: str) -> None:
               f"choice_code={m['choice_code']} lane={m['allocation_type']} "
               f"sum={m['sum_of_categories']} total_row={m['total_row']}")
 
-    total = (sum(len(x) for x in (unknown_cats, unknown_lanes))
+    total = (sum(len(x) for x in (malformed_cats, unknown_lanes))
              + len(file_errors) + len(total_mismatches))
     print(f'\n{"=" * 58}\nTotal issues: {total}  '
           f'(+ {len(anomalies)} quarantined anomalies, handled separately)'

@@ -8,6 +8,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 from db_bootstrap import bootstrap_schema, engine_for  # noqa: E402
 from validate_data import (REQUIRED_COLUMNS, SECTION_MAP, STAGE_MAP,
     forward_fill_block_columns, is_extraction_anomaly, parse_category, parse_filename)  # noqa: E402
+from category_codes import is_category_code  # noqa: E402
 
 
 def load_program_levels(ref_dir: Path):
@@ -47,7 +48,7 @@ def ingest_file(conn,path,program_cache,level_map):
                 VALUES(:f,:p,:r,:c,:prog,:reason)'''),{'f':path.name,'p':page,'r':int(rowno),'c':row['category'],'prog':row['program_name'],'reason':reason})
         if is_extraction_anomaly(row): skipped+=1; error('EXTRACTION_ANOMALY'); continue
         cat=row['category'].strip(); base,is_ladies,_=parse_category(cat)
-        if base is None: skipped+=1; error(f'UNKNOWN_CATEGORY: {cat!r}'); continue
+        if base is None or not is_category_code(cat): skipped+=1; error(f'MALFORMED_CATEGORY: {cat!r}'); continue
         stage=STAGE_MAP.get(row['stage'].strip()); section=SECTION_MAP.get(row['section'].strip())
         if stage is None: skipped+=1; error(f'UNKNOWN_STAGE: {row["stage"]!r}'); continue
         if section is None: skipped+=1; error(f'UNKNOWN_SECTION: {row["section"]!r}'); continue
@@ -58,6 +59,7 @@ def ingest_file(conn,path,program_cache,level_map):
         prog=row['program_name'].strip(); inst=row['institution_code'].strip()
         pid=get_or_create_program(conn,program_cache,family,prog,level_map)
         try:
+            conn.execute(text('INSERT INTO base_categories(base_code) VALUES(:cat) ON CONFLICT(base_code) DO NOTHING'), {'cat':base})
             program_code=str(row.get('program_code','')).strip() or None
             result=conn.execute(text('''INSERT INTO cutoffs(year,round,institution_code,program_id,program_code,base_category,is_ladies,section_code,stage_code,home_university,rank_number,rank_suffix,percentile,raw_category,raw_program_name,source_pdf,source_page)
                 VALUES(:year,:round,:inst,:pid,:program_code,:cat,:ladies,:section,:stage,:hu,:rank,:suffix,:pct,:rawcat,:rawprog,:pdf,:page)
