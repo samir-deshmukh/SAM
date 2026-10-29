@@ -1,7 +1,7 @@
 from pathlib import Path
+import os
 
 import pandas as pd
-from fastapi import Response
 from starlette.requests import Request
 
 import backend.api as api
@@ -41,7 +41,9 @@ def test_trace_records_actual_lines_and_source(tmp_path):
 def test_trace_captures_real_cetfind_search_handler_with_synthetic_dependencies(monkeypatch, tmp_path):
     """Trace the real route and uncached handler while keeping all data synthetic."""
     cet_root = Path(__file__).resolve().parents[1]
-    output = tmp_path / "cetfind-search-trace.json"
+    requested_output = os.environ.get("CET_CODE_EXPLORER_TRACE_OUT")
+    output = Path(requested_output) if requested_output else tmp_path / "cetfind-search-trace.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     class FakeEngine:
         pass
