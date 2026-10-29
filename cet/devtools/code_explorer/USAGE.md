@@ -1,14 +1,23 @@
 # Running the local explorer
 
-Run commands from the repository's `cet/` directory. Use a local checkout; no Render deployment is required.
+Run commands from the repository's `cet/` directory. This tool is local-only; no Render deployment is required.
 
-## 1. Install the project's existing test dependencies
+## 1. Start with the guided tour
 
-Activate the same virtual environment you use for CETFind, then install the repository's requirements if needed.
+If you are new to the project, open the source-guided tour first:
 
-## 2. Generate a trace of the actual search handler
+```bash
+cd /path/to/SAM/cet
+python -m http.server 8765 --directory devtools/code_explorer
+```
 
-This test calls the real `backend.api.search_colleges` route function and its real cache/uncached control flow, while replacing database dependencies with a synthetic engine and a synthetic one-row DataFrame. It does **not** connect to production or read real candidate data.
+Then open `http://127.0.0.1:8765/guided.html`.
+
+Click each step in **Search Colleges** to see the code pattern, plain-English explanation, and alternative branches. The guide is derived from source code; it is not claiming that a particular live request executed every step.
+
+## 2. Generate a trace of the Python route
+
+Activate the same virtual environment you use for CETFind, with the repository's test dependencies installed. This test calls the real `backend.api.search_colleges` route and its real cache/uncached control flow, but replaces database dependencies with a synthetic engine and a synthetic one-row DataFrame. It does not connect to production or read real candidate data.
 
 ```bash
 cd /path/to/SAM/cet
@@ -16,31 +25,21 @@ CET_CODE_EXPLORER_TRACE_OUT="$PWD/devtools/code_explorer/search-trace.json" \
   pytest -q tests/test_code_explorer_trace.py::test_trace_captures_real_cetfind_search_handler_with_synthetic_dependencies
 ```
 
-The test should pass before you trust the trace. If it fails, do not use the generated file as proof of a successful trace.
+Only trust the generated trace if the test passes. The test has **not been run by the authoring environment**; run it locally and inspect any failure before relying on the output.
 
-## 3. Open the visual explorer
+## 3. Open the event viewer
 
-In another terminal, from `cet/`:
-
-```bash
-python -m http.server 8765 --directory devtools/code_explorer
-```
-
-Open `http://127.0.0.1:8765/`, select **Load trace JSON**, and choose `devtools/code_explorer/search-trace.json`.
-
-The viewer's three panels are:
+Keep the local server running and open `http://127.0.0.1:8765/`. Select **Load trace JSON**, then choose `devtools/code_explorer/search-trace.json`.
 
 - **Execution events:** ordered Python call/line/return/exception events.
 - **Execution graph:** a clickable sequence of observed events; it does not invent call edges.
-- **Original source & state:** source context, file/line, call stack, and redacted local-variable snapshot.
+- **Original source & state:** source context, file/line, call stack, and shallow local-variable snapshots.
 
-Use Previous/Next or the left/right arrow keys to step through events. Search filters the event list and graph.
+## Current limits
 
-## Scope of this first iteration
-
-- The current trace proves the route/cache/uncached-handler path for the test's specific synthetic input. It does not prove every possible branch.
-- The database query implementation is replaced by a synthetic function in this first test; the next integration step is to trace the actual `search_college_summary_page` implementation against a disposable local PostgreSQL database.
-- Python runtime tracing does not trace browser JavaScript. Frontend click/fetch tracing and browser-to-backend correlation are a separate phase.
-- Local-variable snapshots are deliberately shallow. Containers are represented by type and size to avoid dumping large data structures.
-- Review trace files before sharing them. Secret-like names are redacted, but no heuristic can guarantee that all sensitive values are removed.
-- The tracer is not wired into production, and it must not be enabled on Render.
+- The runtime tracer covers Python frames on the current thread. It does not trace browser JavaScript.
+- The route test substitutes the database query with synthetic data; it does not trace the actual SQL query execution.
+- The event list is not a complete control-flow graph, and the test exercises only its chosen input/branch.
+- Local-variable snapshots are shallow. Containers are represented by type and size to avoid dumping large data structures.
+- Secret-name redaction is heuristic and cannot guarantee every sensitive value is removed. Review trace files before sharing them.
+- The tracer is not wired into production. Do not enable it on Render.
