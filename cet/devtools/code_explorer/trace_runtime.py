@@ -89,7 +89,12 @@ class TraceSession:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        # Disable tracing on this already-running frame as well as future calls;
+        # otherwise _write() could keep appending events while JSON is serialized.
+        current_frame = inspect.currentframe()
         sys.settrace(self._previous_trace)
+        if current_frame is not None:
+            current_frame.f_trace = self._previous_trace
         if self._caller_frame is not None:
             self._caller_frame.f_trace = self._previous_frame_trace
         self._active = False
