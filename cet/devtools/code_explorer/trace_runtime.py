@@ -26,7 +26,7 @@ from types import FrameType
 from typing import Any
 
 _SECRET_NAME = re.compile(
-    r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|session|credential|private[_-]?key)",
+    r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|session|credential|private[_-]?key|database[_-]?url|connection[_-]?string|dsn)",
     re.IGNORECASE,
 )
 _MAX_REPR = 160
