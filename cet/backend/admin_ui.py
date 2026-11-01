@@ -965,7 +965,7 @@ async function load(){
       const kind=String(x.data_type||'').toUpperCase();
       const family=displayCourseFamily(x.course_family||'');
       const meta=[kind,family,x.year,x.round&&kind!=='SEATS'?x.round:null].filter(Boolean).join(' · ');
-      const sourceLabel=[x.original_filename,isLocal?'PDF on this PC':(isDrive?'Google Drive source':null)].filter(Boolean).join(' · ');
+      const sourceLabel=x.original_filename||'';
       let controls='';
       if(active){
         const pauseState=s==='PAUSED'||(window.activeRuntimeJob&&Number(window.activeRuntimeJob.id)===Number(x.id)&&(window.activeRuntimeJob.pause_requested||window.activeRuntimeJob.paused_at_checkpoint));
