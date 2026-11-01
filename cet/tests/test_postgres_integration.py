@@ -186,4 +186,3 @@ def test_engineering_coverage_does_not_compare_cutoffs_to_another_years_seat_mat
             conn.execute(text("DELETE FROM stages WHERE stage_code=:code"), {"code": stage})
             conn.execute(text("DELETE FROM allocation_lanes WHERE lane_code=:code"), {"code": lane})
 
-[executed on device: sam-System-Product-Name (2d2ebf96-1659-4079-8d9c-55aaf883ff66)]
