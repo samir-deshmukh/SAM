@@ -467,6 +467,8 @@ select.ssel-native { display: none; }
   flex-direction: column;
 }
 .ssel.open .ssel-panel { display: flex; }
+/* Keep the full option panel inside the visible screen when the field is near the bottom. */
+.ssel.open-up .ssel-panel { top: auto; bottom: calc(100% + 6px); }
 
 .ssel-search { padding: 10px; border-bottom: 1px solid rgba(241,241,238,0.9); flex: none; }
 .ssel-search input {
@@ -2088,6 +2090,13 @@ function enhanceSelect(selectEl, opts = {}) {
   function open() {
     if (selectEl.disabled) return;
     refreshCache();
+    const buttonRect = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - buttonRect.bottom;
+    const spaceAbove = buttonRect.top;
+    const availableSpace = Math.max(spaceAbove, spaceBelow) - 8;
+    const panelHeight = Math.max(120, Math.min(280, availableSpace));
+    panel.style.height = `${panelHeight}px`;
+    wrap.classList.toggle("open-up", spaceAbove > spaceBelow);
     wrap.classList.add("open");
     btn.setAttribute("aria-expanded", "true");
     if (searchInput) {
@@ -2101,7 +2110,8 @@ function enhanceSelect(selectEl, opts = {}) {
   }
 
   function close() {
-    wrap.classList.remove("open");
+    wrap.classList.remove("open", "open-up");
+    panel.style.height = "";
     btn.setAttribute("aria-expanded", "false");
   }
 
