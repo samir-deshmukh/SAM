@@ -48,4 +48,3 @@ def test_engineering_coverage_handles_zero_counts():
         "no_same_year_matrix": 0,
     }
 
-[executed on device: sam-System-Product-Name (2d2ebf96-1659-4079-8d9c-55aaf883ff66)]
