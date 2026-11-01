@@ -529,6 +529,7 @@ html,body,.main,.content,.admin-tab-lock{background:#f4f4f4!important;color:#262
 .derived-build-card{align-self:stretch;padding:14px}
 .derived-build-card .toolbar{margin-bottom:10px;align-items:center}
 .derived-build-card .filters{display:grid;grid-template-columns:minmax(0,1fr);gap:9px;margin-top:8px!important}
+.course-picker{position:relative;width:100%;min-width:0}.course-picker-trigger{width:100%;min-height:38px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border:1px solid #DEDEDE;border-radius:8px;background:#FFFFFF;color:#111111;text-align:left}.course-picker-trigger:after{content:"";width:8px;height:8px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin:0 3px 4px 0;flex:0 0 auto}.course-picker-menu{display:none;position:absolute;z-index:40;top:calc(100% + 5px);left:0;right:0;max-height:230px;overflow-y:auto;overscroll-behavior:contain;background:#FFFFFF;border:1px solid #DEDEDE;border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.12);padding:4px;scrollbar-width:thin;scrollbar-color:#999 #EEEEEE}.course-picker.open .course-picker-menu{display:block}.course-picker-option{display:block;width:100%;padding:9px 10px;border:0;border-radius:5px;background:#FFFFFF;color:#222;text-align:left;font-size:13px}.course-picker-option:hover,.course-picker-option[aria-selected="true"]{background:#F0F0F0}.course-picker-menu::-webkit-scrollbar{width:8px}.course-picker-menu::-webkit-scrollbar-thumb{background:#999;border-radius:8px}
 .derived-build-card #buildBtn{width:100%;min-height:38px}
 .select{appearance:none;-webkit-appearance:none;background-color:#FFFFFF!important;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 4 4 4 4-4' fill='none' stroke='%23111111' stroke-width='1.5'/%3E%3C/svg%3E")!important;background-repeat:no-repeat!important;background-position:right 11px center!important;padding-right:31px!important;border-color:#DEDEDE!important;border-radius:8px!important;color:#111111!important}
 .select option{background:#FFFFFF;color:#111111;padding:8px}
@@ -1068,12 +1069,28 @@ async function purge(id,button){if(!confirm('Permanently delete this rolled-back
 def derived_data() -> str:
     body='''<div class="title"><div><h1>CET Data Calculator</h1></div><div class="live"><span class="dot"></span>Admin controlled</div></div>
 <div class="pagegrid derived-grid"><div class="card panel derived-build-card"><div class="toolbar"><h2>Build derived data</h2></div>
-<div class="filters" style="margin-top:14px"><select id="course" class="select"><option value="">All courses in production DB</option></select><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button><button id="clearBuildBtn" class="btn" onclick="clearCalculatedData()">Clear calculated data</button></div>
+<div class="filters" style="margin-top:14px"><div class="course-picker" id="coursePicker"><select id="course" class="select" style="display:none" aria-hidden="true"><option value="">All courses in production DB</option></select><button type="button" id="coursePickerTrigger" class="course-picker-trigger" aria-haspopup="listbox" aria-expanded="false" onclick="toggleCoursePicker()"><span id="coursePickerLabel">All courses in production DB</span></button><div id="coursePickerMenu" class="course-picker-menu" role="listbox" aria-label="Choose course"></div></div><button id="buildBtn" class="btn primary" onclick="startBuild()">▶ Calculate & Store</button><button id="clearBuildBtn" class="btn" onclick="clearCalculatedData()">Clear calculated data</button></div>
 <div id="buildProgress" class="notice build-loading" style="margin-top:12px;display:none"><span class="activityspin" aria-hidden="true"></span><div><b id="progressTitle">Calculating…</b><div id="progressMessage" class="small muted" style="margin-top:5px">Waiting for server…</div></div></div>
 </div>
 <div class="card panel" style="margin-top:14px"><div class="toolbar"><h2>Build history</h2></div><div class="tablewrap"><table class="table"><thead><tr><th>ID</th><th>Course</th><th>Status</th><th>Progress</th><th>Message</th><th>Started</th><th>Finished</th><th>Actions</th></tr></thead><tbody id="history"></tbody></table></div></div>'''
     js=_common_js()+r'''<script>
 let jobs=[];
+function renderCoursePicker(sel){
+  const menu=document.querySelector('#coursePickerMenu'),label=document.querySelector('#coursePickerLabel');
+  if(!menu||!label)return;
+  const selected=sel.options[sel.selectedIndex];label.textContent=selected?selected.textContent:'All courses in production DB';
+  menu.innerHTML=[...sel.options].map(o=>'<button type="button" class="course-picker-option" role="option" aria-selected="'+(o.value===sel.value?'true':'false')+'" data-value="'+esc(o.value)+'" onclick="chooseCourse(this.dataset.value)">'+esc(o.textContent)+'</button>').join('');
+}
+function toggleCoursePicker(){
+  const picker=document.querySelector('#coursePicker'),trigger=document.querySelector('#coursePickerTrigger');
+  const opening=!picker.classList.contains('open');picker.classList.toggle('open',opening);trigger.setAttribute('aria-expanded',String(opening));
+}
+function chooseCourse(value){
+  const sel=document.querySelector('#course');sel.value=value;renderCoursePicker(sel);
+  document.querySelector('#coursePicker').classList.remove('open');document.querySelector('#coursePickerTrigger').setAttribute('aria-expanded','false');
+}
+document.addEventListener('click',e=>{const picker=document.querySelector('#coursePicker');if(picker&&!picker.contains(e.target)){picker.classList.remove('open');document.querySelector('#coursePickerTrigger').setAttribute('aria-expanded','false')}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){const picker=document.querySelector('#coursePicker');if(picker){picker.classList.remove('open');document.querySelector('#coursePickerTrigger').setAttribute('aria-expanded','false')}}});
 const activeStates=['QUEUED','RUNNING'];
 const terminalStates=['COMPLETED','FAILED','CANCELLED'];
 function actionButtons(j){
@@ -1090,6 +1107,7 @@ async function load(){
     const sel=document.querySelector('#course'),current=sel.value;
     sel.innerHTML='<option value="">All courses in production DB</option>'+d.courses.map(c=>'<option value="'+esc(c)+'">'+esc(displayCourseFamily(c))+'</option>').join('');
     if([...sel.options].some(o=>o.value===current))sel.value=current;
+    renderCoursePicker(sel);
     const j=jobs[0],box=document.querySelector('#buildProgress');
 
     if(j){
