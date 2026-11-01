@@ -14,6 +14,53 @@ from src.cet_cap.db import get_engine
 ZERO_FILTER = "NOT (c.rank_number = 0 AND c.percentile = 0.0)"
 
 
+def _engineering_cutoff_seat_coverage(conn) -> dict[str, int]:
+    """Compare engineering cutoff codes only with seat matrices from the same year.
+
+    Historical cutoff years often have no corresponding seat-matrix import. Those
+    rows are reported as unavailable for comparison, not as broken code mappings.
+    A same-year matrix that lacks a cutoff choice code is also reported, but the
+    cutoff remains authoritative and must not be discarded or fuzzy-mapped.
+    """
+    row = conn.execute(text("""
+        WITH cutoff_pairs AS (
+            SELECT DISTINCT c.year, c.institution_code, btrim(c.program_code) AS program_code
+            FROM cutoffs c
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE p.program_family = 'BE'
+              AND c.program_code IS NOT NULL
+              AND btrim(c.program_code) <> ''
+        ), seat_codes AS (
+            SELECT DISTINCT institution_code, capture_year, btrim(choice_code) AS choice_code
+            FROM seats
+            WHERE program_family = 'BE'
+        ), seat_years AS (
+            SELECT DISTINCT institution_code, capture_year
+            FROM seat_codes
+        )
+        SELECT
+            COUNT(*) FILTER (
+                WHERE sy.institution_code IS NOT NULL
+                  AND sc.choice_code IS NULL
+            ) AS unmatched_same_year,
+            COUNT(*) FILTER (
+                WHERE sy.institution_code IS NULL
+            ) AS no_same_year_matrix
+        FROM cutoff_pairs cp
+        LEFT JOIN seat_years sy
+          ON sy.institution_code = cp.institution_code
+         AND sy.capture_year = cp.year
+        LEFT JOIN seat_codes sc
+          ON sc.institution_code = cp.institution_code
+         AND sc.capture_year = cp.year
+         AND sc.choice_code = cp.program_code
+    """)).mappings().one()
+    return {
+        "unmatched_same_year": int(row["unmatched_same_year"] or 0),
+        "no_same_year_matrix": int(row["no_same_year_matrix"] or 0),
+    }
+
+
 def refresh(engine, course_family: str | None = None) -> None:
     course_where = " AND p.program_family = :course" if course_family else ""
     seat_where = " WHERE s.program_family = :course" if course_family else ""
@@ -73,46 +120,39 @@ def refresh(engine, course_family: str | None = None) -> None:
                 "for those records until the canonical seat CSV is re-imported with course_metadata."
             )
 
-        # For engineering, the official cutoff program_code must link exactly
-        # to a seat-matrix choice_code at the same institution. Never fuzzy-map
-        # a branch by its display label.
+        # Engineering cutoff and seat-matrix records must only be compared when
+        # they refer to the same institution AND the same publication year. A
+        # historical cutoff year without a same-year seat import is not a broken
+        # mapping. Same-year cutoff-only programs remain valid cutoff records;
+        # report their missing seat coverage rather than blocking all calculations.
         if not course_family or course_family == "BE":
             be_exists = conn.execute(text("""
                 SELECT COUNT(*) FROM seats WHERE program_family = 'BE'
             """)).scalar_one()
             if be_exists:
-                unmatched_branches = conn.execute(text("""
-                    SELECT COUNT(*) FROM (
-                        SELECT DISTINCT c.institution_code, c.program_code
-                        FROM cutoffs c
-                        JOIN programs p ON p.program_id = c.program_id
-                        WHERE p.program_family = 'BE'
-                          AND c.program_code IS NOT NULL AND btrim(c.program_code) <> ''
-                          AND NOT EXISTS (
-                              SELECT 1 FROM seats s
-                              WHERE s.program_family = 'BE'
-                                AND s.institution_code = c.institution_code
-                                AND s.choice_code = c.program_code
-                                AND s.capture_year = (
-                                    SELECT MAX(s2.capture_year) FROM seats s2
-                                    WHERE s2.program_family = s.program_family
-                                      AND s2.institution_code = s.institution_code
-                                )
-                          )
-                    ) unmatched
-                """)).scalar_one()
-                if unmatched_branches:
-                    raise RuntimeError(
-                        f"Refusing to mark engineering data complete: {unmatched_branches} distinct "
-                        "cutoff institution/program codes do not match a seat-matrix choice_code. "
-                        "Review source codes and re-import; no fuzzy branch mapping is allowed."
+                coverage = _engineering_cutoff_seat_coverage(conn)
+                if coverage["no_same_year_matrix"]:
+                    print(
+                        f"SOURCE COVERAGE INFO: {coverage['no_same_year_matrix']} distinct "
+                        "engineering cutoff institution/program/year records have no "
+                        "seat matrix imported for that same year. No cross-year code "
+                        "comparison was performed for those records."
                     )
+                if coverage["unmatched_same_year"]:
+                    print(
+                        f"SOURCE COVERAGE WARNING: {coverage['unmatched_same_year']} distinct "
+                        "engineering cutoff institution/program/year records have no "
+                        "exact choice-code match in the seat matrix for the same year. "
+                        "Their official cutoff records remain available; seat counts "
+                        "are unavailable for those branches. No fuzzy mapping was applied."
+                    )
+
                 seat_only_branches = conn.execute(text("""
                     WITH latest_seat_year AS (
                         SELECT institution_code, MAX(capture_year) AS capture_year
                         FROM seats WHERE program_family='BE' GROUP BY institution_code
                     ), seat_codes AS (
-                        SELECT DISTINCT s.institution_code, s.choice_code
+                        SELECT DISTINCT s.institution_code, s.capture_year, s.choice_code
                         FROM seats s JOIN latest_seat_year y
                           ON y.institution_code=s.institution_code AND y.capture_year=s.capture_year
                         WHERE s.program_family='BE'
@@ -122,19 +162,19 @@ def refresh(engine, course_family: str | None = None) -> None:
                         SELECT 1 FROM cutoffs c JOIN programs p ON p.program_id=c.program_id
                         WHERE p.program_family='BE'
                           AND c.institution_code=s.institution_code
-                          AND c.program_code=s.choice_code
+                          AND c.year=s.capture_year
+                          AND btrim(c.program_code)=btrim(s.choice_code)
                     )
                 """)).scalar_one()
-                # Seat-only branches are valid when the official cutoff PDF has no
-                # rows for that institution/choice code. Keep them in the seat
-                # matrix and expose an explicit empty-cutoff state in the UI.
-                # We still fail on cutoff-only codes above: those indicate a
-                # seat matrix link is missing and would otherwise hide data.
+                # Seat-only branches are valid when the official same-year cutoff
+                # PDF has no rows for that institution/choice code. Keep them in
+                # the seat matrix and expose the existing empty-cutoff UI state.
                 if seat_only_branches:
                     print(
                         f"SOURCE COVERAGE WARNING: {seat_only_branches} latest engineering "
-                        "seat-matrix choice codes have no exact cutoff rows. They remain "
-                        "available for seat-matrix display; the UI must say cutoff unavailable."
+                        "seat-matrix choice codes have no exact cutoff rows for the "
+                        "same year. They remain available for seat-matrix display; "
+                        "the UI must say cutoff unavailable."
                     )
 
         if course_family:
@@ -317,3 +357,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+[executed on device: sam-System-Product-Name (2d2ebf96-1659-4079-8d9c-55aaf883ff66)]
