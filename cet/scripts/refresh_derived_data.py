@@ -358,4 +358,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-[executed on device: sam-System-Product-Name (2d2ebf96-1659-4079-8d9c-55aaf883ff66)]
