@@ -610,7 +610,8 @@ def _custom_select_script() -> str:
   }
   function closeAll(except){document.querySelectorAll('.cet-select-wrap.open').forEach(w=>{if(w!==except){w.classList.remove('open');w.querySelector('.cet-select-trigger')?.setAttribute('aria-expanded','false')}})}
   function enhance(sel){
-    if(!(sel instanceof HTMLSelectElement)||sel.dataset.cetCustomSelect==='1')return;
+    // The calculator owns its course picker UI; do not wrap its hidden backing select.
+    if(!(sel instanceof HTMLSelectElement)||sel.dataset.cetCustomSelect==='1'||sel.closest('.course-picker'))return;
     sel.dataset.cetCustomSelect='1';
     const wrap=document.createElement('div');wrap.className='cet-select-wrap';
     const width=sel.style.width;if(width)wrap.style.width=width;
