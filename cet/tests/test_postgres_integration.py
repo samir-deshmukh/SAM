@@ -112,3 +112,78 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
             conn.execute(text("DELETE FROM sections WHERE section_code=:section"), {"section": f"S{suffix}"})
             conn.execute(text("DELETE FROM stages WHERE stage_code=:stage"), {"stage": f"ST{suffix}"})
         api.invalidate_public_caches()
+
+
+def test_engineering_coverage_does_not_compare_cutoffs_to_another_years_seat_matrix():
+    """Historical cutoffs without same-year seats are not false code mismatches."""
+    import uuid
+    from scripts.db_bootstrap import bootstrap_schema
+    from scripts.refresh_derived_data import _engineering_cutoff_seat_coverage
+
+    engine = db()
+    bootstrap_schema(engine)
+    suffix = uuid.uuid4().hex[:10].upper()
+    institution = f"T{suffix}"
+    category = f"C{suffix}"
+    section = f"S{suffix}"
+    stage = f"G{suffix}"
+    lane = f"L{suffix}"
+    program_name = f"Engineering coverage fixture {suffix}"
+    historic_code = f"H{suffix}"
+    missing_code = f"M{suffix}"
+    matched_code = f"X{suffix}"
+    program_id = None
+
+    try:
+        with engine.begin() as conn:
+            before = _engineering_cutoff_seat_coverage(conn)
+            conn.execute(text("INSERT INTO institutes(institution_code,institution_name) VALUES (:code,:name)"),
+                         {"code": institution, "name": f"Coverage Fixture {suffix}"})
+            program_id = conn.execute(
+                text("INSERT INTO programs(program_family,program_name_raw) VALUES ('BE',:name) RETURNING program_id"),
+                {"name": program_name},
+            ).scalar_one()
+            conn.execute(text("INSERT INTO base_categories(base_code) VALUES (:code)"), {"code": category})
+            conn.execute(text("INSERT INTO sections(section_code,section_full) VALUES (:code,'Fixture')"), {"code": section})
+            conn.execute(text("INSERT INTO stages(stage_code) VALUES (:code)"), {"code": stage})
+            conn.execute(text("INSERT INTO allocation_lanes(lane_code,lane_full) VALUES (:code,'Fixture')"), {"code": lane})
+
+            for year, code, rank in ((2025, historic_code, 101), (2026, missing_code, 102), (2026, matched_code, 103)):
+                conn.execute(text("""
+                    INSERT INTO cutoffs(
+                        year,round,institution_code,program_id,program_code,base_category,
+                        is_ladies,section_code,stage_code,rank_number,percentile,raw_category,
+                        raw_program_name,source_pdf
+                    ) VALUES (:year,1,:institution,:program_id,:code,:category,FALSE,
+                             :section,:stage,:rank,75.0,'OPEN',:program_name,'fixture.pdf')
+                """), {
+                    "year": year, "institution": institution, "program_id": program_id,
+                    "code": code, "category": category, "section": section,
+                    "stage": stage, "rank": rank, "program_name": program_name,
+                })
+
+            conn.execute(text("""
+                INSERT INTO seats(
+                    capture_year,program_family,institution_code,choice_code,allocation_lane,
+                    base_category,is_total,is_ladies,seats,raw_category,raw_allocation_type,
+                    raw_gender,source_pdf
+                ) VALUES (2026,'BE',:institution,:code,:lane,:category,FALSE,FALSE,10,
+                         'OPEN','Fixture','G','fixture.pdf')
+            """), {"institution": institution, "code": matched_code, "lane": lane, "category": category})
+
+            after = _engineering_cutoff_seat_coverage(conn)
+            assert after["unmatched_same_year"] - before["unmatched_same_year"] == 1
+            assert after["no_same_year_matrix"] - before["no_same_year_matrix"] == 1
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM seats WHERE institution_code=:institution"), {"institution": institution})
+            conn.execute(text("DELETE FROM cutoffs WHERE institution_code=:institution"), {"institution": institution})
+            if program_id is not None:
+                conn.execute(text("DELETE FROM programs WHERE program_id=:program_id"), {"program_id": program_id})
+            conn.execute(text("DELETE FROM institutes WHERE institution_code=:institution"), {"institution": institution})
+            conn.execute(text("DELETE FROM base_categories WHERE base_code=:code"), {"code": category})
+            conn.execute(text("DELETE FROM sections WHERE section_code=:code"), {"code": section})
+            conn.execute(text("DELETE FROM stages WHERE stage_code=:code"), {"code": stage})
+            conn.execute(text("DELETE FROM allocation_lanes WHERE lane_code=:code"), {"code": lane})
+
+[executed on device: sam-System-Product-Name (2d2ebf96-1659-4079-8d9c-55aaf883ff66)]
