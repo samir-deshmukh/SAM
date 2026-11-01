@@ -3526,7 +3526,7 @@ function createTrendsController(ids) {
       const collegeMeta = (CONFIG.colleges || []).find(x => x.course === state.course && String(x.institution_code) === String(state.college));
       const collegeName = collegeMeta ? collegeMeta.name : state.college;
       if (!choiceCodes.length) {
-        els.seatMatrixBody.innerHTML = `${branchSelectorHtml}<p class="d-text">No seat-matrix record is linked to the selected branch (${escapeHtml(state.selectedProgramCode || 'no verified program code')}). Other branches are not shown as a substitute.</p>`;
+        els.seatMatrixBody.innerHTML = `${branchSelectorHtml}<p class="d-text">Cutoff data is available for this branch, but no matching seat-matrix record was published for choice code ${escapeHtml(state.selectedProgramCode || 'unavailable')}. Seat counts are unavailable; the official cutoff history remains available. Other branches are not shown as a substitute.</p>`;
         return;
       }
       const displayCodes = choiceCodes.filter(code => courseMetadata[String(code)]);
