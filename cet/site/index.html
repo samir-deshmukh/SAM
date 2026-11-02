@@ -1180,6 +1180,12 @@ body{letter-spacing:-.01em;}
 .results-table{border-top:1px solid var(--paper-400);}
 .results-table tr{border-bottom:1px solid var(--paper-300);transition:background .2s ease,transform .2s ease;}
 .results-table tr:hover{background:rgba(11,11,15,.035);transform:translateX(4px);}
+.results-pagination{display:flex;align-items:center;justify-content:center;gap:16px;padding:18px 0;border-top:1px solid var(--paper-300);}
+.results-pagination[hidden]{display:none;}
+.results-page-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:38px;padding:0 13px;border:1px solid var(--paper-300);border-radius:5px;background:transparent;color:var(--ink-900);font:600 .82rem Inter,sans-serif;cursor:pointer;}
+.results-page-button:hover:not(:disabled){border-color:var(--ink-900);}
+.results-page-button:disabled{opacity:.4;cursor:not-allowed;}
+.results-page-status{font-size:.82rem;color:var(--paper-600);font-variant-numeric:tabular-nums;}
 .drawer{border-radius:0;}
 .drawer-head{border-bottom:1px solid var(--paper-300);}
 .d-section,.trend-card,.seat-card{border-radius:8px;box-shadow:none;border:1px solid var(--paper-300);}
@@ -1550,6 +1556,7 @@ footer .footer-grid { border-top-color:#444444!important; }
             <tbody id="resultsBody"></tbody>
           </table>
         </div>
+        <nav id="resultsPagination" class="results-pagination" aria-label="College results pages" hidden></nav>
       </div>
     </div>
   </section>
@@ -2310,14 +2317,14 @@ function getFiltered() {
 }
 
 function renderResultsTable() {
-  const list = getFiltered();
+  const list = CONFIG.colleges;
   const searched = citySelect.value !== CONFIG.unselected &&
                     courseSelect.value !== CONFIG.unselected &&
                     currentPct !== null;
 
   /* Update the "42 colleges match" text */
-  resultCount.textContent = list.length;
-  resultLabel.textContent = list.length === 1
+  resultCount.textContent = totalSearchResults;
+  resultLabel.textContent = totalSearchResults === 1
     ? "college matches your profile"
     : "colleges match your profile";
 
@@ -2326,6 +2333,7 @@ function renderResultsTable() {
      so there is nothing in the table for a click to accidentally land
      on and open a slide before a real search has happened. */
   if (!searched) {
+    document.getElementById("resultsPagination").hidden = true;
     resultsBody.innerHTML = `
       <tr class="no-row"><td colspan="4">
         <div class="empty-state">
@@ -2337,7 +2345,8 @@ function renderResultsTable() {
   }
 
   /* Empty state — a real search that matched nothing */
-  if (!list.length) {
+  if (!totalSearchResults || !list.length) {
+    document.getElementById("resultsPagination").hidden = true;
     resultsBody.innerHTML = `
       <tr class="no-row"><td colspan="4">
         <div class="empty-state">
@@ -2366,13 +2375,43 @@ function renderResultsTable() {
         </td>
       </tr>`;
   }).join("");
+  renderResultsPagination();
 }
+
+const SEARCH_PAGE_SIZE = 10;
+let currentSearchPage = 1;
+let totalSearchResults = 0;
+
+function renderResultsPagination() {
+  const pagination = document.getElementById("resultsPagination");
+  const totalPages = Math.ceil(totalSearchResults / SEARCH_PAGE_SIZE);
+  if (totalPages <= 1) {
+    pagination.hidden = true;
+    pagination.innerHTML = "";
+    return;
+  }
+  const firstResult = (currentSearchPage - 1) * SEARCH_PAGE_SIZE + 1;
+  const lastResult = Math.min(currentSearchPage * SEARCH_PAGE_SIZE, totalSearchResults);
+  pagination.hidden = false;
+  pagination.innerHTML =
+    '<button type="button" class="results-page-button" data-page="previous" aria-label="Previous page" ' + (currentSearchPage <= 1 ? "disabled" : "") + '>← Previous</button>' +
+    '<span class="results-page-status">Showing ' + firstResult + "–" + lastResult + " of " + totalSearchResults + " · Page " + currentSearchPage + " of " + totalPages + '</span>' +
+    '<button type="button" class="results-page-button" data-page="next" aria-label="Next page" ' + (currentSearchPage >= totalPages ? "disabled" : "") + '>Next →</button>';
+}
+
+document.getElementById("resultsPagination").addEventListener("click", event => {
+  const button = event.target.closest("button[data-page]");
+  if (!button || button.disabled) return;
+  const nextPage = currentSearchPage + (button.dataset.page === "next" ? 1 : -1);
+  if (nextPage >= 1 && nextPage <= Math.ceil(totalSearchResults / SEARCH_PAGE_SIZE)) renderResults(nextPage);
+});
 
 let searchTimer = null;
 let searchRequest = null;
 let searchSequence = 0;
 
-function renderResults() {
+function renderResults(page = 1) {
+  currentSearchPage = page;
   clearTimeout(searchTimer);
   const city = citySelect.value;
   const course = courseSelect.value;
@@ -2382,6 +2421,7 @@ function renderResults() {
 
   if (!searched) {
     CONFIG.colleges = [];
+    totalSearchResults = 0;
     renderResultsTable();
     return;
   }
@@ -2397,8 +2437,8 @@ function renderResults() {
         percentile: String(currentPct),
         city,
         sort: currentSort === "rank" ? "rank" : "comp",
-        page: "1",
-        page_size: "50"
+        page: String(currentSearchPage),
+        page_size: String(SEARCH_PAGE_SIZE)
       });
       const response = await fetch(`${API_BASE}/api/search?` + params.toString(), {
         headers: { "Accept": "application/json" },
@@ -2408,11 +2448,14 @@ function renderResults() {
       const payload = await response.json();
       if (seq !== searchSequence) return;
       CONFIG.colleges = Array.isArray(payload.results) ? payload.results : [];
+      totalSearchResults = Number(payload.total) || 0;
+      currentSearchPage = Number(payload.page) || currentSearchPage;
       renderResultsTable();
     } catch (err) {
       if (err.name === "AbortError") return;
       console.error("Could not load college search results:", err);
       CONFIG.colleges = [];
+      totalSearchResults = 0;
       renderResultsTable();
     }
   }, 180);
