@@ -3163,7 +3163,8 @@ function createTrendsController(ids) {
     try {
       const data = await loadCollegeYear(state.course, state.college, state.selectedYear);
       const allCollegeRows = Array.isArray(data.pdf_rows) ? data.pdf_rows : [];
-      const collegeRows = allCollegeRows.filter(r => r.ladies === state.ladies);
+      // Keep general and ladies cutoff lines visible together in the raw PDF-style table.
+      const collegeRows = allCollegeRows;
       els.trendsLoading.style.display = "none";
 
       if (!allCollegeRows.length) {
