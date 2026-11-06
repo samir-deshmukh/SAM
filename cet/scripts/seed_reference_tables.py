@@ -45,7 +45,25 @@ def _pick_canonical_name(code: str, by_year: dict[int, Counter]) -> str:
     return sorted(name for name, count in counts if count == top)[0]
 
 
-def seed_institutes(conn, raw_dir: Path) -> tuple[int,int]:
+def _reference_institute_names(ref_dir: Path) -> dict[str, str]:
+    """Return only unambiguous exact code-to-name mappings from the contact reference."""
+    path = ref_dir / 'institute_contacts.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    required = {'college_code', 'college_name'}
+    if not required.issubset(df.columns):
+        raise ValueError(f'{path} must contain {sorted(required)}')
+    names_by_code: dict[str, set[str]] = defaultdict(set)
+    for code, name in zip(df['college_code'], df['college_name']):
+        code, name = str(code).strip(), str(name).strip()
+        if code and name:
+            names_by_code[code].add(name)
+    return {code: next(iter(names)) for code, names in names_by_code.items() if len(names) == 1}
+
+
+def seed_institutes(conn, raw_dir: Path, ref_dir: Path) -> tuple[int,int]:
+    reference_names = _reference_institute_names(ref_dir)
     names_by_code: dict[str,dict[int,Counter]] = defaultdict(lambda: defaultdict(Counter))
     for path in sorted(raw_dir.glob('*.csv')):
         meta = parse_filename(path)
@@ -59,9 +77,17 @@ def seed_institutes(conn, raw_dir: Path) -> tuple[int,int]:
         all_names=Counter()
         for counts in by_year.values(): all_names.update(counts)
         if len(all_names)>1: variants+=1
+        name = _pick_canonical_name(code,by_year)
+        if not name or name == code:
+            name = reference_names.get(code, name or code)
         conn.execute(text('''INSERT INTO institutes(institution_code,institution_name)
-            VALUES(:code,:name) ON CONFLICT(institution_code) DO UPDATE SET institution_name=EXCLUDED.institution_name'''),
-            {'code':code,'name':_pick_canonical_name(code,by_year)})
+            VALUES(:code,:name) ON CONFLICT(institution_code) DO UPDATE SET
+              institution_name=CASE
+                WHEN EXCLUDED.institution_name = EXCLUDED.institution_code
+                THEN institutes.institution_name
+                ELSE EXCLUDED.institution_name
+              END'''),
+            {'code':code,'name':name})
     return len(names_by_code),variants
 
 
@@ -76,6 +102,6 @@ def main():
         print(f'base_categories: {seed_base_categories(conn,Path(args.ref_dir))}')
         print(f'sections: {seed_sections(conn,Path(args.ref_dir))}')
         print(f'stages: {seed_stages(conn,Path(args.ref_dir))}')
-        n,v=seed_institutes(conn,Path(args.raw_dir)); print(f'institutes: {n} (variants: {v})')
+        n,v=seed_institutes(conn,Path(args.raw_dir),Path(args.ref_dir)); print(f'institutes: {n} (variants: {v})')
 
 if __name__=='__main__': main()

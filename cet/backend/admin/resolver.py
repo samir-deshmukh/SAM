@@ -324,18 +324,28 @@ def _reference_contacts():
              'website': r[3] if len(r) > 3 else ''}
             for r in rows
         ]
+    names_by_code = {}
     for r in data_rows:
         code = str(r.get('college_code', '')).strip()
         if not code:
             continue
+        name = str(r.get('college_name', '')).strip()
+        if name:
+            names_by_code.setdefault(code, set()).add(name)
         website = str(r.get('website', '')).strip()
         if website.lower() in {'', 'unknown', 'nan', 'none'}:
             website = None
-        contacts[code] = {
-            'institution_name': str(r.get('college_name', '')).strip() or None,
-            'city': str(r.get('city', '')).strip() or None,
-            'website': valid_url(website) if website else None,
-        }
+        current = contacts.setdefault(code, {'institution_name': None, 'city': None, 'website': None})
+        city = str(r.get('city', '')).strip()
+        if city and not current['city']:
+            current['city'] = city
+        clean_website = valid_url(website) if website else None
+        if clean_website and not current['website']:
+            current['website'] = clean_website
+    for code, names in names_by_code.items():
+        # Conflicting source names are intentionally left unresolved rather than guessed.
+        if len(names) == 1:
+            contacts[code]['institution_name'] = next(iter(names))
     return contacts
 
 
