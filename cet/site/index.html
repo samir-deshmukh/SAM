@@ -467,9 +467,6 @@ select.ssel-native { display: none; }
   flex-direction: column;
 }
 .ssel.open .ssel-panel { display: flex; }
-/* Keep the full option panel inside the visible screen when the field is near the bottom. */
-.ssel.open-up .ssel-panel { top: auto; bottom: calc(100% + 6px); }
-
 .ssel-search { padding: 10px; border-bottom: 1px solid rgba(241,241,238,0.9); flex: none; }
 .ssel-search input {
   width: 100%; padding: 10px 12px;
@@ -2097,13 +2094,13 @@ function enhanceSelect(selectEl, opts = {}) {
   function open() {
     if (selectEl.disabled) return;
     refreshCache();
+    // Keep searchable dropdowns below their trigger fields and fit the
+    // available space without flipping the panel above the field.
     const buttonRect = btn.getBoundingClientRect();
     const spaceBelow = window.innerHeight - buttonRect.bottom;
-    const spaceAbove = buttonRect.top;
-    const availableSpace = Math.max(spaceAbove, spaceBelow) - 8;
-    const panelHeight = Math.max(120, Math.min(280, availableSpace));
-    panel.style.height = `${panelHeight}px`;
-    wrap.classList.toggle("open-up", spaceAbove > spaceBelow);
+    const availableSpace = Math.max(120, Math.min(280, spaceBelow - 8));
+    panel.style.height = `${availableSpace}px`;
+    wrap.classList.remove("open-up");
     wrap.classList.add("open");
     btn.setAttribute("aria-expanded", "true");
     if (searchInput) {
@@ -2119,6 +2116,7 @@ function enhanceSelect(selectEl, opts = {}) {
   function close() {
     wrap.classList.remove("open", "open-up");
     panel.style.height = "";
+
     btn.setAttribute("aria-expanded", "false");
   }
 
@@ -3208,7 +3206,8 @@ function createTrendsController(ids) {
     try {
       const data = await loadCollegeYear(state.course, state.college, state.selectedYear);
       const allCollegeRows = Array.isArray(data.pdf_rows) ? data.pdf_rows : [];
-      const collegeRows = allCollegeRows.filter(r => r.ladies === state.ladies);
+      // Keep general and ladies cutoff lines visible together in the raw PDF-style table.
+      const collegeRows = allCollegeRows;
       els.trendsLoading.style.display = "none";
 
       if (!allCollegeRows.length) {
