@@ -1,16 +1,14 @@
 services:
   - type: web
     name: cet-find-web
-    runtime: python
+    runtime: docker
     plan: free
     region: singapore
     rootDir: cet
-    buildCommand: apt-get update && apt-get install -y tesseract-ocr && pip install -r requirements.txt
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.8
       - key: CET_PDF_STORAGE_BACKEND
         value: local
       - key: CET_ADMIN_SESSION_SECRET
