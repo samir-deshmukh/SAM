@@ -260,6 +260,7 @@ app=FastAPI(title='CET CAP Admin API', lifespan=lifespan, docs_url=None, redoc_u
 # Temporary diagnostic middleware: proves whether an HTTP request reaches
 # the ASGI application, and correlates it with Render's request identifier.
 _request_trace_log = logging.getLogger("cet-request-trace")
+_request_trace_log.setLevel(logging.INFO)
 
 @app.middleware("http")
 async def trace_incoming_request(request: Request, call_next):
