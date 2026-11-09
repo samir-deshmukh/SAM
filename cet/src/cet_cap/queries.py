@@ -31,12 +31,53 @@ than a silent filter in every query.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import pandas as pd
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import ProgrammingError
 
 ZERO_CUTOFF_ARTIFACT_FILTER = 'NOT (c.rank_number = 0 AND c.percentile = 0.0)'
+
+
+# The runtime serving tables are rebuilt transactionally. Their readiness is
+# stable between admin publications, so avoid opening a database connection
+# for the same EXISTS probe on every uncached public search.
+_RUNTIME_READINESS_TTL_SECONDS = 30.0
+_RUNTIME_READINESS_CACHE_MAX = 128
+_RUNTIME_READINESS_CACHE: dict[tuple[Engine, str], tuple[float, bool]] = {}
+_RUNTIME_READINESS_LOCK = threading.Lock()
+
+
+def invalidate_search_runtime_readiness_cache() -> None:
+    """Invalidate per-course serving-table readiness after derived-data changes."""
+    with _RUNTIME_READINESS_LOCK:
+        _RUNTIME_READINESS_CACHE.clear()
+
+
+def _search_runtime_is_ready(engine: Engine, program_family: str) -> bool:
+    """Return cached serving-table readiness, probing PostgreSQL at most every 30s."""
+    key = (engine, program_family)
+    now = time.monotonic()
+    with _RUNTIME_READINESS_LOCK:
+        cached = _RUNTIME_READINESS_CACHE.get(key)
+        if cached is not None and now - cached[0] < _RUNTIME_READINESS_TTL_SECONDS:
+            return cached[1]
+
+        # Keep the lock through the probe so concurrent misses for the same
+        # course do not all acquire their own database connection. Waiting
+        # requests hold no connection while they wait for this short check.
+        with engine.connect() as conn:
+            ready = bool(conn.execute(
+                text("SELECT EXISTS (SELECT 1 FROM college_search_runtime WHERE program_family = :course)"),
+                {"course": program_family},
+            ).scalar())
+
+        if len(_RUNTIME_READINESS_CACHE) >= _RUNTIME_READINESS_CACHE_MAX:
+            oldest = min(_RUNTIME_READINESS_CACHE, key=lambda item: _RUNTIME_READINESS_CACHE[item][0])
+            _RUNTIME_READINESS_CACHE.pop(oldest, None)
+        _RUNTIME_READINESS_CACHE[key] = (time.monotonic(), ready)
+        return ready
 
 
 def available_years(engine: Engine) -> list[int]:
@@ -284,11 +325,7 @@ def search_college_summary_page(
     # The raw-table path below remains a safe rollout fallback until the first
     # successful derived-data rebuild after this version is deployed.
     try:
-        with engine.connect() as conn:
-            runtime_ready = conn.execute(
-                text("SELECT EXISTS (SELECT 1 FROM college_search_runtime WHERE program_family = :course)"),
-                {"course": program_family},
-            ).scalar()
+        runtime_ready = _search_runtime_is_ready(engine, program_family)
     except ProgrammingError:
         # During a rolling deployment the schema migration runs in the
         # background. Keep the previous raw-table query available until the

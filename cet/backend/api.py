@@ -35,6 +35,7 @@ from cet_cap.queries import (
     available_years,
     search_college_summary,
     search_college_summary_page,
+    invalidate_search_runtime_readiness_cache,
     search_cutoffs_for_course,
     seat_matrix_for_institute,
 )
@@ -115,6 +116,7 @@ def invalidate_public_caches() -> None:
     global PUBLIC_COURSES, _PUBLIC_COURSES_AT
     _PUBLIC_CACHE.clear()
     _SEARCH_METADATA_CACHE.clear()
+    invalidate_search_runtime_readiness_cache()
     PUBLIC_COURSES = None
     _PUBLIC_COURSES_AT = 0.0
 _OPTIONS_TTL = 300.0
