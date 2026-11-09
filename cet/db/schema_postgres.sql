@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS institutes (
     address            TEXT,
     website            TEXT,
     city_source        TEXT,
+    district_source    TEXT,
+    district_verified_at TIMESTAMP,
     website_source     TEXT,
     address_source     TEXT,
     verified_at        TIMESTAMP,

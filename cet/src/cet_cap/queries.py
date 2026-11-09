@@ -105,16 +105,18 @@ def search_college_summary(
     percentage: float,
     program_family: str,
     city: str | None = None,
+    location_type: str = "city",
 ) -> pd.DataFrame:
     """Return one aggregated row per eligible college directly from PostgreSQL.
 
-    City filtering and aggregation happen in SQL so the API never loads the
+    Location filtering and aggregation happen in SQL so the API never loads the
     full cutoff dataset into pandas for a normal public search.
     """
     city_clause = ""
     params = {"percentage": percentage, "program_family": program_family}
+    location_column = "i.district" if location_type == "district" else "i.city"
     if city and city.strip():
-        city_clause = " AND i.city ILIKE :city"
+        city_clause = f" AND {location_column} ILIKE :city"
         params["city"] = f"%{city.strip()}%"
 
     query = text(f"""
@@ -148,6 +150,7 @@ def _search_college_summary_page_runtime(
     sort: str,
     page: int,
     page_size: int,
+    location_type: str = "city",
 ) -> tuple[pd.DataFrame, int]:
     """Serve public search from compact, transactionally rebuilt runtime tables.
 
@@ -161,8 +164,9 @@ def _search_college_summary_page_runtime(
         "limit": page_size,
         "offset": (page - 1) * page_size,
     }
+    location_column = "i.district" if location_type == "district" else "i.city"
     if city and city.strip():
-        city_clause = " AND i.city ILIKE :city"
+        city_clause = f" AND {location_column} ILIKE :city"
         params["city"] = f"%{city.strip()}%"
 
     order = {
@@ -269,6 +273,7 @@ def search_college_summary_page(
     sort: str = "comp",
     page: int = 1,
     page_size: int = 25,
+    location_type: str = "city",
 ) -> tuple[pd.DataFrame, int]:
     """Aggregate, sort, count and paginate in PostgreSQL.
 
@@ -291,13 +296,14 @@ def search_college_summary_page(
         runtime_ready = False
     if runtime_ready:
         return _search_college_summary_page_runtime(
-            engine, percentage, program_family, city, sort, page, page_size
+            engine, percentage, program_family, city, sort, page, page_size, location_type
         )
     city_clause = ""
     params = {"percentage": percentage, "program_family": program_family,
               "limit": page_size, "offset": (page - 1) * page_size}
+    location_column = "i.district" if location_type == "district" else "i.city"
     if city and city.strip():
-        city_clause = " AND i.city ILIKE :city"
+        city_clause = f" AND {location_column} ILIKE :city"
         params["city"] = f"%{city.strip()}%"
     order = {
         "alpha": "institution_name ASC, institution_code ASC",

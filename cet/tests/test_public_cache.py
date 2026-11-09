@@ -22,7 +22,7 @@ def env(monkeypatch):
     lock = threading.Lock()
     state = {"delay": 0.0}
 
-    def fake_page(engine, percentage, program_family, city, sort, page, page_size):
+    def fake_page(engine, percentage, program_family, city, sort, page, page_size, location_type="city"):
         with lock:
             calls["search"] += 1
         time.sleep(state["delay"])
@@ -47,9 +47,10 @@ def env(monkeypatch):
     return calls, state
 
 
-def search(course="BBA", percentile=80.0, city=None, sort="comp", page=1, page_size=25, ip="10.9.0.1"):
+def search(course="BBA", percentile=80.0, city=None, sort="comp", page=1, page_size=25,
+           ip="10.9.0.1", location_type="city"):
     return api.search_colleges(req(ip), course=course, percentile=percentile, city=city,
-                               sort=sort, page=page, page_size=page_size)
+                               location_type=location_type, sort=sort, page=page, page_size=page_size)
 
 
 def marker(res):
@@ -83,6 +84,13 @@ def test_city_is_case_and_whitespace_insensitive_like_the_sql(env):
     search(city="Pune")
     search(city="  pune ")
     assert calls["search"] == 1
+
+
+def test_city_and_district_are_separate_cache_entries(env):
+    calls, _ = env
+    search(city="Pune", location_type="city")
+    search(city="Pune", location_type="district")
+    assert calls["search"] == 2
 
 
 def test_courses_do_not_contaminate_each_other(env):
@@ -214,8 +222,8 @@ def test_options_and_stats_cached_once_and_set_cache_header(monkeypatch):
     r = Response()
     first = api.public_options(req(), r)
     second = api.public_options(req(), Response())
-    assert first == second == {"cities": ["Pune"], "courses": ["BBA"]}
+    assert first == second == {"cities": ["Pune"], "districts": ["Pune"], "courses": ["BBA"]}
     assert r.headers["cache-control"] == "public, max-age=60"
     s1, s2 = api.public_stats(req(), Response()), api.public_stats(req(), Response())
     assert s1 == s2 and s1["colleges"] == 1
-    assert n["conn"] == 2  # one DB hit for options + one for stats, not four
+    assert n["conn"] == 3  # city + district option queries, then one stats query

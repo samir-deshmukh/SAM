@@ -1502,7 +1502,7 @@ footer .footer-grid { border-top-color:#444444!important; }
         <!-- ─── City + Course searchable dropdowns. Options are filled in by JS. ─── -->
         <div class="fields-grid">
           <div class="field">
-            <label class="field-label" for="citySelect">City</label>
+            <label class="field-label" for="citySelect">City or District</label>
             <select id="citySelect"></select>
           </div>
           <div class="field">
@@ -2081,7 +2081,7 @@ function enhanceSelect(selectEl, opts = {}) {
 
   function sync() {
     const opt = selectEl.options[selectEl.selectedIndex];
-    const placeholderText = selectEl === citySelect ? "Select City" : "Select Course";
+    const placeholderText = selectEl === citySelect ? "Select City or District" : "Select Course";
     btn.textContent = opt ? opt.textContent : placeholderText;
     btn.classList.toggle("placeholder", !opt || opt.value === "");
     btn.disabled = selectEl.disabled;
@@ -2231,11 +2231,17 @@ async function loadRealCollegeData() {
     const cities = [...new Set((data.cities || [])
       .map(v => String(v).trim())
       .filter(v => v && v.toLowerCase() !== "select city"))];
+    const districts = [...new Set((data.districts || [])
+      .map(v => String(v).trim())
+      .filter(v => v))];
     const courses = [...new Set((data.courses || [])
       .map(v => String(v).trim())
       .filter(v => v && v.toLowerCase() !== "select course"))];
 
-    CONFIG.cityOptions = cities.map(v => ({ value: v, label: v }));
+    CONFIG.cityOptions = [
+      ...cities.map(v => ({ value: "city::" + v, label: v + " (City)" })),
+      ...districts.map(v => ({ value: "district::" + v, label: v + " (District)" }))
+    ];
     // BE and BTech are alternate labels for the same engineering course family here.
     // Keep the API value unchanged so existing filters and endpoints continue to work.
     CONFIG.courseOptions = courses.map(v => ({
@@ -2291,7 +2297,9 @@ function percentileRange(c) {
    and just labelled "reach"), so 52% never surfaces a college that
    has only ever closed in the 90s. */
 function getFiltered() {
-  const city   = citySelect.value;
+  const selectedLocation = citySelect.value;
+  const [locationType, ...locationParts] = selectedLocation.split("::");
+  const city = locationParts.join("::");
   const course = courseSelect.value;
 
   /* Nothing shows until the person has explicitly picked a city, a
@@ -2302,7 +2310,9 @@ function getFiltered() {
     return [];
   }
 
-  let list = CONFIG.colleges.filter(c => c.city === city && c.course === course);
+  let list = CONFIG.colleges.filter(c =>
+    String(c[locationType] || c.city || "") === city && c.course === course
+  );
 
   /* Eligibility: the person's percentile must clear (be >=) this
      college's LOWEST cutoff on file. */
@@ -2411,9 +2421,11 @@ let searchSequence = 0;
 function renderResults(page = 1) {
   currentSearchPage = page;
   clearTimeout(searchTimer);
-  const city = citySelect.value;
+  const selectedLocation = citySelect.value;
+  const [locationType, ...locationParts] = selectedLocation.split("::");
+  const city = locationParts.join("::");
   const course = courseSelect.value;
-  const searched = city !== CONFIG.unselected &&
+  const searched = citySelect.value !== CONFIG.unselected &&
                    course !== CONFIG.unselected &&
                    currentPct !== null;
 
@@ -2434,6 +2446,7 @@ function renderResults(page = 1) {
         course,
         percentile: String(currentPct),
         city,
+        location_type: locationType,
         sort: currentSort === "rank" ? "rank" : "comp",
         page: String(currentSearchPage),
         page_size: String(SEARCH_PAGE_SIZE)
@@ -2693,8 +2706,10 @@ $("sortChips").addEventListener("click", e => {
 /* ── Search button: blur input, re-render, scroll to results ── */
 $("searchBtn").addEventListener("click", () => {
   pctInput.blur();
+  const [locationType, ...locationParts] = citySelect.value.split("::");
   const searchData = {
-    city: citySelect.value,
+    city: locationParts.join("::"),
+    location_type: locationType,
     course: courseSelect.value,
     source: "search_button"
   };

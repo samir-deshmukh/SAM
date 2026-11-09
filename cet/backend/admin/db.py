@@ -216,6 +216,8 @@ def init_admin_schema():
         """)
         for statement in (
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district TEXT",
+            "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district_source TEXT",
+            "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district_verified_at TIMESTAMP",
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS address TEXT",
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS city_source TEXT",
             "ALTER TABLE institutes ADD COLUMN IF NOT EXISTS website_source TEXT",

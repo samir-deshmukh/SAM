@@ -76,7 +76,7 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
             conn.execute(text("""CREATE TABLE IF NOT EXISTS college_website_resolver (
                 institution_code TEXT PRIMARY KEY, status TEXT, website TEXT
             )"""))
-            conn.execute(text("INSERT INTO institutes(institution_code,institution_name,city) VALUES (:code,:name,'Amravati')"), {"code": code, "name": name})
+            conn.execute(text("INSERT INTO institutes(institution_code,institution_name,city,district) VALUES (:code,:name,'Amravati','Pune')"), {"code": code, "name": name})
             program_id = conn.execute(text("INSERT INTO programs(program_family,program_name_raw) VALUES (:family,:name) RETURNING program_id"), {"family": family, "name": family}).scalar_one()
             conn.execute(text("INSERT INTO base_categories(base_code) VALUES (:category) ON CONFLICT DO NOTHING"), {"category": f"T{suffix}"})
             conn.execute(text("INSERT INTO sections(section_code,section_full) VALUES (:section,'Fixture') ON CONFLICT DO NOTHING"), {"section": f"S{suffix}"})
@@ -108,6 +108,20 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
         assert card.city == "Amravati"
         assert card.highest_cutoff == 75.5
         assert card.history == [{"year": 2025, "percentile": 75.5, "low": 75.5, "high": 75.5, "rank": 1234}]
+
+        district_result = api.search_colleges(
+            request, course=family, percentile=80.0, city="Pune",
+            location_type="district", sort="comp", page=1, page_size=50,
+        )
+        assert district_result.total == 1
+        assert district_result.results[0].institution_code == code
+
+        city_result = api.search_colleges(
+            request, course=family, percentile=80.0, city="Pune",
+            location_type="city", sort="comp", page=1, page_size=50,
+        )
+        assert city_result.total == 0
+
         # Before the derived-data rebuild, the legacy raw-table query remains
         # available and returns the same result.
         from src.cet_cap.queries import search_college_summary_page

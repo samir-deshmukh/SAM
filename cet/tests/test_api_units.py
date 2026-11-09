@@ -92,7 +92,7 @@ def test_public_options_uses_database_values(monkeypatch):
 
     result = api.public_options(request_for("10.0.0.2"), Response())
 
-    assert result == {"cities": ["Amravati", "Pune"], "courses": ["BBA"]}
+    assert result == {"cities": ["Amravati", "Pune"], "districts": ["Amravati", "Pune"], "courses": ["BBA"]}
 
 
 def test_search_colleges_builds_bounded_cards(monkeypatch):

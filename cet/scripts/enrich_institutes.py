@@ -65,6 +65,8 @@ def main():
     eng=get_engine(args.db_url)
     with eng.begin() as conn:
         conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district TEXT'))
+        conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district_source TEXT'))
+        conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS district_verified_at TIMESTAMP'))
         conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS address TEXT'))
         conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS city_source TEXT'))
         conn.execute(text('ALTER TABLE institutes ADD COLUMN IF NOT EXISTS website_source TEXT'))

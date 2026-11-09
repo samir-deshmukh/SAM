@@ -42,15 +42,18 @@ CAP source PDFs
 
 ## 3. Public search request
 
-1. User selects course, percentile, optional city and sort order.
-2. Frontend sends a bounded request to `/api/search`.
-3. Backend validates parameters and applies the public API rate limit.
-4. PostgreSQL joins `cutoffs`, `institutes`, and `programs`.
-5. SQL aggregates one summary row per institution.
-6. SQL applies sorting and pagination.
-7. A total count is returned with the page.
-8. Backend converts the bounded result page into the API response.
-9. Browser renders college cards.
+1. User selects course, percentile, and a location (city or district), plus sort order.
+2. The options endpoint supplies distinct city and district values from institutes with cutoff data.
+3. Frontend sends a bounded request to the search endpoint, including location_type=city or district.
+4. Backend validates parameters and applies the public API rate limit.
+5. PostgreSQL joins cutoffs, institutes, and programs.
+6. SQL aggregates one summary row per institution.
+7. SQL applies sorting and pagination.
+8. A total count is returned with the page.
+9. Backend converts the bounded result page into the API response.
+10. Browser renders college cards, retaining each institute's actual city/locality in the result.
+
+District filtering uses the separate institutes.district field; it never rewrites a locality such as Pimpri or Baramati to Pune. Reviewed assignments and provenance are maintained in data/reference/institute_districts.csv and applied with scripts/import_institute_districts.py. Current curated district coverage is Pune only; additional districts must be sourced and reviewed before they are exposed.
 
 This avoids the previous design where the complete matching cutoff set was loaded into pandas for every public search.
 

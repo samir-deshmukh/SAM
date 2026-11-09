@@ -229,7 +229,22 @@ def _build_public_options():
                 ORDER BY i.city
             """))
             cities = [str(r[0]) for r in city_rows]
-        return {"cities": cities, "courses": available_public_courses(engine)}
+            district_rows = conn.execute(text("""
+                SELECT DISTINCT i.district
+                FROM institutes i
+                WHERE i.district IS NOT NULL
+                  AND btrim(i.district) <> ''
+                  AND EXISTS (
+                      SELECT 1
+                      FROM cutoffs c
+                      JOIN programs p ON p.program_id = c.program_id
+                      WHERE c.institution_code = i.institution_code
+                  )
+                ORDER BY i.district
+            """))
+            districts = [str(r[0]) for r in district_rows]
+        return {"cities": cities, "districts": districts,
+                "courses": available_public_courses(engine)}
     except Exception:
         raise HTTPException(status_code=503, detail="Public PostgreSQL data service is unavailable.")
 
@@ -605,12 +620,14 @@ def search_colleges(
     percentile: float = Query(
         ..., ge=0.0, le=100.0, description="Candidate CET percentile between 0 and 100"
     ),
-    city: Optional[str] = Query(None, description="Optional city filter (case-insensitive)"),
+    city: Optional[str] = Query(None, description="Optional city or district filter (case-insensitive)"),
+    location_type: str = Query("city", pattern="^(city|district)$",
+                               description="Whether the location filter is a city or district"),
     sort: str = Query("comp", pattern="^(comp|alpha|city|rank)$", description="Sort criteria"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(25, ge=1, le=50, description="Items per page (max 50)"),
 ):
-    """Searches for eligible colleges for a candidate based on percentage, course, and city.
+    """Searches for eligible colleges by percentile, course, and city or district.
     
     Security:
     - Rate-limited to prevent dumping the entire cutoff dataset
@@ -618,14 +635,18 @@ def search_colleges(
     - Bounded page_size (max 50) prevents excessive memory usage or bulk dumping
     """
     check_rate_limit(request)
-    key = ("search", course, percentile, (city or "").strip().lower(), sort, page, page_size)
+    key = ("search", course, percentile, location_type,
+           (city or "").strip().lower(), sort, page, page_size)
     return _PUBLIC_CACHE.get_or_set(
         key, _SEARCH_TTL,
-        lambda: _search_colleges_uncached(course, percentile, city, sort, page, page_size),
+        lambda: _search_colleges_uncached(
+            course, percentile, city, sort, page, page_size, location_type
+        ),
     )
 
 
-def _search_colleges_uncached(course, percentile, city, sort, page, page_size) -> SearchResponse:
+def _search_colleges_uncached(course, percentile, city, sort, page, page_size,
+                              location_type="city") -> SearchResponse:
     try:
         engine = get_active_engine()
     except Exception:
@@ -639,15 +660,18 @@ def _search_colleges_uncached(course, percentile, city, sort, page, page_size) -
 
     # Aggregate, sort and paginate in PostgreSQL; only one page reaches pandas.
     search_started = time.perf_counter()
-    paged_df, total_count = search_college_summary_page(
-        engine,
-        percentage=percentile,
-        program_family=course,
-        city=city,
-        sort=sort,
-        page=page,
-        page_size=page_size,
-    )
+    search_kwargs = {
+        "engine": engine,
+        "percentage": percentile,
+        "program_family": course,
+        "city": city,
+        "sort": sort,
+        "page": page,
+        "page_size": page_size,
+    }
+    if location_type == "district":
+        search_kwargs["location_type"] = "district"
+    paged_df, total_count = search_college_summary_page(**search_kwargs)
     search_query_ms = (time.perf_counter() - search_started) * 1000
 
     if paged_df.empty:
