@@ -434,7 +434,10 @@ body.no-scroll { overflow: hidden; }
    list scrolls once there are more items than fit, so every dropdown
    in the app looks and behaves identically.
    ═══════════════════════════════════════════════════════════════════ */
-.ssel { position: relative; }
+.ssel { position: relative; z-index: 1; }
+/* Keep an expanded picker above the following results section so every
+   option remains hit-testable even when the panel overlaps its content. */
+.ssel.open { z-index: 1000; }
 select.ssel-native { display: none; }
 
 .ssel-btn {
@@ -457,8 +460,8 @@ select.ssel-native { display: none; }
 .ssel-panel {
   display: none;
   position: absolute; left: 0; right: 0; top: calc(100% + 6px);
-  z-index: 40;
-  width: 100%; height: 280px;
+  z-index: 1001;
+  width: 100%; height: 225px;
   background: #fff;
   border: 1px solid rgba(232,232,228,0.9);
   border-radius: var(--radius-input);
@@ -2098,7 +2101,7 @@ function enhanceSelect(selectEl, opts = {}) {
     // available space without flipping the panel above the field.
     const buttonRect = btn.getBoundingClientRect();
     const spaceBelow = window.innerHeight - buttonRect.bottom;
-    const availableSpace = Math.max(120, Math.min(280, spaceBelow - 8));
+    const availableSpace = Math.max(120, Math.min(225, spaceBelow - 8));
     panel.style.height = `${availableSpace}px`;
     wrap.classList.remove("open-up");
     wrap.classList.add("open");
@@ -2239,7 +2242,7 @@ async function loadRealCollegeData() {
       .filter(v => v && v.toLowerCase() !== "select course"))];
 
     CONFIG.cityOptions = [
-      ...cities.map(v => ({ value: "city::" + v, label: v + " (City)" })),
+      ...cities.map(v => ({ value: "city::" + v, label: v })),
       ...districts.map(v => ({ value: "district::" + v, label: v + " (District)" }))
     ];
     // BE and BTech are alternate labels for the same engineering course family here.
