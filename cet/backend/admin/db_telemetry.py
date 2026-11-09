@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import Engine, event
 
 log = logging.getLogger("cet-cap-db-pool")
+log.setLevel(logging.INFO)
 _request_endpoint: ContextVar[str] = ContextVar("cet_db_endpoint", default="background")
 
 
@@ -76,12 +77,14 @@ def attach_pool_telemetry(engine: Engine, name: str) -> Engine:
         now = time.monotonic()
         connection_record.info["cet_pool_checkout_at"] = now
         connection_record.info["cet_pool_checkout_endpoint"] = _request_endpoint.get()
+        connection_record.info["cet_pool_checkout_thread"] = threading.current_thread().name[:48]
         with stats.lock:
             stats.checkouts += 1
 
     def on_checkin(dbapi_connection: Any, connection_record: Any):
         started = connection_record.info.pop("cet_pool_checkout_at", None)
         endpoint = connection_record.info.pop("cet_pool_checkout_endpoint", "background")
+        thread_name = connection_record.info.pop("cet_pool_checkout_thread", "unknown")
         if started is None:
             return
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
@@ -118,8 +121,8 @@ def attach_pool_telemetry(engine: Engine, name: str) -> Engine:
                 stats.last_summary = now
         if elapsed_ms >= 1000.0:
             log.warning(
-                "DB_POOL_SLOW_HOLD pool=%s endpoint=%s hold_ms=%.1f checked_out=%s",
-                stats.name, endpoint, elapsed_ms, engine.pool.checkedout(),
+                "DB_POOL_SLOW_HOLD pool=%s endpoint=%s thread=%s hold_ms=%.1f checked_out=%s",
+                stats.name, endpoint, thread_name, elapsed_ms, engine.pool.checkedout(),
             )
         if summary is not None:
             log.info(
