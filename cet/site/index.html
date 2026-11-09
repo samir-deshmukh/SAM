@@ -461,7 +461,7 @@ select.ssel-native { display: none; }
   display: none;
   position: absolute; left: 0; right: 0; top: calc(100% + 6px);
   z-index: 1001;
-  width: 100%; height: 225px;
+  width: 100%; height: 230px;
   background: #fff;
   border: 1px solid rgba(232,232,228,0.9);
   border-radius: var(--radius-input);
@@ -2099,12 +2099,6 @@ function enhanceSelect(selectEl, opts = {}) {
   function open() {
     if (selectEl.disabled) return;
     refreshCache();
-    // Keep searchable dropdowns below their trigger fields and fit the
-    // available space without flipping the panel above the field.
-    const buttonRect = btn.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - buttonRect.bottom;
-    const availableSpace = Math.max(120, Math.min(225, spaceBelow - 8));
-    panel.style.height = `${availableSpace}px`;
     wrap.classList.remove("open-up");
     wrap.classList.add("open");
     btn.setAttribute("aria-expanded", "true");
