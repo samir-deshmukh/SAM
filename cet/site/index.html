@@ -2138,42 +2138,14 @@ function enhanceSelect(selectEl, opts = {}) {
     }
   }
 
-  // Mouse/keyboard activation.
+  // Use the browser's native click activation for mouse, keyboard and touch.
+  // A custom pointerup handler can race with Android page scrolling and
+  // suppress a legitimate tap when the viewport moves.
   listEl.addEventListener("click", e => {
     const item = e.target.closest(".ssel-item");
     if (!item || !listEl.contains(item)) return;
-    // A touch pointer may already have selected this row on pointerup.
-    if (item.dataset.touchSelected === "1") {
-      delete item.dataset.touchSelected;
-      return;
-    }
     selectOption(item);
   });
-
-  // Android/iOS can lose the synthesized click when a tap occurs inside
-  // a momentum-scrolling list. Confirm a stationary touch on pointerup and
-  // select directly; a scroll gesture is never treated as a selection.
-  let touchStart = null;
-  listEl.addEventListener("pointerdown", e => {
-    if (e.pointerType !== "touch" && e.pointerType !== "pen") return;
-    const item = e.target.closest(".ssel-item");
-    if (item) delete item.dataset.touchSelected;
-    touchStart = item && listEl.contains(item)
-      ? { item, x: e.clientX, y: e.clientY, pointerId: e.pointerId }
-      : null;
-  }, { passive: true });
-  listEl.addEventListener("pointerup", e => {
-    if (!touchStart || e.pointerId !== touchStart.pointerId) return;
-    const start = touchStart;
-    touchStart = null;
-    const item = e.target.closest(".ssel-item");
-    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10;
-    if (!moved && item === start.item && listEl.contains(item)) {
-      item.dataset.touchSelected = "1";
-      selectOption(item);
-    }
-  }, { passive: true });
-  listEl.addEventListener("pointercancel", () => { touchStart = null; }, { passive: true });
 
   document.addEventListener("click", e => {
     if (!wrap.contains(e.target)) close();
