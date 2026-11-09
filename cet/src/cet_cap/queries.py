@@ -34,6 +34,7 @@ import os
 import time
 import pandas as pd
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import ProgrammingError
 
 ZERO_CUTOFF_ARTIFACT_FILTER = 'NOT (c.rank_number = 0 AND c.percentile = 0.0)'
 
@@ -139,6 +140,127 @@ def search_college_summary(
         return pd.read_sql_query(query, conn, params=params)
 
 
+def _search_college_summary_page_runtime(
+    engine: Engine,
+    percentage: float,
+    program_family: str,
+    city: str | None,
+    sort: str,
+    page: int,
+    page_size: int,
+) -> tuple[pd.DataFrame, int]:
+    """Serve public search from compact, transactionally rebuilt runtime tables.
+
+    The cutoff-point primary key supports one bounded index seek per college.
+    This avoids re-aggregating every raw cutoff row for every distinct search.
+    """
+    city_clause = ""
+    params = {
+        "percentage": percentage,
+        "program_family": program_family,
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    if city and city.strip():
+        city_clause = " AND i.city ILIKE :city"
+        params["city"] = f"%{city.strip()}%"
+
+    order = {
+        "alpha": "institution_name ASC, institution_code ASC",
+        "city": "city ASC NULLS LAST, highest_cutoff DESC, institution_code ASC",
+        "rank": "lowest_rank ASC NULLS LAST, institution_name ASC, institution_code ASC",
+        "comp": "highest_cutoff DESC, institution_name ASC, institution_code ASC",
+    }.get(sort, "highest_cutoff DESC, institution_name ASC, institution_code ASC")
+
+    query = text(f"""
+        WITH years AS (
+            SELECT institution_code,
+                   COUNT(*) FILTER (WHERE low_percentile <= :percentage) AS years_on_record
+            FROM cutoff_college_year_summary
+            WHERE program_family = :program_family
+            GROUP BY institution_code
+        ),
+        final_summary AS (
+            SELECT r.institution_code,
+                   i.institution_name,
+                   i.city,
+                   CASE
+                       WHEN UPPER(COALESCE(w.status, '')) = 'VERIFIED'
+                            AND NULLIF(BTRIM(w.website), '') IS NOT NULL
+                       THEN w.website
+                       ELSE NULL
+                   END AS website,
+                   eligible.highest_cutoff,
+                   COALESCE(y.years_on_record, 0) AS years_on_record,
+                   r.lowest_rank
+            FROM college_search_runtime r
+            JOIN institutes i ON i.institution_code = r.institution_code
+            CROSS JOIN LATERAL (
+                SELECT p.percentile AS highest_cutoff
+                FROM college_search_cutoff_points p
+                WHERE p.program_family = r.program_family
+                  AND p.institution_code = r.institution_code
+                  AND p.percentile <= :percentage
+                ORDER BY p.percentile DESC
+                LIMIT 1
+            ) eligible
+            LEFT JOIN college_website_resolver w
+              ON w.institution_code = i.institution_code
+            LEFT JOIN years y ON y.institution_code = r.institution_code
+            WHERE r.program_family = :program_family
+              {city_clause}
+        )
+        SELECT *, COUNT(*) OVER () AS total_count
+        FROM final_summary
+        ORDER BY {order}
+        LIMIT :limit OFFSET :offset
+    """)
+
+    t0 = time.perf_counter()
+    with engine.connect() as conn:
+        t_connect = time.perf_counter() - t0
+        t1 = time.perf_counter()
+        df = pd.read_sql_query(query, conn, params=params)
+        t_query = time.perf_counter() - t1
+
+    if not df.empty:
+        total = int(df["total_count"].iloc[0])
+        df = df.drop(columns=["total_count"])
+        if os.getenv("CET_PERF_DEBUG") == "1":
+            print(
+                f"PERF search_runtime connect={t_connect*1000:.1f}ms "
+                f"query_fetch={t_query*1000:.1f}ms rows={len(df)}",
+                flush=True,
+            )
+        return df, total
+
+    # COUNT(*) OVER() cannot return a count when the requested page is empty.
+    # This covers both no eligible colleges and an out-of-range page.
+    count_query = text(f"""
+        SELECT COUNT(*)
+        FROM college_search_runtime r
+        JOIN institutes i ON i.institution_code = r.institution_code
+        WHERE r.program_family = :program_family
+          AND EXISTS (
+              SELECT 1
+              FROM college_search_cutoff_points p
+              WHERE p.program_family = r.program_family
+                AND p.institution_code = r.institution_code
+                AND p.percentile <= :percentage
+          )
+          {city_clause}
+    """)
+    with engine.connect() as conn:
+        total = int(pd.read_sql_query(count_query, conn, params=params).iloc[0, 0])
+    if os.getenv("CET_PERF_DEBUG") == "1":
+        print(
+            f"PERF search_runtime connect={t_connect*1000:.1f}ms "
+            f"query_fetch={t_query*1000:.1f}ms rows=0 total={total}",
+            flush=True,
+        )
+    return df, total
+
+
 def search_college_summary_page(
     engine: Engine,
     percentage: float,
@@ -153,6 +275,24 @@ def search_college_summary_page(
     Only the requested page reaches pandas, keeping public search CPU and
     memory bounded as the cutoff dataset grows.
     """
+    # Use the compact serving index once it has been populated for this course.
+    # The raw-table path below remains a safe rollout fallback until the first
+    # successful derived-data rebuild after this version is deployed.
+    try:
+        with engine.connect() as conn:
+            runtime_ready = conn.execute(
+                text("SELECT EXISTS (SELECT 1 FROM college_search_runtime WHERE program_family = :course)"),
+                {"course": program_family},
+            ).scalar()
+    except ProgrammingError:
+        # During a rolling deployment the schema migration runs in the
+        # background. Keep the previous raw-table query available until the
+        # new serving table exists; unrelated connection failures still raise.
+        runtime_ready = False
+    if runtime_ready:
+        return _search_college_summary_page_runtime(
+            engine, percentage, program_family, city, sort, page, page_size
+        )
     city_clause = ""
     params = {"percentage": percentage, "program_family": program_family,
               "limit": page_size, "offset": (page - 1) * page_size}

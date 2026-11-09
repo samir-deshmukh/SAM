@@ -73,6 +73,9 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
     monkeypatch.setattr(api, "get_active_engine", lambda: engine)
     try:
         with engine.begin() as conn:
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS college_website_resolver (
+                institution_code TEXT PRIMARY KEY, status TEXT, website TEXT
+            )"""))
             conn.execute(text("INSERT INTO institutes(institution_code,institution_name,city) VALUES (:code,:name,'Amravati')"), {"code": code, "name": name})
             program_id = conn.execute(text("INSERT INTO programs(program_family,program_name_raw) VALUES (:family,:name) RETURNING program_id"), {"family": family, "name": family}).scalar_one()
             conn.execute(text("INSERT INTO base_categories(base_code) VALUES (:category) ON CONFLICT DO NOTHING"), {"category": f"T{suffix}"})
@@ -86,6 +89,10 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
             })
             conn.execute(text("""INSERT INTO cutoff_college_year_summary(program_family,institution_code,year,low_percentile,high_percentile,low_rank)
                 VALUES (:family,:code,2025,75.5,75.5,1234)"""), {"family": family, "code": code})
+            conn.execute(text("""INSERT INTO college_search_runtime(program_family,institution_code,lowest_rank)
+                VALUES (:family,:code,1234)"""), {"family": family, "code": code})
+            conn.execute(text("""INSERT INTO college_search_cutoff_points(program_family,institution_code,percentile)
+                VALUES (:family,:code,75.5)"""), {"family": family, "code": code})
 
         request = Request({"type": "http", "method": "GET", "path": "/api/search",
                            "query_string": b"", "headers": [],
@@ -101,9 +108,22 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
         assert card.city == "Amravati"
         assert card.highest_cutoff == 75.5
         assert card.history == [{"year": 2025, "percentile": 75.5, "low": 75.5, "high": 75.5, "rank": 1234}]
+        # Before the derived-data rebuild, the legacy raw-table query remains
+        # available and returns the same result.
+        from src.cet_cap.queries import search_college_summary_page
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM college_search_cutoff_points WHERE institution_code=:code"), {"code": code})
+            conn.execute(text("DELETE FROM college_search_runtime WHERE institution_code=:code"), {"code": code})
+        legacy, legacy_total = search_college_summary_page(
+            engine, 80.0, family, "Amravati", "comp", 1, 50
+        )
+        assert legacy_total == 1
+        assert legacy.iloc[0]["institution_code"] == code
     finally:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM cutoff_college_year_summary WHERE institution_code=:code"), {"code": code})
+            conn.execute(text("DELETE FROM college_search_cutoff_points WHERE institution_code=:code"), {"code": code})
+            conn.execute(text("DELETE FROM college_search_runtime WHERE institution_code=:code"), {"code": code})
             conn.execute(text("DELETE FROM cutoffs WHERE institution_code=:code"), {"code": code})
             if program_id is not None:
                 conn.execute(text("DELETE FROM programs WHERE program_id=:program_id"), {"program_id": program_id})
@@ -112,6 +132,108 @@ def test_public_search_returns_matching_college_from_postgres(monkeypatch):
             conn.execute(text("DELETE FROM sections WHERE section_code=:section"), {"section": f"S{suffix}"})
             conn.execute(text("DELETE FROM stages WHERE stage_code=:stage"), {"stage": f"ST{suffix}"})
         api.invalidate_public_caches()
+
+
+def test_refresh_builds_exact_search_serving_index():
+    """The transactional derived-data build preserves raw-search eligibility semantics."""
+    import uuid
+    from scripts.db_bootstrap import bootstrap_schema
+    from scripts.refresh_derived_data import refresh
+    from src.cet_cap.queries import search_college_summary_page
+
+    engine = db()
+    bootstrap_schema(engine)
+    suffix = uuid.uuid4().hex[:10].upper()
+    family = f"SEARCH{suffix}"
+    institution = f"S{suffix}"
+    category = f"C{suffix}"
+    section = f"Q{suffix}"
+    stage = f"T{suffix}"
+    lane = f"L{suffix}"
+    program_id = None
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS college_website_resolver (
+                institution_code TEXT PRIMARY KEY, status TEXT, website TEXT
+            )"""))
+            conn.execute(
+                text("INSERT INTO institutes(institution_code,institution_name,city) VALUES (:code,:name,'Pune')"),
+                {"code": institution, "name": f"Search Runtime Fixture {suffix}"},
+            )
+            program_id = conn.execute(
+                text("INSERT INTO programs(program_family,program_name_raw) VALUES (:family,:name) RETURNING program_id"),
+                {"family": family, "name": f"Search Runtime Branch {suffix}"},
+            ).scalar_one()
+            conn.execute(text("INSERT INTO base_categories(base_code) VALUES (:code)"), {"code": category})
+            conn.execute(text("INSERT INTO sections(section_code,section_full) VALUES (:code,'Fixture')"), {"code": section})
+            conn.execute(text("INSERT INTO stages(stage_code) VALUES (:code)"), {"code": stage})
+            conn.execute(text("INSERT INTO allocation_lanes(lane_code,lane_full) VALUES (:code,'Fixture')"), {"code": lane})
+
+            cutoff_rows = [
+                (2025, 1, 70.0, 500, False),
+                (2026, 1, 80.0, 300, True),
+                (2026, 2, 0.0, 0, False),  # known extraction artifact: excluded by search
+            ]
+            for year, round_no, percentile, rank, ladies in cutoff_rows:
+                conn.execute(text("""INSERT INTO cutoffs(
+                    year,round,institution_code,program_id,base_category,is_ladies,
+                    section_code,stage_code,rank_number,percentile,raw_category,
+                    raw_program_name,source_pdf
+                ) VALUES (:year,:round,:institution,:program,:category,:ladies,
+                         :section,:stage,:rank,:percentile,'OPEN','Fixture','fixture.pdf')"""), {
+                    "year": year, "round": round_no, "institution": institution,
+                    "program": program_id, "category": category, "ladies": ladies,
+                    "section": section, "stage": stage, "rank": rank,
+                    "percentile": percentile,
+                })
+
+            conn.execute(text("""INSERT INTO seats(
+                capture_year,program_family,institution_code,choice_code,allocation_lane,
+                base_category,is_total,is_ladies,seats,raw_category,raw_allocation_type,
+                raw_gender,source_pdf
+            ) VALUES (2026,:family,:institution,'CHOICE',:lane,:category,FALSE,FALSE,
+                     10,'OPEN','Fixture','G','fixture.pdf')"""), {
+                "family": family, "institution": institution, "lane": lane, "category": category,
+            })
+
+        refresh(engine, family)
+
+        with engine.connect() as conn:
+            runtime = conn.execute(text("""SELECT lowest_rank FROM college_search_runtime
+                WHERE program_family=:family AND institution_code=:institution"""), {
+                "family": family, "institution": institution,
+            }).scalar_one()
+            points = conn.execute(text("""SELECT percentile FROM college_search_cutoff_points
+                WHERE program_family=:family AND institution_code=:institution ORDER BY percentile"""), {
+                "family": family, "institution": institution,
+            }).scalars().all()
+        assert runtime == 500
+        assert points == [70.0, 80.0]
+
+        eligible_75, total_75 = search_college_summary_page(engine, 75.0, family, None, "comp", 1, 10)
+        eligible_85, total_85 = search_college_summary_page(engine, 85.0, family, None, "comp", 1, 10)
+        eligible_65, total_65 = search_college_summary_page(engine, 65.0, family, None, "comp", 1, 10)
+        assert total_75 == 1 and float(eligible_75.iloc[0]["highest_cutoff"]) == 70.0
+        assert total_85 == 1 and float(eligible_85.iloc[0]["highest_cutoff"]) == 80.0
+        assert total_65 == 0 and eligible_65.empty
+    finally:
+        with engine.begin() as conn:
+            for table in (
+                "seat_matrix_runtime", "college_search_cutoff_points", "college_search_runtime",
+                "cutoff_college_year_summary", "cutoff_trend_points", "cutoff_filter_options",
+            ):
+                conn.execute(text(f"DELETE FROM {table} WHERE program_family=:family"), {"family": family})
+            conn.execute(text("DELETE FROM seats WHERE institution_code=:institution"), {"institution": institution})
+            conn.execute(text("DELETE FROM cutoffs WHERE institution_code=:institution"), {"institution": institution})
+            if program_id is not None:
+                conn.execute(text("DELETE FROM programs WHERE program_id=:program"), {"program": program_id})
+            conn.execute(text("DELETE FROM institutes WHERE institution_code=:institution"), {"institution": institution})
+            conn.execute(text("DELETE FROM base_categories WHERE base_code=:code"), {"code": category})
+            conn.execute(text("DELETE FROM sections WHERE section_code=:code"), {"code": section})
+            conn.execute(text("DELETE FROM stages WHERE stage_code=:code"), {"code": stage})
+            conn.execute(text("DELETE FROM allocation_lanes WHERE lane_code=:code"), {"code": lane})
+        engine.dispose()
 
 
 def test_engineering_coverage_does_not_compare_cutoffs_to_another_years_seat_matrix():

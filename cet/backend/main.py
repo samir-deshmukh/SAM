@@ -222,6 +222,7 @@ async def lifespan(_app):
                     check=True,
                     timeout=1700,
                 )
+                invalidate_public_caches()
                 log.info('One-time full derived-data rebuild completed')
         except Exception:
             log.exception('Database startup maintenance failed')
@@ -816,6 +817,9 @@ def _run_derived_data_build(job_id: int, course_family: str | None):
             text=True,
             timeout=1800,
         )
+        # The derived serving tables are replaced transactionally. Drop
+        # process-local search/metadata results only after the rebuild commits.
+        invalidate_public_caches()
         with connect() as connection:
             missing_metadata = connection.execute("""
                 WITH latest AS (

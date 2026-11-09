@@ -12,6 +12,8 @@ Keep public search fast as CAP data grows by 10x–50x without exposing PostgreS
 - `cutoff_college_year_summary`
 - `cutoff_filter_options`
 - `seat_matrix_runtime`
+- `college_search_runtime`
+- `college_search_cutoff_points`
 
 This is the correct general direction: raw data remains authoritative; serving data is optimized for reads.
 
@@ -74,18 +76,27 @@ A covering index may reduce heap access for a read-mostly query, but it also inc
 
 City filtering should be evaluated separately. The current `%city%` predicate is not naturally served by a normal B-tree prefix index. If city search becomes a measured bottleneck, first consider normalizing city to a canonical lookup key and using equality; only then consider a specialized text-search index if the product actually needs substring search.
 
-## Phase 3 — create a dedicated search serving table if raw aggregation becomes the bottleneck
+## Phase 3 — dedicated search serving tables (triggered by the November 2026 load test)
 
-Preferred design:
+Implemented design:
 
 ```text
 college_search_runtime
 ----------------------
 program_family
 institution_code
-percentile
 lowest_rank
+
+college_search_cutoff_points
+----------------------------
+program_family
+institution_code
+percentile (exact, unbucketed)
 ```
+
+The summary table holds one row per college/course. The cutoff-point table holds every distinct raw percentile and its composite primary key supports an indexed per-college lookup. The derived-data rebuild refreshes both tables in the same transaction as the other serving tables. Public search uses a lateral index lookup and retains the raw-table query as a rollout fallback until the course index is populated.
+
+Local comparative validation used a clone of the local 330,281-cutoff database (not the live Render database): BE median query time fell from 378.56 ms to 17.53 ms (21.6x), BCA from 46.44 ms to 12.41 ms (3.7x), while the already-fast MCA query was effectively unchanged. Twenty concurrent unique BE searches completed without errors; the slowest was approximately 151 ms. PostgreSQL used a backward index-only scan on the cutoff-point primary key for the per-college lookup. These are local comparative measurements, not a production capacity guarantee; repeat the bounded test against Render after the serving tables are populated.
 
 Optionally add only fields proven necessary for the public search response.
 
@@ -183,4 +194,4 @@ Single-table/index architecture no longer fits the database size or maintenance 
 
 ## Current recommendation
 
-No production schema rewrite yet. The next high-value engineering task is to add a reliable private `EXPLAIN` workflow and benchmark a synthetic 10x dataset. That gives evidence for whether the existing `cutoffs` query, a dedicated `college_search_runtime` table, or a new index should be the next change.
+The November 9, 2026 production load test demonstrated that raw cutoff aggregation is the immediate bottleneck: concurrent unique searches drove PostgreSQL CPU to approximately 0.098 of its 0.10 limit, query execution ranged from approximately 1.1 to 6.1 seconds, and the API exhausted its 10-connection pool. The dedicated search serving tables above are therefore the next measured optimization. Before increasing pool size or adding more API instances, validate the new path with result-parity tests, a private `EXPLAIN (ANALYZE, BUFFERS)`, and bounded production load tests. The Render MCP database connection was unavailable because its external IP is not allowlisted; do not expose PostgreSQL to work around this.

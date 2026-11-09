@@ -182,8 +182,10 @@ def refresh(engine, course_family: str | None = None) -> None:
             conn.execute(text("DELETE FROM cutoff_college_year_summary WHERE program_family = :course"), params)
             conn.execute(text("DELETE FROM cutoff_filter_options WHERE program_family = :course"), params)
             conn.execute(text("DELETE FROM seat_matrix_runtime WHERE program_family = :course"), params)
+            conn.execute(text("DELETE FROM college_search_runtime WHERE program_family = :course"), params)
+            conn.execute(text("DELETE FROM college_search_cutoff_points WHERE program_family = :course"), params)
         else:
-            conn.execute(text("TRUNCATE cutoff_trend_points, cutoff_college_year_summary, cutoff_filter_options, seat_matrix_runtime"))
+            conn.execute(text("TRUNCATE cutoff_trend_points, cutoff_college_year_summary, cutoff_filter_options, seat_matrix_runtime, college_search_runtime, college_search_cutoff_points"))
 
         conn.execute(text(f"""
             INSERT INTO cutoff_trend_points
@@ -215,6 +217,29 @@ def refresh(engine, course_family: str | None = None) -> None:
             JOIN programs p ON p.program_id = c.program_id
             WHERE {ZERO_FILTER}{course_where}
             GROUP BY p.program_family, c.institution_code, c.year
+        """), params)
+
+        # Build the exact, compact lookup used by public eligibility search.
+        # Percentiles are not bucketed: every distinct stored value is retained.
+        conn.execute(text(f"""
+            INSERT INTO college_search_runtime
+            (program_family, institution_code, lowest_rank)
+            SELECT p.program_family, c.institution_code,
+                   (ARRAY_AGG(c.rank_number ORDER BY c.percentile ASC NULLS LAST,
+                              c.rank_number ASC NULLS LAST))[1]
+            FROM cutoffs c
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE {ZERO_FILTER}{course_where}
+            GROUP BY p.program_family, c.institution_code
+        """), params)
+
+        conn.execute(text(f"""
+            INSERT INTO college_search_cutoff_points
+            (program_family, institution_code, percentile)
+            SELECT DISTINCT p.program_family, c.institution_code, c.percentile
+            FROM cutoffs c
+            JOIN programs p ON p.program_id = c.program_id
+            WHERE {ZERO_FILTER}{course_where}
         """), params)
 
         conn.execute(text(f"""
@@ -262,7 +287,9 @@ def refresh(engine, course_family: str | None = None) -> None:
             SELECT
               (SELECT COUNT(*) FROM cutoff_trend_points WHERE (:course IS NULL OR program_family = :course)) AS trend_count,
               (SELECT COUNT(*) FROM cutoff_filter_options WHERE (:course IS NULL OR program_family = :course)) AS filter_count,
-              (SELECT COUNT(*) FROM seat_matrix_runtime WHERE (:course IS NULL OR program_family = :course)) AS seat_count
+              (SELECT COUNT(*) FROM seat_matrix_runtime WHERE (:course IS NULL OR program_family = :course)) AS seat_count,
+              (SELECT COUNT(*) FROM college_search_runtime WHERE (:course IS NULL OR program_family = :course)) AS search_college_count,
+              (SELECT COUNT(*) FROM college_search_cutoff_points WHERE (:course IS NULL OR program_family = :course)) AS search_cutoff_point_count
         """), {"course": course_family}).mappings().one()
         if min(derived_counts.values()) <= 0:
             raise RuntimeError(f"Derived-data validation failed: {dict(derived_counts)}")
@@ -273,7 +300,8 @@ def refresh(engine, course_family: str | None = None) -> None:
         analyze_tables = (
             "cutoffs", "seats", "cutoff_trend_points",
             "cutoff_college_year_summary", "cutoff_filter_options",
-            "seat_matrix_runtime",
+            "seat_matrix_runtime", "college_search_runtime",
+            "college_search_cutoff_points",
         )
         for table in analyze_tables:
             conn.execute(text(f"ANALYZE {table}"))
@@ -341,6 +369,8 @@ def refresh(engine, course_family: str | None = None) -> None:
             "cutoff_filter_options",
             "cutoff_trend_points",
             "seat_matrix_runtime",
+            "college_search_runtime",
+            "college_search_cutoff_points",
         ):
             conn.execute(text(f"ANALYZE {table}"))
 

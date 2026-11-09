@@ -244,6 +244,22 @@ CREATE TABLE IF NOT EXISTS cutoff_college_year_summary (
 CREATE INDEX IF NOT EXISTS idx_cutoff_summary_lookup
     ON cutoff_college_year_summary(program_family, institution_code, year);
 
+-- Compact public-search serving index. Raw cutoffs remain authoritative.
+-- One summary row per college/course and one row per distinct cutoff point.
+CREATE TABLE IF NOT EXISTS college_search_runtime (
+    program_family TEXT NOT NULL,
+    institution_code TEXT NOT NULL,
+    lowest_rank INTEGER,
+    PRIMARY KEY (program_family, institution_code)
+);
+
+CREATE TABLE IF NOT EXISTS college_search_cutoff_points (
+    program_family TEXT NOT NULL,
+    institution_code TEXT NOT NULL,
+    percentile REAL NOT NULL,
+    PRIMARY KEY (program_family, institution_code, percentile)
+);
+
 CREATE TABLE IF NOT EXISTS cutoff_filter_options (
     program_family TEXT NOT NULL,
     institution_code TEXT NOT NULL,

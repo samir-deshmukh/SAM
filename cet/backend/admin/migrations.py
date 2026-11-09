@@ -54,6 +54,18 @@ def ensure_part4_schema():
         c.execute("CREATE INDEX IF NOT EXISTS idx_cutoff_trend_lookup ON cutoff_trend_points(program_family,institution_code,base_category,is_ladies,section_code,year,round)")
         c.execute("""CREATE TABLE IF NOT EXISTS cutoff_college_year_summary (program_family TEXT NOT NULL, institution_code TEXT NOT NULL, year INTEGER NOT NULL, low_percentile REAL NOT NULL, high_percentile REAL NOT NULL, low_rank INTEGER, PRIMARY KEY (program_family,institution_code,year))""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_cutoff_summary_lookup ON cutoff_college_year_summary(program_family,institution_code,year)")
+        c.execute("""CREATE TABLE IF NOT EXISTS college_search_runtime (
+            program_family TEXT NOT NULL,
+            institution_code TEXT NOT NULL,
+            lowest_rank INTEGER,
+            PRIMARY KEY (program_family, institution_code)
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS college_search_cutoff_points (
+            program_family TEXT NOT NULL,
+            institution_code TEXT NOT NULL,
+            percentile REAL NOT NULL,
+            PRIMARY KEY (program_family, institution_code, percentile)
+        )""")
         c.execute("""CREATE TABLE IF NOT EXISTS cutoff_filter_options (program_family TEXT NOT NULL, institution_code TEXT NOT NULL, is_ladies BOOLEAN NOT NULL DEFAULT FALSE, year INTEGER NOT NULL, base_category TEXT NOT NULL, section_code TEXT NOT NULL, PRIMARY KEY (program_family,institution_code,is_ladies,year,base_category,section_code))""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_cutoff_options_lookup ON cutoff_filter_options(program_family,institution_code,is_ladies,year,base_category,section_code)")
         c.execute("""CREATE TABLE IF NOT EXISTS seat_matrix_runtime (program_family TEXT NOT NULL, institution_code TEXT NOT NULL, capture_year INTEGER NOT NULL, choice_code TEXT NOT NULL, allocation_lane TEXT NOT NULL, base_category TEXT NOT NULL, gender_g INTEGER, gender_l INTEGER, category_total INTEGER, is_total BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY (program_family,institution_code,capture_year,choice_code,allocation_lane,base_category,is_total))""")

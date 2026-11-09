@@ -8,7 +8,7 @@ Keep public search predictable as CAP data grows from the current dataset toward
 
 - `cutoffs` and `seats` are authoritative historical/source tables.
 - `programs` and `institutes` provide normalized metadata.
-- `cutoff_trend_points`, `cutoff_college_year_summary`, `cutoff_filter_options`, and `seat_matrix_runtime` are serving/derived tables.
+- `cutoff_trend_points`, `cutoff_college_year_summary`, `cutoff_filter_options`, `seat_matrix_runtime`, `college_search_runtime`, and `college_search_cutoff_points` are serving/derived tables.
 - Public search performs aggregation and pagination in PostgreSQL and only returns the requested page.
 - Metadata is cached in the API process.
 
