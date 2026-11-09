@@ -486,6 +486,8 @@ select.ssel-native { display: none; }
   padding: 11px 14px; border-radius: 8px;
   font-size: 14.5px; color: var(--ink-900);
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .ssel-item:hover { background: rgba(11,11,15,0.05); }
 .ssel-item.active { background: var(--ink-900); color: #fff; font-weight: 600; }
@@ -2125,10 +2127,9 @@ function enhanceSelect(selectEl, opts = {}) {
 
   btn.addEventListener("click", () => wrap.classList.contains("open") ? close() : open());
 
-  // One delegated handler for all options. This makes selection reliable
-  // even when the list is rebuilt after every search.
-  listEl.addEventListener("click", e => {
-    const item = e.target.closest(".ssel-item");
+  // Keep selection in one place so mouse clicks and mobile touch taps
+  // follow exactly the same update/change/close path.
+  function selectOption(item) {
     if (!item || !listEl.contains(item)) return;
     const value = item.dataset.value;
     if (selectEl.value !== value) {
@@ -2136,8 +2137,49 @@ function enhanceSelect(selectEl, opts = {}) {
       selectEl.dispatchEvent(new Event("change", { bubbles: true }));
     }
     close();
-    btn.focus({ preventScroll: true });
+    // Avoid forcing the mobile browser to scroll the page or reopen a
+    // software keyboard after a touch selection.
+    if (!window.matchMedia || !window.matchMedia("(pointer: coarse)").matches) {
+      btn.focus({ preventScroll: true });
+    }
+  }
+
+  // Mouse/keyboard activation.
+  listEl.addEventListener("click", e => {
+    const item = e.target.closest(".ssel-item");
+    if (!item || !listEl.contains(item)) return;
+    // A touch pointer may already have selected this row on pointerup.
+    if (item.dataset.touchSelected === "1") {
+      delete item.dataset.touchSelected;
+      return;
+    }
+    selectOption(item);
   });
+
+  // Android/iOS can lose the synthesized click when a tap occurs inside
+  // a momentum-scrolling list. Confirm a stationary touch on pointerup and
+  // select directly; a scroll gesture is never treated as a selection.
+  let touchStart = null;
+  listEl.addEventListener("pointerdown", e => {
+    if (e.pointerType !== "touch" && e.pointerType !== "pen") return;
+    const item = e.target.closest(".ssel-item");
+    if (item) delete item.dataset.touchSelected;
+    touchStart = item && listEl.contains(item)
+      ? { item, x: e.clientX, y: e.clientY, pointerId: e.pointerId }
+      : null;
+  }, { passive: true });
+  listEl.addEventListener("pointerup", e => {
+    if (!touchStart || e.pointerId !== touchStart.pointerId) return;
+    const start = touchStart;
+    touchStart = null;
+    const item = e.target.closest(".ssel-item");
+    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10;
+    if (!moved && item === start.item && listEl.contains(item)) {
+      item.dataset.touchSelected = "1";
+      selectOption(item);
+    }
+  }, { passive: true });
+  listEl.addEventListener("pointercancel", () => { touchStart = null; }, { passive: true });
 
   document.addEventListener("click", e => {
     if (!wrap.contains(e.target)) close();
