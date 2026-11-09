@@ -258,39 +258,6 @@ async def lifespan(_app):
 
 app=FastAPI(title='CET CAP Admin API', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
-# Temporary diagnostic middleware: proves whether an HTTP request reaches
-# the ASGI application, and correlates it with Render's request identifier.
-_request_trace_log = logging.getLogger("uvicorn.error")
-_request_trace_log.setLevel(logging.INFO)
-
-@app.middleware("http")
-async def trace_incoming_request(request: Request, call_next):
-    request_id = uuid.uuid4().hex
-    render_request_id = request.headers.get("rndr-id", "")
-    started = time.monotonic()
-    method = request.method
-    path = request.url.path
-    _request_trace_log.info(
-        "REQUEST_IN id=%s method=%s path=%s render_request_id=%s",
-        request_id, method, path, render_request_id or "-",
-    )
-    try:
-        response = await call_next(request)
-    except Exception:
-        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-        _request_trace_log.exception(
-            "REQUEST_ERROR id=%s method=%s path=%s elapsed_ms=%s render_request_id=%s",
-            request_id, method, path, elapsed_ms, render_request_id or "-",
-        )
-        raise
-    elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-    response.headers["X-CET-Request-ID"] = request_id
-    _request_trace_log.info(
-        "REQUEST_OUT id=%s method=%s path=%s status=%s elapsed_ms=%s render_request_id=%s",
-        request_id, method, path, response.status_code, elapsed_ms,
-        render_request_id or "-",
-    )
-    return response
 
 
 
