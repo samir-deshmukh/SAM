@@ -2702,8 +2702,9 @@ pctInput.addEventListener("keydown", e => {
 });
 
 /* ── Filters: re-render whenever a dropdown changes ── */
-citySelect.addEventListener("change", renderResults);
-courseSelect.addEventListener("change", renderResults);
+/* Do not pass the browser Event object as renderResults(page). */
+citySelect.addEventListener("change", () => renderResults());
+courseSelect.addEventListener("change", () => renderResults());
 
 /* ── Sort chips: click a chip to change the sort order ── */
 $("sortChips").addEventListener("click", e => {
