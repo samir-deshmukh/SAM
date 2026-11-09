@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from sqlalchemy import Engine, create_engine
 
+from backend.admin.db_telemetry import attach_pool_telemetry
+
 
 def get_engine(db_url: str | None = None) -> Engine:
     """Return the single authoritative PostgreSQL engine.
@@ -26,7 +28,7 @@ def get_engine(db_url: str | None = None) -> Engine:
     pool_timeout = float(os.getenv("CET_DB_POOL_TIMEOUT", "5"))
     if pool_size < 1 or max_overflow < 0 or pool_timeout <= 0:
         raise RuntimeError("CET_DB_POOL_SIZE/MAX_OVERFLOW/POOL_TIMEOUT must be positive (overflow may be zero).")
-    return create_engine(
+    engine = create_engine(
         url,
         pool_pre_ping=True,
         pool_size=pool_size,
@@ -35,3 +37,4 @@ def get_engine(db_url: str | None = None) -> Engine:
         pool_recycle=1800,
         future=True,
     )
+    return attach_pool_telemetry(engine, "public")

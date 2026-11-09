@@ -4,8 +4,10 @@ from fastapi import FastAPI,Request,UploadFile,File,HTTPException,Form,Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse,RedirectResponse,JSONResponse,FileResponse,Response,StreamingResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from starlette.concurrency import run_in_threadpool
 from .admin.db import connect,init_admin_schema,event
+from .admin.db_telemetry import set_request_endpoint, reset_request_endpoint, record_pool_timeout
 from .admin.security import verify_password,make_session,read_session,hash_password
 from .admin.network import client_ip
 from .admin.pipeline import run_preflight,MAX_PDF_BYTES,sha256_file,SUPPORTED_COURSE_FAMILIES
@@ -396,7 +398,11 @@ def hmac_compare(a: str,b: str) -> bool:
 
 @app.middleware('http')
 async def security_headers(request: Request, call_next):
-    response=await call_next(request)
+    endpoint_token = set_request_endpoint(request.url.path)
+    try:
+        response=await call_next(request)
+    finally:
+        reset_request_endpoint(endpoint_token)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
@@ -406,6 +412,20 @@ async def security_headers(request: Request, call_next):
     if _COOKIE_SECURE:
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
+@app.exception_handler(SQLAlchemyPoolTimeout)
+async def database_pool_timeout(request: Request, exc: SQLAlchemyPoolTimeout):
+    # Attribute public API timeouts to its pool; admin timeouts are counted at
+    # the acquisition site in backend.admin.db.Connection.
+    if request.url.path.startswith("/api/"):
+        try:
+            from .api import get_active_engine
+            engine = get_active_engine()
+            record_pool_timeout(engine, "public", endpoint=request.url.path)
+        except Exception:
+            log.exception("Could not record public database pool timeout")
+    return JSONResponse(status_code=503, content={"detail": "Database is busy. Please retry shortly."})
+
+
 @app.exception_handler(404)
 async def not_found(request: Request, exc: HTTPException):
     # Keep API/admin 404s machine-readable; render the candidate-facing 404 page for browser routes.
