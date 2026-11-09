@@ -185,7 +185,20 @@ def refresh(engine, course_family: str | None = None) -> None:
             conn.execute(text("DELETE FROM college_search_runtime WHERE program_family = :course"), params)
             conn.execute(text("DELETE FROM college_search_cutoff_points WHERE program_family = :course"), params)
         else:
-            conn.execute(text("TRUNCATE cutoff_trend_points, cutoff_college_year_summary, cutoff_filter_options, seat_matrix_runtime, college_search_runtime, college_search_cutoff_points"))
+            # Do not TRUNCATE serving tables during a live rebuild. PostgreSQL
+            # TRUNCATE takes ACCESS EXCLUSIVE and blocks public SELECTs until
+            # commit. DELETE is MVCC-safe: concurrent readers continue seeing
+            # the previous committed rows while this transaction builds the
+            # replacement, then see the complete new set after commit.
+            for table in (
+                "cutoff_trend_points",
+                "cutoff_college_year_summary",
+                "cutoff_filter_options",
+                "seat_matrix_runtime",
+                "college_search_runtime",
+                "college_search_cutoff_points",
+            ):
+                conn.execute(text(f"DELETE FROM {table}"))
 
         conn.execute(text(f"""
             INSERT INTO cutoff_trend_points
