@@ -2050,10 +2050,12 @@ function enhanceSelect(selectEl, opts = {}) {
       else if (text.includes(f)) matches.push({ item, rank: 3 });
     }
 
-    // Keep the placeholder at the top. It is a UI control, not a city,
-    // so it must never participate in alphabetical sorting.
-    matches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
-    const orderedMatches = matches;
+    // Empty-value options are placeholders, not selectable list entries.
+    // Keep them in the native select and closed button, but never show them
+    // among the actual choices in the popup.
+    const selectableMatches = matches.filter(({ item }) => item.opt.value !== "");
+    selectableMatches.sort((a, b) => a.rank - b.rank || a.item.label.localeCompare(b.item.label));
+    const orderedMatches = selectableMatches;
 
     // Build the visible list in one DOM operation. There is one delegated
     // click handler below, rather than one handler per option.
