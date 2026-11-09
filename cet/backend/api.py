@@ -46,7 +46,7 @@ router = APIRouter(prefix="/api", tags=["Public Portal API"])
 
 # Rate limiting state: client_ip -> list of monotonic timestamps
 RATE_LIMIT_WINDOW_SECONDS = 300
-RATE_LIMIT_MAX_REQUESTS = 2000
+RATE_LIMIT_MAX_REQUESTS = 10000
 RATE_LIMIT_MAX_KEYS = 5000
 _request_history: dict[str, list[float]] = {}
 
