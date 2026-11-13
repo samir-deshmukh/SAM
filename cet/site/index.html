@@ -523,6 +523,11 @@ select.ssel-native { display: none; }
 }
 .results-count strong { font-family: Georgia, 'Times New Roman', serif; font-size: 28px; font-weight: 600; color: var(--ink-900); margin-right: 8px; }
 .results-count span { color: var(--paper-700); font-size: 13.5px; font-weight: 500; }
+.college-search { display:flex; align-items:center; gap:8px; flex:1 1 260px; max-width:380px; }
+.college-search input { width:100%; min-width:0; padding:11px 14px; border:1px solid rgba(232,232,228,.95); border-radius:10px; background:var(--paper-50); color:var(--ink-900); font:inherit; font-size:13px; outline:none; }
+.college-search input:focus { border-color:var(--ink-700); box-shadow:0 0 0 3px rgba(11,11,15,.07); }
+.college-search button { flex:0 0 auto; padding:10px 12px; border:1px solid rgba(232,232,228,.95); border-radius:10px; background:transparent; color:var(--paper-700); font:inherit; font-size:12px; cursor:pointer; }
+.college-search button:hover { color:var(--ink-900); border-color:var(--paper-500); }
 
 .chip-group { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip {                              /* sort buttons: "Cutoff ↓", "Name A–Z" */
@@ -1537,6 +1542,10 @@ footer .footer-grid { border-top-color:#444444!important; }
         <div class="results-bar">
           <!-- "42 colleges match your profile" — numbers are set by JS -->
           <div class="results-count"><strong id="resultCount">0</strong><span id="resultLabel">colleges match your profile</span></div>
+          <div class="college-search">
+            <input id="collegeNameSearch" type="search" placeholder="Search college name..." autocomplete="off" aria-label="Search colleges by name">
+            <button type="button" id="clearCollegeSearch" hidden>Clear</button>
+          </div>
           <!-- Filter-by select: Rank or Percentile — JS reads data-sort -->
           <div class="chip-group" id="sortChips">
             <button class="chip active" data-sort="percentile">Filter by Percentile</button>
@@ -2184,6 +2193,8 @@ const citySelect   = $("citySelect");
 const courseSelect = $("courseSelect");
 const pctInput     = $("pctInput");
 const resultsBody  = $("resultsBody");
+const collegeNameSearch = $("collegeNameSearch");
+const clearCollegeSearch = $("clearCollegeSearch");
 const resultCount  = $("resultCount");
 const resultLabel  = $("resultLabel");
 const drawer       = $("drawer");
@@ -2339,84 +2350,54 @@ function getFiltered() {
 
 function renderResultsTable() {
   const list = CONFIG.colleges;
-  const searched = citySelect.value !== CONFIG.unselected &&
-                    courseSelect.value !== CONFIG.unselected &&
-                    currentPct !== null;
+  const searched = citySelect.value !== CONFIG.unselected && courseSelect.value !== CONFIG.unselected && currentPct !== null;
+  const query = collegeNameSearch.value.trim().toLocaleLowerCase();
+  const filtered = query ? list.filter(c => String(c.name || "").toLocaleLowerCase().includes(query)) : list;
+  const total = filtered.length;
+  const totalPages = Math.ceil(total / SEARCH_PAGE_SIZE);
+  if (currentSearchPage > Math.max(1, totalPages)) currentSearchPage = Math.max(1, totalPages);
+  resultCount.textContent = searched ? total : 0;
+  resultLabel.textContent = total === 1 ? "college matches your profile" : "colleges match your profile";
+  clearCollegeSearch.hidden = !collegeNameSearch.value;
 
-  /* Update the "42 colleges match" text */
-  resultCount.textContent = totalSearchResults;
-  resultLabel.textContent = totalSearchResults === 1
-    ? "college matches your profile"
-    : "colleges match your profile";
-
-  /* Nothing searched yet → prompt, not an empty result. No <tr> is
-     rendered at all here (not even a data-id-less placeholder row),
-     so there is nothing in the table for a click to accidentally land
-     on and open a slide before a real search has happened. */
   if (!searched) {
     document.getElementById("resultsPagination").hidden = true;
-    resultsBody.innerHTML = `
-      <tr class="no-row"><td colspan="4">
-        <div class="empty-state">
-          <h4>Search to see colleges</h4>
-          <p>Pick a city, a course, and type your percentile above.</p>
-        </div>
-      </td></tr>`;
+    resultsBody.innerHTML = `<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>Search to see colleges</h4><p>Pick a city, a course, and type your percentile above.</p></div></td></tr>`;
     return;
   }
-
-  /* Empty state — a real search that matched nothing */
-  if (!totalSearchResults || !list.length) {
+  if (!list.length || !total) {
     document.getElementById("resultsPagination").hidden = true;
-    resultsBody.innerHTML = `
-      <tr class="no-row"><td colspan="4">
-        <div class="empty-state">
-          <h4>No colleges found</h4>
-          <p>Try a different city or course, or adjusting your percentile.</p>
-        </div>
-      </td></tr>`;
+    resultsBody.innerHTML = `<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>${query ? "No matching college found" : "No colleges found"}</h4><p>${query ? "Try another college name or clear your search." : "Try a different city or course, or adjust your percentile."}</p></div></td></tr>`;
     return;
   }
-
-  /* Build one <tr> per college */
-  resultsBody.innerHTML = list.map((c, i) => {
+  const first = (currentSearchPage - 1) * SEARCH_PAGE_SIZE;
+  const visible = filtered.slice(first, first + SEARCH_PAGE_SIZE);
+  resultsBody.innerHTML = visible.map(c => {
     const { hi, lo } = percentileRange(c);
     const st = getStatus(currentPct, lo, hi);
-    return `
-      <tr data-id="${c.id}" class="${openId === c.id ? "active" : ""}">
-        <td>
-          <span class="college-name">${c.name}</span>
-          <span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${courseDisplayLabel(c.course)}</span>
-        </td>
-        <td><span class="cutoff-num">${c.cutoff}</span></td>
-        <td><span class="pct-num">${hi.toFixed(2)}–${lo.toFixed(2)}%</span></td>
-        <td>
-          <span class="status-dot ${CONFIG.statusClasses[st.key]}"></span>
-          <span class="status-label">${st.label}</span>
-        </td>
-      </tr>`;
+    return `<tr data-id="${c.id}" class="${openId === c.id ? "active" : ""}"><td><span class="college-name">${c.name}</span><span class="college-meta">${c.institution_code} · ${c.city ?? "City unknown"} · ${courseDisplayLabel(c.course)}</span></td><td><span class="cutoff-num">${c.cutoff}</span></td><td><span class="pct-num">${hi.toFixed(2)}–${lo.toFixed(2)}%</span></td><td><span class="status-dot ${CONFIG.statusClasses[st.key]}"></span><span class="status-label">${st.label}</span></td></tr>`;
   }).join("");
-  renderResultsPagination();
+  renderResultsPagination(total);
 }
 
 const SEARCH_PAGE_SIZE = 10;
 let currentSearchPage = 1;
 let totalSearchResults = 0;
 
-function renderResultsPagination() {
+function renderResultsPagination(filteredTotal) {
   const pagination = document.getElementById("resultsPagination");
-  const totalPages = Math.ceil(totalSearchResults / SEARCH_PAGE_SIZE);
+  const totalPages = Math.ceil(filteredTotal / SEARCH_PAGE_SIZE);
   if (totalPages <= 1) {
     pagination.hidden = true;
     pagination.innerHTML = "";
     return;
   }
   const firstResult = (currentSearchPage - 1) * SEARCH_PAGE_SIZE + 1;
-  const lastResult = Math.min(currentSearchPage * SEARCH_PAGE_SIZE, totalSearchResults);
+  const lastResult = Math.min(currentSearchPage * SEARCH_PAGE_SIZE, filteredTotal);
   pagination.hidden = false;
   pagination.innerHTML =
     '<button type="button" class="results-page-button" data-page="previous" aria-label="Previous page" ' + (currentSearchPage <= 1 ? "disabled" : "") + '>← Previous</button>' +
-    '<span class="results-page-status">Showing ' + firstResult + "–" + lastResult + " of " + totalSearchResults + " · Page " + currentSearchPage + " of " + totalPages + '</span>' +
+    '<span class="results-page-status">Showing ' + firstResult + "–" + lastResult + " of " + filteredTotal + " · Page " + currentSearchPage + " of " + totalPages + '</span>' +
     '<button type="button" class="results-page-button" data-page="next" aria-label="Next page" ' + (currentSearchPage >= totalPages ? "disabled" : "") + '>Next →</button>';
 }
 
@@ -2424,7 +2405,9 @@ document.getElementById("resultsPagination").addEventListener("click", event => 
   const button = event.target.closest("button[data-page]");
   if (!button || button.disabled) return;
   const nextPage = currentSearchPage + (button.dataset.page === "next" ? 1 : -1);
-  if (nextPage >= 1 && nextPage <= Math.ceil(totalSearchResults / SEARCH_PAGE_SIZE)) renderResults(nextPage);
+  const q = collegeNameSearch.value.trim().toLocaleLowerCase();
+  const matches = q ? CONFIG.colleges.filter(c => String(c.name || "").toLocaleLowerCase().includes(q)).length : CONFIG.colleges.length;
+  if (nextPage >= 1 && nextPage <= Math.ceil(matches / SEARCH_PAGE_SIZE)) { currentSearchPage = nextPage; renderResultsTable(); }
 });
 
 let searchTimer = null;
@@ -2461,8 +2444,8 @@ function renderResults(page = 1) {
         city,
         location_type: locationType,
         sort: currentSort === "rank" ? "rank" : "comp",
-        page: String(currentSearchPage),
-        page_size: String(SEARCH_PAGE_SIZE)
+        page: "1",
+        page_size: "50"
       });
       const response = await fetch(`${API_BASE}/api/search?` + params.toString(), {
         headers: { "Accept": "application/json" },
@@ -2472,8 +2455,8 @@ function renderResults(page = 1) {
       const payload = await response.json();
       if (seq !== searchSequence) return;
       CONFIG.colleges = Array.isArray(payload.results) ? payload.results : [];
-      totalSearchResults = Number(payload.total) || 0;
-      currentSearchPage = Number(payload.page) || currentSearchPage;
+      totalSearchResults = CONFIG.colleges.length;
+      currentSearchPage = 1;
       renderResultsTable();
     } catch (err) {
       if (err.name === "AbortError") return;
@@ -2700,6 +2683,9 @@ pctInput.addEventListener("keydown", e => {
     $("results").scrollIntoView({ behavior: "smooth" });
   }
 });
+
+collegeNameSearch.addEventListener("input", () => { currentSearchPage = 1; renderResultsTable(); });
+clearCollegeSearch.addEventListener("click", () => { collegeNameSearch.value = ""; currentSearchPage = 1; renderResultsTable(); collegeNameSearch.focus(); });
 
 /* ── Filters: re-render whenever a dropdown changes ── */
 /* Do not pass the browser Event object as renderResults(page). */
