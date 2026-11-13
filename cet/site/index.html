@@ -1543,7 +1543,7 @@ footer .footer-grid { border-top-color:#444444!important; }
           <!-- "42 colleges match your profile" — numbers are set by JS -->
           <div class="results-count"><strong id="resultCount">0</strong><span id="resultLabel">colleges match your profile</span></div>
           <div class="college-search">
-            <input id="collegeNameSearch" type="search" placeholder="Search college name..." autocomplete="off" aria-label="Search colleges by name">
+            <input id="collegeNameSearch" type="search" placeholder="Search college name or ID..." autocomplete="off" aria-label="Search colleges by name or ID">
             <button type="button" id="clearCollegeSearch" hidden>Clear</button>
           </div>
           <!-- Filter-by select: Rank or Percentile — JS reads data-sort -->
@@ -2348,11 +2348,17 @@ function getFiltered() {
   return list;
 }
 
+function collegeMatchesSearch(c, query) {
+  if (!query) return true;
+  return [c.name, c.id, c.institution_code]
+    .some(value => String(value ?? "").toLocaleLowerCase().includes(query));
+}
+
 function renderResultsTable() {
   const list = CONFIG.colleges;
   const searched = citySelect.value !== CONFIG.unselected && courseSelect.value !== CONFIG.unselected && currentPct !== null;
   const query = collegeNameSearch.value.trim().toLocaleLowerCase();
-  const filtered = query ? list.filter(c => String(c.name || "").toLocaleLowerCase().includes(query)) : list;
+  const filtered = query ? list.filter(c => collegeMatchesSearch(c, query)) : list;
   const total = filtered.length;
   const totalPages = Math.ceil(total / SEARCH_PAGE_SIZE);
   if (currentSearchPage > Math.max(1, totalPages)) currentSearchPage = Math.max(1, totalPages);
@@ -2367,7 +2373,7 @@ function renderResultsTable() {
   }
   if (!list.length || !total) {
     document.getElementById("resultsPagination").hidden = true;
-    resultsBody.innerHTML = `<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>${query ? "No matching college found" : "No colleges found"}</h4><p>${query ? "Try another college name or clear your search." : "Try a different city or course, or adjust your percentile."}</p></div></td></tr>`;
+    resultsBody.innerHTML = `<tr class="no-row"><td colspan="4"><div class="empty-state"><h4>${query ? "No matching college found" : "No colleges found"}</h4><p>${query ? "Try another college name or ID, or clear your search." : "Try a different city or course, or adjust your percentile."}</p></div></td></tr>`;
     return;
   }
   const first = (currentSearchPage - 1) * SEARCH_PAGE_SIZE;
@@ -2406,7 +2412,7 @@ document.getElementById("resultsPagination").addEventListener("click", event => 
   if (!button || button.disabled) return;
   const nextPage = currentSearchPage + (button.dataset.page === "next" ? 1 : -1);
   const q = collegeNameSearch.value.trim().toLocaleLowerCase();
-  const matches = q ? CONFIG.colleges.filter(c => String(c.name || "").toLocaleLowerCase().includes(q)).length : CONFIG.colleges.length;
+  const matches = q ? CONFIG.colleges.filter(c => collegeMatchesSearch(c, q)).length : CONFIG.colleges.length;
   if (nextPage >= 1 && nextPage <= Math.ceil(matches / SEARCH_PAGE_SIZE)) { currentSearchPage = nextPage; renderResultsTable(); }
 });
 
